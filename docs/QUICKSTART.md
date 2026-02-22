@@ -17,9 +17,12 @@ export HF_USE_P2P=1
 export HF_P2P_TRACKER=http://your-tracker.com  # 可选
 ```
 
-### 步骤 2：正常使用 HuggingFace Hub
+### 步骤 2：使用 HuggingFace Hub
 
 ```python
+# 添加这一行（会自动检测环境变量并启用 P2P）
+import llmpt
+
 from huggingface_hub import snapshot_download
 
 # 这将自动使用 P2P 下载
@@ -27,7 +30,7 @@ path = snapshot_download("gpt2")
 print(f"下载到：{path}")
 ```
 
-就这么简单！你的下载现在已经是 P2P 加速的了。
+就这么简单！只需添加一行 `import llmpt`，你的下载现在已经是 P2P 加速的了。
 
 ## 替代方案：显式启用
 

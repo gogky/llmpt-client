@@ -9,7 +9,7 @@ HuggingFace Hub 模型的 P2P 加速下载客户端
 - 📦 **自动降级**：P2P 失败时自动降级到 HTTP
 - 🔄 **自动做种**：下载完成后自动做种，帮助其他用户
 - 💾 **断点续传**：支持恢复中断的下载
-- 🎯 **零代码修改**：仅需设置环境变量即可启用 P2P
+- 🎯 **最小代码修改**：只需添加一行 `import llmpt` 即可启用 P2P
 
 ## 安装
 
@@ -33,7 +33,10 @@ export HF_P2P_TRACKER=http://your-tracker.com  # 可选，不设置则使用默�
 ```
 
 ```python
-# 你的代码无需修改
+# 只需添加一行 import（会自动检测环境变量并启用 P2P）
+import llmpt
+
+# 其余代码无需修改
 from huggingface_hub import snapshot_download
 
 # 自动使用 P2P 下载
