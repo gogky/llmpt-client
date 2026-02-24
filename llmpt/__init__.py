@@ -7,6 +7,7 @@ using BitTorrent protocol. It works as a drop-in replacement with zero code chan
 Usage:
     # Method 1: Environment variable
     export HF_USE_P2P=1
+    import llmpt
     from huggingface_hub import snapshot_download
     snapshot_download("meta-llama/Llama-2-7b")  # Automatically uses P2P
 

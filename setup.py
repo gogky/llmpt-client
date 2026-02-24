@@ -32,7 +32,7 @@ setup(
     python_requires=">=3.8",
     install_requires=[
         "huggingface-hub>=0.20.0",
-        "python-libtorrent>=2.0.0",
+        "libtorrent>=2.0.0",
         "requests>=2.28.0",
         "tqdm>=4.65.0",
     ],
