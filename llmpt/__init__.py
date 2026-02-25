@@ -83,7 +83,7 @@ def enable_p2p(
     if not _LIBTORRENT_AVAILABLE:
         logger.warning(
             "⚠️  libtorrent not available. P2P downloads disabled.\n"
-            "   Install with: pip install python-libtorrent"
+            "   Install with: pip install libtorrent"
         )
         return
 

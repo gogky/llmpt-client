@@ -25,40 +25,30 @@ class TrackerClient:
         self.timeout = timeout
         self.session = requests.Session()
 
-    def get_torrent_info(
-        self,
-        repo_id: str,
-        filename: str,
-        commit_hash: Optional[str] = None
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Query tracker for torrent information.
+        def get_torrent_info(
+            self,
+            repo_id: str,
+            filename: str,
+            revision: Optional[str] = None
+        ) -> Optional[Dict[str, Any]]:
+            """
+            Query tracker for torrent information.
 
-        Args:
-            repo_id: HuggingFace repository ID (e.g., "meta-llama/Llama-2-7b").
-            filename: File name within the repository.
-            commit_hash: Git commit hash. If None, uses latest.
+            Args:
+                repo_id: HuggingFace repository ID (e.g., "meta-llama/Llama-2-7b").
+                filename: File name within the repository.
+                revision: Git commit hash or branch name. If None, uses latest.
 
-        Returns:
-            Dictionary containing torrent info (magnet_link, info_hash, etc.)
-            or None if torrent doesn't exist.
-
-        Example:
-            >>> client = TrackerClient("http://tracker.example.com")
-            >>> info = client.get_torrent_info("gpt2", "config.json")
-            >>> if info:
-            ...     print(info['magnet_link'])
-        """
-        try:
-            url = urljoin(self.tracker_url, '/api/v1/torrents')
-            params = {
-                'repo_id': repo_id,
-                'filename': filename,
-            }
-            if commit_hash:
-                params['commit_hash'] = commit_hash
-
-            logger.debug(f"Querying tracker: {url} with params {params}")
+            Returns:
+                Dictionary containing torrent info (magnet_link, info_hash, etc.)
+                or None if torrent doesn't exist.
+            """
+            try:
+                url = urljoin(self.tracker_url, '/api/v1/torrents')
+                # Server only filters by repo_id
+                params = {'repo_id': repo_id}
+                
+                logger.debug(f"Querying tracker: {url} with params {params}")
 
             response = self.session.get(
                 url,
@@ -73,16 +63,26 @@ class TrackerClient:
             response.raise_for_status()
             data = response.json()
 
-            if data.get('torrents') and len(data['torrents']) > 0:
-                torrent = data['torrents'][0]
-                logger.info(
-                    f"Found torrent for {repo_id}/{filename}: "
-                    f"{torrent.get('info_hash', 'N/A')}"
-                )
-                return torrent
-            else:
-                logger.debug(f"No torrent found for {repo_id}/{filename}")
+            # Server returns {"total": N, "data": [...]}
+            torrents = data.get('data', [])
+            
+            if not torrents:
+                logger.debug(f"No torrent found for {repo_id}")
                 return None
+
+            # Filter locally by revision if provided
+            if revision:
+                for t in torrents:
+                    if t.get('revision') == revision:
+                        logger.info(f"Found torrent for {repo_id} (revision: {revision}): {t.get('info_hash', 'N/A')}")
+                        return t
+                logger.debug(f"No torrent found for {repo_id} at revision {revision}")
+                return None
+            else:
+                # Return the most recently created one (server sorts by created_at DESC)
+                torrent = torrents[0]
+                logger.info(f"Found latest torrent for {repo_id}: {torrent.get('info_hash', 'N/A')}")
+                return torrent
 
         except requests.RequestException as e:
             logger.warning(f"Failed to query tracker: {e}")
@@ -91,11 +91,13 @@ class TrackerClient:
     def register_torrent(
         self,
         repo_id: str,
-        filename: str,
-        commit_hash: str,
+        revision: str,
+        repo_type: str,
+        name: str,
         info_hash: str,
+        total_size: int,
+        file_count: int,
         magnet_link: str,
-        file_size: int,
         piece_length: int,
     ) -> bool:
         """
@@ -103,37 +105,29 @@ class TrackerClient:
 
         Args:
             repo_id: HuggingFace repository ID.
-            filename: File name within the repository.
-            commit_hash: Git commit hash.
+            revision: Git commit hash or branch name.
+            repo_type: "model", "dataset", or "space".
+            name: Display name for the model.
             info_hash: BitTorrent info hash.
+            total_size: Total size in bytes.
+            file_count: Number of files in the torrent.
             magnet_link: Magnet link for the torrent.
-            file_size: File size in bytes.
             piece_length: Piece length in bytes.
 
         Returns:
             True if registration successful, False otherwise.
-
-        Example:
-            >>> client = TrackerClient("http://tracker.example.com")
-            >>> success = client.register_torrent(
-            ...     repo_id="gpt2",
-            ...     filename="config.json",
-            ...     commit_hash="abc123...",
-            ...     info_hash="def456...",
-            ...     magnet_link="magnet:?xt=...",
-            ...     file_size=1234,
-            ...     piece_length=16777216
-            ... )
         """
         try:
             url = urljoin(self.tracker_url, '/api/v1/publish')
             data = {
                 'repo_id': repo_id,
-                'filename': filename,
-                'commit_hash': commit_hash,
+                'revision': revision,
+                'repo_type': repo_type,
+                'name': name,
                 'info_hash': info_hash,
+                'total_size': total_size,
+                'file_count': file_count,
                 'magnet_link': magnet_link,
-                'file_size': file_size,
                 'piece_length': piece_length,
             }
 
@@ -146,7 +140,7 @@ class TrackerClient:
             )
 
             response.raise_for_status()
-            logger.info(f"Successfully registered torrent for {repo_id}/{filename}")
+            logger.info(f"Successfully registered torrent for {repo_id} (revision: {revision})")
             return True
 
         except requests.RequestException as e:

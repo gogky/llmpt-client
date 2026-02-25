@@ -83,39 +83,39 @@ def apply_patch(config: dict) -> None:
             _context.config = prev_config
 
     def patched_http_get(url: str, temp_file, **kwargs):
-        """Patched version of http_get that uses P2P when available."""
-        # Check if we have P2P context
+        """Patched version of http_get that uses P2P batch manager when available."""
+        # Check if we have P2P context (injected by matched hf_hub_download)
         repo_id = getattr(_context, 'repo_id', None)
         filename = getattr(_context, 'filename', None)
+        revision = getattr(_context, 'revision', None)
         tracker = getattr(_context, 'tracker', None)
-        config = getattr(_context, 'config', None)
+        config = getattr(_context, 'config', {})
 
-        if repo_id and filename and tracker:
-            # Try P2P download
+        if repo_id and filename and tracker and revision:
             try:
-                from .downloader import try_p2p_download
+                from .p2p_batch import P2PBatchManager
+                logger.info(f"[P2P] Intercepted HTTP request for {repo_id}/{filename} (rev: {revision})")
 
-                logger.info(f"[P2P] Attempting P2P download: {repo_id}/{filename}")
-
-                success = try_p2p_download(
+                manager = P2PBatchManager()
+                success = manager.register_request(
                     repo_id=repo_id,
+                    revision=revision,
                     filename=filename,
-                    url=url,
-                    temp_file=temp_file,
-                    tracker=tracker,
-                    config=config,
-                    **kwargs
+                    temp_file_path=temp_file.name,
+                    tracker_client=tracker,
+                    timeout=config.get('timeout', 300)
                 )
 
                 if success:
-                    logger.info(f"[P2P] Successfully downloaded via P2P")
-                    return
+                    logger.info(f"[P2P] Successfully delivered {filename} via P2P.")
+                    return  # Skip original http_get completely!
                 else:
-                    logger.warning(f"[P2P] P2P download failed, falling back to HTTP")
-            except Exception as e:
-                logger.warning(f"[P2P] P2P download error: {e}, falling back to HTTP")
+                    logger.warning(f"[P2P] P2P fulfillment failed for {filename}. Falling back to HTTP.")
 
-        # Fall back to original HTTP download via local reference
+            except Exception as e:
+                logger.warning(f"[P2P] Exception in P2P intercept: {e}. Falling back to HTTP.")
+
+        # Fall back to original HTTP download via local reference if P2P failed or unavailable
         return orig_http(url, temp_file, **kwargs)
 
     # Apply patches
