@@ -123,7 +123,7 @@ class SessionContext:
         logger.info(f"[{self.repo_id}] Initializing P2P session for revision {self.revision}")
         
         # 1. Ask tracker for torrent info
-        torrent_metadata = self.tracker_client.get_torrent_info(self.repo_id, "", self.revision)
+        torrent_metadata = self.tracker_client.get_torrent_info(self.repo_id, self.revision)
         if not torrent_metadata or 'magnet_link' not in torrent_metadata:
             logger.warning(f"[{self.repo_id}] No torrent metadata found on tracker.")
             self.is_valid = False

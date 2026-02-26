@@ -4,7 +4,7 @@ Torrent creation utilities.
 
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
 try:
     import libtorrent as lt
@@ -52,7 +52,10 @@ def create_torrent(
 
         # Create file storage
         fs = lt.file_storage()
-        fs.add_file(str(file_path), file_path.stat().st_size)
+        if file_path.is_dir():
+            lt.add_files(fs, str(file_path))
+        else:
+            fs.add_file(file_path.name, file_path.stat().st_size)
 
         # Create torrent
         t = lt.create_torrent(fs, piece_length)
@@ -84,9 +87,10 @@ def create_torrent(
         return {
             'info_hash': info_hash,
             'magnet_link': magnet_link,
-            'file_size': file_path.stat().st_size,
+            'file_size': sum(f.stat().st_size for f in file_path.rglob('*') if f.is_file()) if file_path.is_dir() else file_path.stat().st_size,
             'piece_length': piece_length,
             'num_pieces': info.num_pieces(),
+            'num_files': info.num_files(),
         }
 
     except Exception as e:
@@ -97,8 +101,9 @@ def create_torrent(
 def create_and_register_torrent(
     file_path: str,
     repo_id: str,
-    filename: str,
-    commit_hash: str,
+    revision: str,
+    repo_type: str,
+    name: str,
     tracker_client: Any,
     piece_length: int = 16 * 1024 * 1024,
 ) -> bool:
@@ -108,8 +113,9 @@ def create_and_register_torrent(
     Args:
         file_path: Path to the file.
         repo_id: HuggingFace repository ID.
-        filename: File name within the repository.
-        commit_hash: Git commit hash.
+        revision: Git commit hash or branch name.
+        repo_type: The type of repository (e.g., 'model').
+        name: The display name of the model.
         tracker_client: TrackerClient instance.
         piece_length: Piece length in bytes.
 
@@ -129,11 +135,13 @@ def create_and_register_torrent(
     # Register with tracker
     success = tracker_client.register_torrent(
         repo_id=repo_id,
-        filename=filename,
-        commit_hash=commit_hash,
+        revision=revision,
+        repo_type=repo_type,
+        name=name,
         info_hash=torrent_info['info_hash'],
+        total_size=torrent_info['file_size'],
+        file_count=torrent_info.get('num_files', 1),
         magnet_link=torrent_info['magnet_link'],
-        file_size=torrent_info['file_size'],
         piece_length=torrent_info['piece_length'],
     )
 

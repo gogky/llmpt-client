@@ -50,17 +50,17 @@ def test_get_torrent_info_success(tracker_client):
     )
     
     # 1. Test getting latest (no revision specified) - should return first item
-    result = tracker_client.get_torrent_info("meta-llama/Llama-2", "model.bin")
+    result = tracker_client.get_torrent_info("meta-llama/Llama-2")
     assert result is not None
     assert result["info_hash"] == "12345"
     
     # 2. Test getting specific revision
-    result_rev = tracker_client.get_torrent_info("meta-llama/Llama-2", "model.bin", revision="old_branch")
+    result_rev = tracker_client.get_torrent_info("meta-llama/Llama-2", revision="old_branch")
     assert result_rev is not None
     assert result_rev["info_hash"] == "67890"
 
     # 3. Test non-existent revision
-    result_none = tracker_client.get_torrent_info("meta-llama/Llama-2", "model.bin", revision="nonexistent")
+    result_none = tracker_client.get_torrent_info("meta-llama/Llama-2", revision="nonexistent")
     assert result_none is None
 
 
@@ -73,7 +73,7 @@ def test_get_torrent_info_not_found(tracker_client):
         status=404
     )
     
-    result = tracker_client.get_torrent_info("demo", "file")
+    result = tracker_client.get_torrent_info("demo")
     assert result is None
 
 
@@ -87,7 +87,7 @@ def test_get_torrent_info_empty_data(tracker_client):
         status=200
     )
     
-    result = tracker_client.get_torrent_info("demo", "file")
+    result = tracker_client.get_torrent_info("demo")
     assert result is None
 
 
@@ -100,7 +100,7 @@ def test_get_torrent_info_timeout(tracker_client):
         body=requests.exceptions.ReadTimeout()
     )
     
-    result = tracker_client.get_torrent_info("demo", "file")
+    result = tracker_client.get_torrent_info("demo")
     assert result is None
 
 

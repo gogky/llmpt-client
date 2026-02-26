@@ -28,7 +28,6 @@ class TrackerClient:
     def get_torrent_info(
         self,
         repo_id: str,
-        filename: str,
         revision: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """
@@ -36,7 +35,6 @@ class TrackerClient:
 
         Args:
             repo_id: HuggingFace repository ID (e.g., "meta-llama/Llama-2-7b").
-            filename: File name within the repository.
             revision: Git commit hash or branch name. If None, uses latest.
 
         Returns:
@@ -57,7 +55,7 @@ class TrackerClient:
             )
 
             if response.status_code == 404:
-                logger.debug(f"No torrent found for {repo_id}/{filename}")
+                logger.debug(f"No torrent found for {repo_id}")
                 return None
 
             response.raise_for_status()

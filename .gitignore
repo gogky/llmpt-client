@@ -67,3 +67,5 @@ Thumbs.db
 *.torrent
 *.incomplete
 .llmpt/
+AGENTS.md
+API.md

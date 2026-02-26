@@ -52,7 +52,7 @@ def try_p2p_download(
     # Query tracker for torrent info
     # Note: We need commit_hash, but it's not available here yet
     # For now, query without commit_hash (tracker returns latest)
-    torrent_info = tracker.get_torrent_info(repo_id, filename)
+    torrent_info = tracker.get_torrent_info(repo_id)
 
     if not torrent_info:
         logger.info(f"No torrent found for {repo_id}/{filename}")
