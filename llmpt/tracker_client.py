@@ -25,30 +25,30 @@ class TrackerClient:
         self.timeout = timeout
         self.session = requests.Session()
 
-        def get_torrent_info(
-            self,
-            repo_id: str,
-            filename: str,
-            revision: Optional[str] = None
-        ) -> Optional[Dict[str, Any]]:
-            """
-            Query tracker for torrent information.
+    def get_torrent_info(
+        self,
+        repo_id: str,
+        filename: str,
+        revision: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Query tracker for torrent information.
 
-            Args:
-                repo_id: HuggingFace repository ID (e.g., "meta-llama/Llama-2-7b").
-                filename: File name within the repository.
-                revision: Git commit hash or branch name. If None, uses latest.
+        Args:
+            repo_id: HuggingFace repository ID (e.g., "meta-llama/Llama-2-7b").
+            filename: File name within the repository.
+            revision: Git commit hash or branch name. If None, uses latest.
 
-            Returns:
-                Dictionary containing torrent info (magnet_link, info_hash, etc.)
-                or None if torrent doesn't exist.
-            """
-            try:
-                url = urljoin(self.tracker_url, '/api/v1/torrents')
-                # Server only filters by repo_id
-                params = {'repo_id': repo_id}
-                
-                logger.debug(f"Querying tracker: {url} with params {params}")
+        Returns:
+            Dictionary containing torrent info (magnet_link, info_hash, etc.)
+            or None if torrent doesn't exist.
+        """
+        try:
+            url = urljoin(self.tracker_url, '/api/v1/torrents')
+            # Server only filters by repo_id
+            params = {'repo_id': repo_id}
+            
+            logger.debug(f"Querying tracker: {url} with params {params}")
 
             response = self.session.get(
                 url,
