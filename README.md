@@ -149,6 +149,10 @@ pip install -e ".[dev]"
 pytest tests/
 ```
 
+```bash
+docker-compose -f docker-compose.test.yml up --build
+```
+
 ### 项目结构
 
 ```
