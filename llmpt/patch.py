@@ -57,6 +57,14 @@ def apply_patch(config: dict) -> None:
         # Get commit_hash from kwargs or resolve it
         revision = kwargs.get('revision', 'main')
 
+        # Resolve subfolder exactly as huggingface_hub does
+        actual_filename = filename
+        subfolder = kwargs.get('subfolder')
+        if subfolder == "":
+            subfolder = None
+        if subfolder is not None:
+            actual_filename = f"{subfolder}/{filename}"
+
         # Backup previous context (in case of nested/recursive hf_hub_download calls)
         prev_repo_id = getattr(_context, 'repo_id', None)
         prev_filename = getattr(_context, 'filename', None)
@@ -66,7 +74,7 @@ def apply_patch(config: dict) -> None:
 
         # Store context for http_get to use
         _context.repo_id = repo_id
-        _context.filename = filename
+        _context.filename = actual_filename
         _context.revision = revision
         _context.tracker = tracker
         _context.config = config
