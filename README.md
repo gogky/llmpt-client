@@ -227,6 +227,13 @@ except ImportError:
 curl http://your-tracker.com/api/v1/torrents
 ```
 
+### P2P 下载失效（退化为纯 HTTP 下载）
+
+如果你在 Python 脚本中调用，但发现 P2P 完全没起作用（甚至没有尝试）：
+请务必保证 `import llmpt` 出现在任何 `huggingface_hub` 导入和调用**之前**！
+否则旧的指针会被提取，导致底层的猴子补丁（Monkey Patch）完全失效。
+
+
 ## 路线图
 
 - [x] 基础 P2P 下载

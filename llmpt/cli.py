@@ -68,23 +68,24 @@ Examples:
         help='Create torrent and start seeding'
     )
     seed_parser.add_argument(
-        'file_path',
-        help='Path to file to seed'
-    )
-    seed_parser.add_argument(
         '--repo-id',
         required=True,
         help='Repository ID'
     )
     seed_parser.add_argument(
-        '--filename',
+        '--revision',
         required=True,
-        help='File name within repository'
+        help='Git commit hash or branch name'
     )
     seed_parser.add_argument(
-        '--commit-hash',
-        required=True,
-        help='Git commit hash'
+        '--repo-type',
+        default='model',
+        help='Repository type'
+    )
+    seed_parser.add_argument(
+        '--name',
+        default='HF Model',
+        help='Display name'
     )
 
     # Status command
@@ -154,33 +155,33 @@ def cmd_seed(args):
     from llmpt.torrent_creator import create_and_register_torrent
     from llmpt.seeder import start_seeding
 
-    file_path = Path(args.file_path)
-    if not file_path.exists():
-        print(f"Error: File not found: {file_path}")
-        sys.exit(1)
-
     tracker = TrackerClient(args.tracker or 'http://localhost:8080')
 
-    print(f"Creating torrent for {file_path.name}...")
+    print(f"Resolving caching structure and creating torrent for {args.repo_id}@{args.revision}...")
 
     # Create and register torrent
     success = create_and_register_torrent(
-        file_path=str(file_path),
         repo_id=args.repo_id,
-        filename=args.filename,
-        commit_hash=args.commit_hash,
+        revision=args.revision,
+        repo_type=args.repo_type,
+        name=args.name,
         tracker_client=tracker,
     )
 
     if not success:
-        print("Error: Failed to create torrent")
+        print("Error: Failed to create or register torrent")
         sys.exit(1)
 
     print("✓ Torrent created and registered")
-    print("Starting seeding (press Ctrl+C to stop)...")
+    print("Starting background seeding engine (press Ctrl+C to stop)...")
 
-    # Start seeding (forever)
-    # Note: This is a simplified version, real implementation needs torrent_info
+    # Start unified seeding natively in P2PBatch
+    start_seeding(
+        repo_id=args.repo_id,
+        revision=args.revision,
+        tracker_client=tracker
+    )
+    
     try:
         while True:
             import time

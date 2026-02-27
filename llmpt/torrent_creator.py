@@ -17,45 +17,52 @@ logger = logging.getLogger('llmpt.torrent_creator')
 
 
 def create_torrent(
-    file_path: str,
+    repo_id: str,
+    revision: str,
     tracker_url: str,
     piece_length: int = 16 * 1024 * 1024,  # 16MB
 ) -> Optional[dict]:
     """
-    Create a torrent file for a given file.
+    Create a torrent file for an entire HuggingFace repository snapshot.
 
     Args:
-        file_path: Path to the file to create torrent for.
+        repo_id: HuggingFace repository ID (e.g., meta-llama/Llama-2-7b).
+        revision: Git commit hash or branch name.
         tracker_url: Tracker announce URL.
         piece_length: Piece length in bytes (default: 16MB for large files).
 
     Returns:
         Dictionary containing torrent info (info_hash, magnet_link, etc.)
         or None if creation failed.
-
-    Example:
-        >>> info = create_torrent(
-        ...     file_path="/path/to/model.bin",
-        ...     tracker_url="http://tracker.example.com/announce"
-        ... )
-        >>> print(info['magnet_link'])
     """
     if not LIBTORRENT_AVAILABLE:
         logger.error("libtorrent not available")
         return None
 
     try:
-        file_path = Path(file_path)
-        if not file_path.exists():
-            logger.error(f"File not found: {file_path}")
+        from huggingface_hub import snapshot_download
+        
+        # Download or resolve the snapshot path without re-downloading existing blobs
+        logger.info(f"Resolving HF snapshot for {repo_id}@{revision}")
+        
+        # Since we use this tool mostly for files that exist, this should return instantly
+        snapshot_path = snapshot_download(
+            repo_id=repo_id, 
+            revision=revision, 
+            local_files_only=False  # Allow network check if needed, but caches will be used
+        )
+        file_path = Path(snapshot_path)
+        
+        if not file_path.exists() or not file_path.is_dir():
+            logger.error(f"Snapshot directory not found or valid: {file_path}")
             return None
 
         # Create file storage
         fs = lt.file_storage()
-        if file_path.is_dir():
-            lt.add_files(fs, str(file_path))
-        else:
-            fs.add_file(file_path.name, file_path.stat().st_size)
+        
+        # We must add files relative to the snapshot path, but since libtorrent handles 
+        # the wrapping folder automatically, we just point it to the snapshot root directory.
+        lt.add_files(fs, str(file_path))
 
         # Create torrent
         t = lt.create_torrent(fs, piece_length)
@@ -99,7 +106,6 @@ def create_torrent(
 
 
 def create_and_register_torrent(
-    file_path: str,
     repo_id: str,
     revision: str,
     repo_type: str,
@@ -111,7 +117,6 @@ def create_and_register_torrent(
     Create torrent and register it with the tracker.
 
     Args:
-        file_path: Path to the file.
         repo_id: HuggingFace repository ID.
         revision: Git commit hash or branch name.
         repo_type: The type of repository (e.g., 'model').
@@ -122,9 +127,10 @@ def create_and_register_torrent(
     Returns:
         True if successful, False otherwise.
     """
-    # Create torrent
+    # Create torrent natively from the Hugging Face cache
     torrent_info = create_torrent(
-        file_path=file_path,
+        repo_id=repo_id,
+        revision=revision,
         tracker_url=tracker_client.tracker_url,
         piece_length=piece_length,
     )

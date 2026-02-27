@@ -105,6 +105,7 @@ def apply_patch(config: dict) -> None:
                 logger.info(f"[P2P] Intercepted HTTP request for {repo_id}/{filename} (rev: {revision})")
 
                 manager = P2PBatchManager()
+                print(f"[DEBUG-PATCH] Manager ID inside intercept: {id(manager)}")
                 success = manager.register_request(
                     repo_id=repo_id,
                     revision=revision,
