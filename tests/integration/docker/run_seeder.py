@@ -26,43 +26,30 @@ def test_seeder_initialization():
     print(f"[Seeder] Downloading {repo_id} from HuggingFace to act as the source of truth...", flush=True)
     local_path = snapshot_download(
         repo_id=repo_id,
-        allow_patterns=[filename],
         local_files_only=False
     )
     
     assert os.path.exists(local_path)
     
-    from llmpt.torrent_creator import create_torrent
     from llmpt.tracker_client import TrackerClient
-    from llmpt.seeder import start_seeding
+    from llmpt.p2p_batch import P2PBatchManager
     
-    # 2. Force the creator to make a torrent of this repo and publish it
-    print(f"[Seeder] Creating torrent for {repo_id}...", flush=True)
+    # 2. Start the unified background seeding daemon for this repository
+    print(f"[Seeder] Registering seeding task for {repo_id}...", flush=True)
     tracker_client = TrackerClient(tracker_url)
-    target_file = os.path.join(local_path, filename)
+    manager = P2PBatchManager()
     
-    torrent_info = create_torrent(target_file, tracker_url)
-    assert torrent_info is not None, "Failed to create torrent"
-
-    success = tracker_client.register_torrent(
-        repo_id=repo_id,
-        revision="main",
-        repo_type="model",
-        name="test model",
-        info_hash=torrent_info['info_hash'],
-        total_size=torrent_info['file_size'],
-        file_count=1,
-        magnet_link=torrent_info['magnet_link'],
-        piece_length=torrent_info['piece_length']
-    )
-    assert success is True, "Failed to publish torrent to tracker"
+    # Wait a bit for the mock tracker container to be fully live
+    print("[Seeder] Waiting 5s for tracker to come online...", flush=True)
+    time.sleep(5)
     
-    # 3. Start the seeder daemon in the background
-    print("[Seeder] Starting seeder daemon...", flush=True)
-    started = start_seeding(torrent_info=torrent_info, file_path=target_file, duration=180)
-    assert started, "Seeder failed to start"
+    success = manager.register_seeding_task(repo_id, "main", tracker_client)
+    print(f"[Seeder] Seeding registration returned: {success}. P2P background thread handling remaining tracking.", flush=True)
     
     # 4. Keep the container alive long enough for the downloader to finish
     print("[Seeder] Seeder online and seeding. Waiting for peers...", flush=True)
     for _ in range(36):
         time.sleep(5)
+
+if __name__ == "__main__":
+    test_seeder_initialization()

@@ -191,7 +191,12 @@ class SessionContext:
                 try:
                     with open(self.fastresume_path, "rb") as f:
                         resume_data = f.read()
-                    params.renamed_files = lt.bdecode(resume_data).get(b'mapped_files', {})
+                    try:
+                        decoded = lt.bdecode(resume_data)
+                        if isinstance(decoded, dict):
+                            params.renamed_files = decoded.get(b'mapped_files', {})
+                    except Exception:
+                        pass
                     
                     # We inject the raw byte array and let libtorrent parse it
                     # depending on the libtorrent version, params may have a different interface
