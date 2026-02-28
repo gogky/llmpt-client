@@ -32,7 +32,7 @@ def apply_patch(config: dict) -> None:
         return
 
     try:
-        from huggingface_hub import file_download
+        from huggingface_hub import file_download, _snapshot_download
         import huggingface_hub
     except ImportError:
         logger.error("huggingface_hub not installed")
@@ -128,7 +128,13 @@ def apply_patch(config: dict) -> None:
         return orig_http(url, temp_file, **kwargs)
 
     # Apply patches
+    # NOTE: This top-level assignment has NO real effect on newer huggingface_hub versions.
+    # The package uses a lazy __getattr__ that re-fetches attributes from sub-modules on
+    # every access, silently overwriting anything set here. It is kept only for
+    # documentation / clarity purposes. The two assignments below are what actually work.
     huggingface_hub.hf_hub_download = patched_hf_hub_download
+    file_download.hf_hub_download = patched_hf_hub_download      # direct callers
+    _snapshot_download.hf_hub_download = patched_hf_hub_download  # snapshot_download() internals
     file_download.http_get = patched_http_get
 
     logger.debug("Monkey patch applied successfully")
@@ -142,11 +148,13 @@ def remove_patch() -> None:
         return
 
     try:
-        from huggingface_hub import file_download
+        from huggingface_hub import file_download, _snapshot_download
         import huggingface_hub
 
         # Restore original functions
         huggingface_hub.hf_hub_download = _original_hf_hub_download
+        file_download.hf_hub_download = _original_hf_hub_download
+        _snapshot_download.hf_hub_download = _original_hf_hub_download
         file_download.http_get = _original_http_get
 
         # Reset stored original functions
