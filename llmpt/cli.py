@@ -100,9 +100,9 @@ Examples:
         help='Stop seeding'
     )
     stop_parser.add_argument(
-        'info_hash',
+        'repo_key',
         nargs='?',
-        help='Info hash to stop (omit to stop all)'
+        help='repo_id@revision to stop (e.g. meta-llama/Llama-2-7b@main). Omit to stop all.'
     )
 
     args = parser.parse_args()
@@ -203,9 +203,10 @@ def cmd_status(args):
 
     print(f"Active seeding tasks: {len(status)}\n")
 
-    for info_hash, info in status.items():
-        print(f"Info Hash: {info_hash}")
-        print(f"  File: {info['file_path']}")
+    for repo_key, info in status.items():
+        print(f"Repo: {repo_key}")
+        print(f"  Progress: {info['progress']*100:.1f}%")
+        print(f"  State: {info['state']}")
         print(f"  Uploaded: {format_bytes(info['uploaded'])}")
         print(f"  Peers: {info['peers']}")
         print(f"  Upload Rate: {format_bytes(info['upload_rate'])}/s")
@@ -216,12 +217,17 @@ def cmd_stop(args):
     """Execute stop command."""
     from llmpt.seeder import stop_seeding, stop_all_seeding
 
-    if args.info_hash:
-        success = stop_seeding(args.info_hash)
+    if args.repo_key:
+        # Expected format: "repo_id@revision", e.g. "meta-llama/Llama-2-7b@main"
+        if '@' not in args.repo_key:
+            print("Error: repo_key must be in format repo_id@revision (e.g. gpt2@main)")
+            sys.exit(1)
+        repo_id, revision = args.repo_key.rsplit('@', 1)
+        success = stop_seeding(repo_id, revision)
         if success:
-            print(f"✓ Stopped seeding: {args.info_hash}")
+            print(f"✓ Stopped seeding: {args.repo_key}")
         else:
-            print(f"Error: Not seeding: {args.info_hash}")
+            print(f"Error: Not seeding: {args.repo_key}")
     else:
         count = stop_all_seeding()
         print(f"✓ Stopped all seeding ({count} tasks)")
