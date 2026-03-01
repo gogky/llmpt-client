@@ -145,6 +145,8 @@ class TrackerClient:
             logger.error(f"Failed to register torrent: {e}")
             return False
 
+    # NOTE: This method is currently unused. libtorrent handles announce internally
+    # once a magnet link / torrent is added to the session. Manual announce is not needed.
     def announce(
         self,
         info_hash: str,

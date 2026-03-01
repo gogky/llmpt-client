@@ -98,6 +98,8 @@ def create_torrent(
             'piece_length': piece_length,
             'num_pieces': info.num_pieces(),
             'num_files': info.num_files(),
+            'torrent_data': lt.bencode(torrent),
+            'commit_hash': file_path.name,
         }
 
     except Exception as e:
@@ -125,7 +127,7 @@ def create_and_register_torrent(
         piece_length: Piece length in bytes.
 
     Returns:
-        True if successful, False otherwise.
+        The torrent info dictionary if successful, None otherwise.
     """
     # Create torrent natively from the Hugging Face cache
     torrent_info = create_torrent(
@@ -138,7 +140,7 @@ def create_and_register_torrent(
     if not torrent_info:
         return False
 
-    # Register with tracker
+    # Register with tracker using the human-readable revision
     success = tracker_client.register_torrent(
         repo_id=repo_id,
         revision=revision,
@@ -151,4 +153,6 @@ def create_and_register_torrent(
         piece_length=torrent_info['piece_length'],
     )
 
-    return success
+    if success:
+        return torrent_info
+    return None

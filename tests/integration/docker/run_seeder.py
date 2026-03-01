@@ -39,11 +39,23 @@ def test_seeder_initialization():
     tracker_client = TrackerClient(tracker_url)
     manager = P2PBatchManager()
     
+    from llmpt.torrent_creator import create_and_register_torrent
+    
     # Wait a bit for the mock tracker container to be fully live
     print("[Seeder] Waiting 5s for tracker to come online...", flush=True)
     time.sleep(5)
     
-    success = manager.register_seeding_task(repo_id, "main", tracker_client)
+    print(f"[Seeder] Creating and registering .torrent metadata on tracker...", flush=True)
+    torrent_info = create_and_register_torrent(
+        repo_id=repo_id,
+        revision="main",
+        repo_type="model",
+        name=repo_id.split("/")[-1],
+        tracker_client=tracker_client,
+    )
+    assert torrent_info is not None, "Failed to create/register BT metadata"
+    
+    success = manager.register_seeding_task(repo_id, "main", tracker_client, torrent_data=torrent_info['torrent_data'])
     print(f"[Seeder] Seeding registration returned: {success}. P2P background thread handling remaining tracking.", flush=True)
     
     # 4. Keep the container alive long enough for the downloader to finish

@@ -42,4 +42,19 @@ def test_true_p2p_download():
     assert "config.json" in files_in_repo
     assert "pytorch_model.bin" in files_in_repo
     assert "tokenizer.json" in files_in_repo
-    print(f"[Downloader] Successfully retrieved full repo to {local_path}!", flush=True)
+    
+    # Strict validation: Ensure it actually went through P2P
+    # The monkey patching injects requests into P2PBatchManager.
+    # We should see the session alive and files tracked.
+    from llmpt.p2p_batch import P2PBatchManager
+    manager = P2PBatchManager()
+    
+    # Find the active session using the repo_id (ignore the exact commit hash in the tuple)
+    active_keys = [k for k in manager.sessions.keys() if k[0] == repo_id]
+    assert len(active_keys) > 0, "P2P Manager did not intercept the download!"
+    
+    session_key = active_keys[0]
+    session = manager.sessions[session_key]
+    assert len(session.file_destinations) >= 3, "P2P session did not process the expected number of files!"
+    
+    print(f"[Downloader] Successfully P2P fetched {len(session.file_destinations)} files to {local_path}!", flush=True)

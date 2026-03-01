@@ -49,7 +49,7 @@ class P2PBatchManager:
             else:
                 self.lt_session = None
 
-    def register_seeding_task(self, repo_id: str, revision: str, tracker_client: Any) -> bool:
+    def register_seeding_task(self, repo_id: str, revision: str, tracker_client: Any, torrent_data: Optional[bytes] = None) -> bool:
         """
         Register a repository to be tracked for background seeding.
         This behaves like a download but without any specific HTTP interception blocks.
@@ -65,7 +65,8 @@ class P2PBatchManager:
                     revision=revision,
                     tracker_client=tracker_client,
                     lt_session=self.lt_session,
-                    timeout=30 # short timeout for initialization
+                    timeout=30, # short timeout for initialization
+                    torrent_data=torrent_data
                 )
             session_ctx = self.sessions[repo_key]
             
@@ -127,12 +128,13 @@ class SessionContext:
     """
     Manages a single libtorrent torrent_handle for a specific repo/revision.
     """
-    def __init__(self, repo_id: str, revision: str, tracker_client: Any, lt_session: Any, timeout: int):
+    def __init__(self, repo_id: str, revision: str, tracker_client: Any, lt_session: Any, timeout: int, torrent_data: Optional[bytes] = None):
         self.repo_id = repo_id
         self.revision = revision
         self.tracker_client = tracker_client
         self.lt_session = lt_session
         self.timeout = timeout
+        self.torrent_data = torrent_data
         
         self.handle = None
         self.is_valid = True
@@ -163,6 +165,12 @@ class SessionContext:
         
         # 1. Ask tracker for torrent info
         torrent_metadata = self.tracker_client.get_torrent_info(self.repo_id, self.revision)
+        
+        # If not found and we used a commit hash naturally, try the human-readable 'main' fallback branch
+        if not torrent_metadata and len(self.revision) >= 40:
+            logger.info(f"[{self.repo_id}] Hash lookup failed, retrying tracker lookup using 'main' alias...")
+            torrent_metadata = self.tracker_client.get_torrent_info(self.repo_id, "main")
+            
         if not torrent_metadata or 'magnet_link' not in torrent_metadata:
             logger.warning(f"[{self.repo_id}] No torrent metadata found on tracker.")
             self.is_valid = False
@@ -170,9 +178,15 @@ class SessionContext:
             
         magnet_link = torrent_metadata['magnet_link']
         
-        # 2. Add torrent based on magnet link
+        # 2. Add torrent based on magnet link or raw torrent data
         try:
-            params = lt.parse_magnet_uri(magnet_link)
+            if self.torrent_data:
+                logger.info(f"[{self.repo_id}] Initializing session with native raw torrent metadata.")
+                info = lt.torrent_info(lt.bdecode(self.torrent_data))
+                params = lt.add_torrent_params()
+                params.ti = info
+            else:
+                params = lt.parse_magnet_uri(magnet_link)
             
             # We don't use tempdir anymore. We save everything into a common root 
             # (e.g., the HF blobs root) but we'll use rename_file to pinpoint exact locations.
@@ -211,6 +225,16 @@ class SessionContext:
                     logger.warning(f"[{self.repo_id}] Failed to load resume data: {e}")
                     
             self.handle = self.lt_session.add_torrent(params)
+            
+            test_peer = os.environ.get('TEST_SEEDER_PEER')
+            if test_peer:
+                import socket
+                try:
+                    ip = socket.gethostbyname(test_peer)
+                    logger.info(f"[{self.repo_id}] Test environment detected. Explicitly connecting to peer {test_peer} ({ip}):6881")
+                    self.handle.connect_peer((ip, 6881), 0)
+                except Exception as e:
+                    logger.warning(f"Failed to resolve test peer {test_peer}: {e}")
             
             # 3. Wait for metadata to resolve to get the file tree
             logger.info(f"[{self.repo_id}] Waiting for torrent metadata resolution...")
@@ -312,12 +336,11 @@ class SessionContext:
             # e.g., "meta_llama_Llama_2_7b_main/onnx/model.onnx" or "config.json"
             lt_path = files.file_path(i).replace('\\', '/')
             
-            # Case 1: Exact match (single-file torrent or identical base)
+            # Case 1: Exact match (fallback for third-party single-file torrents)
             if lt_path == target_norm:
                 return i
                 
-            # Case 2: Multi-file torrent. 
-            # The first path component is the root directory name.
+            # Case 2: Multi-file torrent (standard for our client, strips root folder)
             parts = lt_path.split('/', 1)
             if len(parts) == 2 and parts[1] == target_norm:
                 return i

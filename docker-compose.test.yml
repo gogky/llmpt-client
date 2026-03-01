@@ -9,7 +9,7 @@ services:
     volumes:
       - .:/app
     environment:
-      - HF_HOME=/app/tests/integration/docker/hf_cache_seeder
+      - HF_HOME=/tmp/hf_cache_seeder
       - ROLE=seeder
       - TRACKER_URL=http://118.195.159.242
     network_mode: bridge
@@ -31,8 +31,9 @@ services:
     volumes:
       - .:/app
     environment:
-      - HF_HOME=/app/tests/integration/docker/hf_cache_downloader
+      - HF_HOME=/tmp/hf_cache_downloader
       - ROLE=downloader
       - TRACKER_URL=http://118.195.159.242
+      - TEST_SEEDER_PEER=seeder
     network_mode: bridge
     command: ["python", "-m", "pytest", "tests/integration/docker/test_docker_p2p.py", "--run-integration", "-v", "-s"]
