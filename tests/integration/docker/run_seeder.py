@@ -16,18 +16,22 @@ def test_seeder_initialization():
     """
     tracker_url = os.environ.get("TRACKER_URL", "http://118.195.159.242")
     
-    # Enable P2P logging and logic
-    llmpt.enable_p2p(tracker_url=tracker_url)
-    
     repo_id = "hf-internal-testing/tiny-random-GPTJForCausalLM"
     filename = "config.json"
     
-    # 1. Download it officially once so the Seeder actually has it in its cache
+    # 1. Download it officially once so the Seeder actually has it in its cache.
+    # IMPORTANT: Do this BEFORE enabling P2P, otherwise the seeder's own P2P patch
+    # would intercept this initial download, causing a 300s timeout waiting for peers
+    # that don't exist yet.
     print(f"[Seeder] Downloading {repo_id} from HuggingFace to act as the source of truth...", flush=True)
     local_path = snapshot_download(
         repo_id=repo_id,
         local_files_only=False
     )
+    
+    # Enable P2P logging and logic AFTER the initial HTTP download is done
+    llmpt.enable_p2p(tracker_url=tracker_url)
+
     
     assert os.path.exists(local_path)
     

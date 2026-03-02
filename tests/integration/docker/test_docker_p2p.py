@@ -27,12 +27,14 @@ def test_true_p2p_download():
     # If we wanted to ensure zero HF traffic, we could intercept requests here,
     # but the logs will easily show P2P fulfillment.
     
-    print("[Downloader] Waiting 15s for seeder and tracker to initialize...", flush=True)
-    time.sleep(15)
+    # Wait for seeder to: (1) complete HTTP download, (2) register torrent, (3) finish piece hash check
+    print("[Downloader] Waiting 30s for seeder to complete HTTP download and start seeding...", flush=True)
+    time.sleep(30)
     print("[Downloader] Requesting snapshot_download...", flush=True)
     local_path = snapshot_download(
         repo_id=repo_id,
-        local_files_only=False
+        local_files_only=False,
+        force_download=True,  # Must bypass HF local cache to ensure http_get is always called
     )
     
     # Verification
