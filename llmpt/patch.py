@@ -119,12 +119,28 @@ def apply_patch(config: dict) -> None:
                     return  # Skip original http_get completely!
                 else:
                     logger.warning(f"[P2P] P2P fulfillment failed for {filename}. Falling back to HTTP.")
+                    # CRITICAL: libtorrent may have partially written data to temp_file
+                    # (the .incomplete blob path). Truncate it before HTTP fallback to
+                    # prevent double-writing: libtorrent data + resumed HTTP data = 2x file size.
+                    try:
+                        temp_file.seek(0)
+                        temp_file.truncate(0)
+                        logger.debug(f"[P2P] Truncated temp_file for clean HTTP fallback: {filename}")
+                    except Exception as trunc_err:
+                        logger.warning(f"[P2P] Could not truncate temp_file for {filename}: {trunc_err}")
 
             except Exception as e:
                 logger.warning(f"[P2P] Exception in P2P intercept: {e}. Falling back to HTTP.")
+                # Same truncation for safety on unexpected exceptions
+                try:
+                    temp_file.seek(0)
+                    temp_file.truncate(0)
+                except Exception:
+                    pass
 
         # Fall back to original HTTP download via local reference if P2P failed or unavailable
-        return orig_http(url, temp_file, **kwargs)
+        # Pass resume_size=0 explicitly since we've truncated the file
+        return orig_http(url, temp_file, **{**kwargs, 'resume_size': 0})
 
     # Apply patches
     # NOTE: This top-level assignment has NO real effect on newer huggingface_hub versions.
