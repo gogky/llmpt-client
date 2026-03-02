@@ -69,7 +69,6 @@ class P2PBatchManager:
                     lt_session=self.lt_session,
                     timeout=30, # short timeout for initialization
                     torrent_data=torrent_data,
-                    is_seeder=True,  # enables seed_mode to skip piece hash verification
                 )
             session_ctx = self.sessions[repo_key]
             
@@ -131,14 +130,13 @@ class SessionContext:
     """
     Manages a single libtorrent torrent_handle for a specific repo/revision.
     """
-    def __init__(self, repo_id: str, revision: str, tracker_client: Any, lt_session: Any, timeout: int, torrent_data: Optional[bytes] = None, is_seeder: bool = False):
+    def __init__(self, repo_id: str, revision: str, tracker_client: Any, lt_session: Any, timeout: int, torrent_data: Optional[bytes] = None):
         self.repo_id = repo_id
         self.revision = revision
         self.tracker_client = tracker_client
         self.lt_session = lt_session
         self.timeout = timeout
         self.torrent_data = torrent_data
-        self.is_seeder = is_seeder
         
         self.handle = None
         self.is_valid = True
