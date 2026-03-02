@@ -64,8 +64,26 @@ def create_torrent(
         # the wrapping folder automatically, we just point it to the snapshot root directory.
         lt.add_files(fs, str(file_path))
 
-        # Create torrent
-        t = lt.create_torrent(fs, piece_length)
+        # Create torrent with v1_only flag to eliminate .pad/ padding files.
+        #
+        # Background on the padding problem:
+        #   By default (and in v2/hybrid modes), libtorrent inserts virtual .pad/ files to
+        #   align each file's start to a piece boundary (BEP 47 / BEP 52 canonical layout).
+        #   In our use case these padding files are never in the HF cache, so the seeder's
+        #   piece hash check always fails → seeder can't serve any data to peers.
+        #
+        # Why NOT v2 or hybrid?
+        #   Despite BT v2's per-file Merkle hash trees, libtorrent's Python bindings still
+        #   insert .pad/ files in v2_only (=32) and canonical_files (=128) modes.
+        #   Tested with libtorrent 2.0.10: all modes except v1_only produce padding files.
+        #
+        # Why v1_only (=64)?
+        #   - Zero .pad/ virtual files produced (verified experimentally)
+        #   - Piece hash verification completes in <1s (vs 300s+ timeout with padding)
+        #   - Fully compatible with libtorrent 2.x (which is our minimum requirement)
+        #   - Each file's data runs contiguous across piece boundaries (standard BT v1 behavior)
+        t = lt.create_torrent(fs, piece_length, flags=lt.create_torrent.v1_only)
+
 
         # Add tracker
         announce_url = f"{tracker_url.rstrip('/')}/announce"

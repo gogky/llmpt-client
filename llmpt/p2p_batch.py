@@ -66,7 +66,8 @@ class P2PBatchManager:
                     tracker_client=tracker_client,
                     lt_session=self.lt_session,
                     timeout=30, # short timeout for initialization
-                    torrent_data=torrent_data
+                    torrent_data=torrent_data,
+                    is_seeder=True,  # enables seed_mode to skip piece hash verification
                 )
             session_ctx = self.sessions[repo_key]
             
@@ -128,13 +129,14 @@ class SessionContext:
     """
     Manages a single libtorrent torrent_handle for a specific repo/revision.
     """
-    def __init__(self, repo_id: str, revision: str, tracker_client: Any, lt_session: Any, timeout: int, torrent_data: Optional[bytes] = None):
+    def __init__(self, repo_id: str, revision: str, tracker_client: Any, lt_session: Any, timeout: int, torrent_data: Optional[bytes] = None, is_seeder: bool = False):
         self.repo_id = repo_id
         self.revision = revision
         self.tracker_client = tracker_client
         self.lt_session = lt_session
         self.timeout = timeout
         self.torrent_data = torrent_data
+        self.is_seeder = is_seeder  # if True, use seed_mode to skip piece hash verification
         
         self.handle = None
         self.is_valid = True
@@ -199,6 +201,16 @@ class SessionContext:
             
             # Start paused to set priorities before downloading anything
             params.flags |= lt.torrent_flags.paused
+            
+            # For seeding tasks: enable seed_mode to skip piece hash verification.
+            # Rationale: HuggingFace already validates each blob via SHA256 (the blob
+            # filename IS the hash). Re-verifying with libtorrent's SHA1 is redundant
+            # and wastes time proportional to model size (minutes for large LLMs on HDD).
+            # seed_mode uses lazy verification: only checks a piece if a peer reports it
+            # as corrupted after downloading, which is sufficient for our trust model.
+            if self.is_seeder:
+                params.flags |= lt.torrent_flags.seed_mode
+                logger.info(f"[{self.repo_id}] Seeder mode: using seed_mode flag (skipping piece hash verification)")
             
             # Load fastresume data if it exists
             if os.path.exists(self.fastresume_path):
@@ -354,19 +366,37 @@ class SessionContext:
         """
         if not self.handle or not self.torrent_info_obj:
             return False
-            
-        from huggingface_hub.utils import build_hf_headers
-        from huggingface_hub import HfFileSystem
-        fs = HfFileSystem()
         
+        import os
+        import tempfile
+        pad_dir = os.path.join(self.temp_dir, ".pad_files")
+        os.makedirs(pad_dir, exist_ok=True)
+            
         logger.info(f"[{self.repo_id}] Mapping all files for background seeding...")
         
         files = self.torrent_info_obj.files()
+        mapped_count = 0
+        pad_count = 0
         for file_index in range(files.num_files()):
             lt_path = files.file_path(file_index).replace('\\', '/')
+            file_size = files.file_size(file_index)
             
             parts = lt_path.split('/', 1)
             target_norm = parts[1] if len(parts) == 2 else lt_path
+            
+            # Handle libtorrent padding files (.pad/XXXXXX) - these are zero-byte virtual
+            # files inserted to align file boundaries to piece boundaries. We must create
+            # real zero-filled files of the correct size, otherwise piece hash checks fail
+            # and the seeder cannot provide any data to peers.
+            if target_norm.startswith('.pad/') or '/.pad/' in target_norm:
+                pad_file_path = os.path.join(pad_dir, f"pad_{file_index}_{file_size}")
+                if not os.path.exists(pad_file_path):
+                    with open(pad_file_path, 'wb') as f:
+                        f.write(b'\x00' * file_size)
+                self.handle.rename_file(file_index, pad_file_path)
+                pad_count += 1
+                logger.info(f"[{self.repo_id}] Created padding file [{file_index}]: {target_norm} ({file_size} bytes)")
+                continue
             
             # Request the local path from Hugging Face cache
             try:
@@ -378,13 +408,25 @@ class SessionContext:
                 )
                 if local_path and isinstance(local_path, str):
                     self.handle.rename_file(file_index, local_path)
-                    logger.debug(f"[{self.repo_id}] Mapped for seeding: {target_norm} -> {local_path}")
+                    mapped_count += 1
+                    logger.info(f"[{self.repo_id}] Mapped for seeding [{file_index}]: {target_norm} -> {local_path}")
+                else:
+                    logger.warning(f"[{self.repo_id}] Cache miss for seeding [{file_index}]: {target_norm} (revision={self.revision})")
             except Exception as e:
                 logger.warning(f"[{self.repo_id}] Failed to map file {target_norm} for seeding: {e}")
+        
+        if self.is_seeder:
+            logger.info(f"[{self.repo_id}] Mapped {mapped_count}/{files.num_files()} real files + {pad_count} pad files. seed_mode active — skipping hash check, resuming immediately.")
+        else:
+            logger.info(f"[{self.repo_id}] Mapped {mapped_count}/{files.num_files()} real files + {pad_count} pad files. Starting libtorrent hash check...")
                 
-        # Resume the torrent (it was added paused)
+        # Resume the torrent (it was added paused).
+        # With seed_mode, this immediately enters seeding state (no checking_files phase).
+        # Without seed_mode, libtorrent will first verify all pieces before seeding.
         self.handle.resume()
         return True
+
+
 
     def _monitor_loop(self):
         """Background thread to monitor progress and trigger events."""
