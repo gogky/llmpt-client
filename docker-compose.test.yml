@@ -1,5 +1,9 @@
 version: '3.8'
 
+networks:
+  llmpt_test:
+    driver: bridge
+
 services:
   seeder:
     build: 
@@ -12,7 +16,8 @@ services:
       - HF_HOME=/tmp/hf_cache_seeder
       - ROLE=seeder
       - TRACKER_URL=http://118.195.159.242
-    network_mode: bridge
+    networks:
+      - llmpt_test
     command: ["python", "-m", "pytest", "tests/integration/docker/run_seeder.py", "--run-integration", "-s"]
     healthcheck:
       test: ["CMD", "python", "-c", "import requests; requests.get('http://118.195.159.242/api/v1/health')"]
@@ -34,6 +39,7 @@ services:
       - HF_HOME=/tmp/hf_cache_downloader
       - ROLE=downloader
       - TRACKER_URL=http://118.195.159.242
-      - TEST_SEEDER_PEER=seeder
-    network_mode: bridge
+      - TEST_SEEDER_PEER=llmpt-seeder
+    networks:
+      - llmpt_test
     command: ["python", "-m", "pytest", "tests/integration/docker/test_docker_p2p.py", "--run-integration", "-v", "-s"]
