@@ -18,7 +18,7 @@ def test_true_p2p_download():
     time.sleep(15) 
     
     tracker_url = os.environ.get("TRACKER_URL", "http://118.195.159.242")
-    llmpt.enable_p2p(tracker_url=tracker_url, timeout=300)
+    llmpt.enable_p2p(tracker_url=tracker_url, timeout=60)
     
     repo_id = "hf-internal-testing/tiny-random-GPTJForCausalLM"
     filename = "config.json"

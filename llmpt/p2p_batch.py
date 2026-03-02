@@ -45,7 +45,9 @@ class P2PBatchManager:
             self.sessions: Dict[tuple, "SessionContext"] = {}
             if LIBTORRENT_AVAILABLE:
                 self.lt_session = lt.session()
-                self.lt_session.listen_on(6881, 6891)
+                settings = self.lt_session.get_settings()
+                settings['listen_interfaces'] = '0.0.0.0:6881'
+                self.lt_session.apply_settings(settings)
             else:
                 self.lt_session = None
 
@@ -136,7 +138,7 @@ class SessionContext:
         self.lt_session = lt_session
         self.timeout = timeout
         self.torrent_data = torrent_data
-        self.is_seeder = is_seeder  # if True, use seed_mode to skip piece hash verification
+        self.is_seeder = is_seeder
         
         self.handle = None
         self.is_valid = True
@@ -202,16 +204,6 @@ class SessionContext:
             # Start paused to set priorities before downloading anything
             params.flags |= lt.torrent_flags.paused
             
-            # For seeding tasks: enable seed_mode to skip piece hash verification.
-            # Rationale: HuggingFace already validates each blob via SHA256 (the blob
-            # filename IS the hash). Re-verifying with libtorrent's SHA1 is redundant
-            # and wastes time proportional to model size (minutes for large LLMs on HDD).
-            # seed_mode uses lazy verification: only checks a piece if a peer reports it
-            # as corrupted after downloading, which is sufficient for our trust model.
-            if self.is_seeder:
-                params.flags |= lt.torrent_flags.seed_mode
-                logger.info(f"[{self.repo_id}] Seeder mode: using seed_mode flag (skipping piece hash verification)")
-            
             # Load fastresume data if it exists
             if os.path.exists(self.fastresume_path):
                 try:
@@ -257,13 +249,13 @@ class SessionContext:
             self.worker_thread.start()
             
             start_time = time.time()
-            while not self.handle.has_metadata():
+            while not self.handle.status().has_metadata:
                 if time.time() - start_time > 8: # Reduced to 8s for timeout
                     logger.warning(f"[{self.repo_id}] Timeout waiting for torrent metadata. Falling back.")
                     return False
                 time.sleep(1)
                 
-            self.torrent_info_obj = self.handle.get_torrent_info()
+            self.torrent_info_obj = self.handle.torrent_file()
             
             # Initialize all file priorities to 0 (don't download)
             num_files = self.torrent_info_obj.num_files()
@@ -317,6 +309,23 @@ class SessionContext:
                     
                     logger.info(f"[{self.repo_id}] Requesting file {filename} (Index {file_index}). Priority -> 1. Mapped to: {destination}")
                     self.handle.file_priority(file_index, 1)
+                    
+                    # If the torrent is already finished (all pieces downloaded), this file's
+                    # data is already present in the pieces but may not be written to the new
+                    # renamed path. Force a recheck to make libtorrent write the data out.
+                    status = self.handle.status()
+                    if status.state in (4, 5):  # 4=finished, 5=seeding
+                        files = self.torrent_info_obj.files()
+                        file_progress = self.handle.file_progress()
+                        file_size = files.file_size(file_index)
+                        if file_progress[file_index] == file_size and file_size > 0:
+                            logger.info(f"[{self.repo_id}] Torrent already complete, file {filename} data available immediately.")
+                            event.set()
+                        else:
+                            # Data exists in pieces but hasn't been written to the renamed path.
+                            # Force recheck to trigger libtorrent to write the data.
+                            logger.info(f"[{self.repo_id}] Torrent complete but file {filename} not yet written ({file_progress[file_index]}/{file_size}). Forcing recheck...")
+                            self.handle.force_recheck()
                 else:
                     if not self.torrent_info_obj:
                         logger.info(f"[{self.repo_id}] Meta still loading. Queueing file {filename} for background BT tracking.")
@@ -407,23 +416,52 @@ class SessionContext:
                     revision=self.revision
                 )
                 if local_path and isinstance(local_path, str):
-                    self.handle.rename_file(file_index, local_path)
+                    # CRITICAL: Resolve symlinks to real blob paths!
+                    # HF cache uses symlinks: snapshots/xxx/config.json -> ../../blobs/sha256hash
+                    # libtorrent cannot serve data through symlinks — it needs
+                    # the actual blob file path to read and hash-check pieces.
+                    real_path = os.path.realpath(local_path)
+                    self.handle.rename_file(file_index, real_path)
                     mapped_count += 1
-                    logger.info(f"[{self.repo_id}] Mapped for seeding [{file_index}]: {target_norm} -> {local_path}")
+                    if real_path != local_path:
+                        logger.info(f"[{self.repo_id}] Mapped for seeding [{file_index}]: {target_norm} -> {real_path} (resolved from symlink {local_path})")
+                    else:
+                        logger.info(f"[{self.repo_id}] Mapped for seeding [{file_index}]: {target_norm} -> {real_path}")
                 else:
                     logger.warning(f"[{self.repo_id}] Cache miss for seeding [{file_index}]: {target_norm} (revision={self.revision})")
             except Exception as e:
                 logger.warning(f"[{self.repo_id}] Failed to map file {target_norm} for seeding: {e}")
         
-        if self.is_seeder:
-            logger.info(f"[{self.repo_id}] Mapped {mapped_count}/{files.num_files()} real files + {pad_count} pad files. seed_mode active — skipping hash check, resuming immediately.")
-        else:
-            logger.info(f"[{self.repo_id}] Mapped {mapped_count}/{files.num_files()} real files + {pad_count} pad files. Starting libtorrent hash check...")
+        logger.info(f"[{self.repo_id}] Mapped {mapped_count}/{files.num_files()} real files + {pad_count} pad files.")
                 
-        # Resume the torrent (it was added paused).
-        # With seed_mode, this immediately enters seeding state (no checking_files phase).
-        # Without seed_mode, libtorrent will first verify all pieces before seeding.
+        # Resume and force recheck so libtorrent verifies all pieces against the
+        # renamed file paths. This is required because we used rename_file() to
+        # point each torrent file to its actual HF blob path. Without a recheck,
+        # libtorrent doesn't know the pieces are already present on disk.
+        #
+        # NOTE: We intentionally do NOT use seed_mode here. seed_mode is incompatible
+        # with rename_file() — it assumes files are at their original torrent-internal
+        # paths and silently reports 0 pieces when they've been remapped. The result is
+        # a seeder that connects to peers but has nothing to offer, causing 100% timeouts.
         self.handle.resume()
+        self.handle.force_recheck()
+        logger.info(f"[{self.repo_id}] Force recheck initiated. Waiting for piece verification...")
+        
+        # Wait for the recheck to complete (state transitions: checking_files -> seeding/finished)
+        recheck_start = time.time()
+        recheck_timeout = 120  # 2 minutes max for hash check
+        while time.time() - recheck_start < recheck_timeout:
+            s = self.handle.status()
+            # State 1 = checking_files, State 7 = checking_resume_data
+            if s.state not in (1, 7):
+                logger.info(f"[{self.repo_id}] Recheck complete. State: {s.state}, Progress: {s.progress*100:.1f}%, Pieces: {s.num_pieces}")
+                break
+            if int(time.time() - recheck_start) % 5 == 0:
+                logger.info(f"[{self.repo_id}] Rechecking... {s.progress*100:.1f}%")
+            time.sleep(0.5)
+        else:
+            logger.warning(f"[{self.repo_id}] Recheck timed out after {recheck_timeout}s")
+        
         return True
 
 
@@ -433,15 +471,38 @@ class SessionContext:
         logger.info(f"[{self.repo_id}] Monitor thread started.")
         
         last_save_time = time.time()
+        last_diag_time = 0  # Force first diagnostic log immediately
+        recheck_triggered = False  # Track if we've already triggered a recheck for stale files
         
         while self.is_valid and self.handle:
             time.sleep(1)
             
+            # Periodic diagnostic logging (every 5 seconds)
+            now = time.time()
+            if now - last_diag_time > 5:
+                last_diag_time = now
+                try:
+                    if self.handle and self.handle.is_valid():
+                        s = self.handle.status()
+                        state_names = ['queued', 'checking_files', 'downloading_metadata',
+                                       'downloading', 'finished', 'seeding', 'allocating',
+                                       'checking_resume_data']
+                        state_str = state_names[s.state] if s.state < len(state_names) else str(s.state)
+                        logger.info(
+                            f"[{self.repo_id}] STATUS: state={state_str} "
+                            f"progress={s.progress*100:.1f}% "
+                            f"peers={s.num_peers} seeds={s.num_seeds} "
+                            f"dl={s.download_rate/1024:.1f}KB/s ul={s.upload_rate/1024:.1f}KB/s "
+                            f"pieces={s.num_pieces}/{s.num_pieces + (self.torrent_info_obj.num_pieces() - s.num_pieces if self.torrent_info_obj else 0)}"
+                        )
+                except Exception as diag_err:
+                    logger.debug(f"[{self.repo_id}] Diagnostic log error: {diag_err}")
+            
             # Periodic fastresume save (every 5 seconds)
-            if time.time() - last_save_time > 5:
+            if now - last_save_time > 5:
                 if self.handle and self.handle.is_valid():
                     self.handle.save_resume_data(lt.save_resume_flags_t.flush_disk_cache)
-                last_save_time = time.time()
+                last_save_time = now
                 
             try:
                 # Check for libtorrent alerts
@@ -488,17 +549,25 @@ class SessionContext:
                         continue
                         
                     # If metadata finally arrived, we must belatedly map any requested files
-                    if not self.torrent_info_obj and self.handle.has_metadata():
-                        self.torrent_info_obj = self.handle.get_torrent_info()
+                    if not self.torrent_info_obj and self.handle.status().has_metadata:
+                        self.torrent_info_obj = self.handle.torrent_file()
                         num_files = self.torrent_info_obj.num_files()
                         self.handle.prioritize_files([0] * num_files)
                         logger.info(f"[{self.repo_id}] Background metadata resolved! {num_files} files.")
                         
                     if not self.torrent_info_obj:
                         continue # Still downloading metadata
+                    
+                    # Skip progress checking while a recheck is in progress
+                    # (state 1=checking_files, 7=checking_resume_data)
+                    if status.state in (1, 7):
+                        continue
                         
                     file_progress = self.handle.file_progress()
                     files = self.torrent_info_obj.files()
+                    
+                    # Track if any pending files have stale progress despite torrent being complete
+                    needs_recheck = False
                     
                     for filename in list(pending_files):
                         file_index = self._find_file_index(filename)
@@ -533,6 +602,25 @@ class SessionContext:
                                 
                                 # File is fully downloaded, good time to save resume state
                                 self.handle.save_resume_data(lt.save_resume_flags_t.flush_disk_cache)
+                            elif status.state in (4, 5) and progress_bytes < file_size:
+                                # BUG FIX: Torrent is finished/seeding (all pieces downloaded) but
+                                # this file's progress doesn't reflect that. This happens when
+                                # rename_file() was called AFTER the piece containing this file's
+                                # data was already downloaded and written to the OLD path.
+                                # libtorrent doesn't automatically re-write data to renamed paths.
+                                # Solution: force a recheck so libtorrent re-verifies pieces against
+                                # the current (renamed) file paths, which triggers a disk write.
+                                if not recheck_triggered:
+                                    logger.info(
+                                        f"[{self.repo_id}] Torrent complete (state={status.state}) but "
+                                        f"file {filename} progress stale ({progress_bytes}/{file_size}). "
+                                        f"Triggering force_recheck to flush data to renamed paths."
+                                    )
+                                    needs_recheck = True
+                    
+                    if needs_recheck and not recheck_triggered:
+                        recheck_triggered = True
+                        self.handle.force_recheck()
                                 
             except Exception as e:
                 logger.error(f"[{self.repo_id}] Monitor loop exception: {e}")
