@@ -7,6 +7,7 @@ dynamic file prioritization.
 """
 
 import os
+import shutil
 import threading
 import time
 import logging
@@ -276,6 +277,10 @@ class SessionContext:
     def download_file(self, filename: str, destination: str) -> bool:
         """
         Request download of a specific file and block until done.
+        
+        Instead of using rename_file() (which causes piece invalidation when
+        combined with force_recheck), we let libtorrent download to its default
+        save_path and then copy/move the completed file to the HF destination.
         """
         with self.lock:
             if not self.is_valid:
@@ -299,31 +304,27 @@ class SessionContext:
                 # let the monitor thread prioritize it once metadata arrives!
                 file_index = self._find_file_index(filename)
                 if file_index is not None:
-                    # Rename the libtorrent path for this file to be the ABSOLUTE path
-                    # where HF expects the .incomplete file to sit. 
-                    import os
-                    os.makedirs(os.path.dirname(destination), exist_ok=True)
-                    self.handle.rename_file(file_index, destination)
-                    
-                    logger.info(f"[{self.repo_id}] Requesting file {filename} (Index {file_index}). Priority -> 1. Mapped to: {destination}")
+                    # Don't rename_file()! Let libtorrent download to its default path.
+                    # We only set priority to request this file. The monitor loop will
+                    # copy the data to `destination` once the file is complete.
+                    logger.info(f"[{self.repo_id}] Requesting file {filename} (Index {file_index}). Priority -> 1. Destination: {destination}")
                     self.handle.file_priority(file_index, 1)
                     
-                    # If the torrent is already finished (all pieces downloaded), this file's
-                    # data is already present in the pieces but may not be written to the new
-                    # renamed path. Force a recheck to make libtorrent write the data out.
+                    # If the torrent is already finished, data is already at the default path.
+                    # Try to deliver it immediately.
                     status = self.handle.status()
                     if status.state in (4, 5):  # 4=finished, 5=seeding
                         files = self.torrent_info_obj.files()
                         file_progress = self.handle.file_progress()
                         file_size = files.file_size(file_index)
                         if file_progress[file_index] == file_size and file_size > 0:
-                            logger.info(f"[{self.repo_id}] Torrent already complete, file {filename} data available immediately.")
-                            event.set()
-                        else:
-                            # Data exists in pieces but hasn't been written to the renamed path.
-                            # Force recheck to trigger libtorrent to write the data.
-                            logger.info(f"[{self.repo_id}] Torrent complete but file {filename} not yet written ({file_progress[file_index]}/{file_size}). Forcing recheck...")
-                            self.handle.force_recheck()
+                            src = self._get_lt_disk_path(file_index)
+                            if os.path.exists(src):
+                                self._deliver_file(src, destination)
+                                logger.info(f"[{self.repo_id}] Torrent already complete, file {filename} delivered immediately.")
+                                event.set()
+                            else:
+                                logger.info(f"[{self.repo_id}] Torrent complete but file not on disk at {src}. Monitor will handle.")
                 else:
                     if not self.torrent_info_obj:
                         logger.info(f"[{self.repo_id}] Meta still loading. Queueing file {filename} for background BT tracking.")
@@ -341,6 +342,11 @@ class SessionContext:
         else:
             logger.warning(f"[{self.repo_id}] P2P download of {filename} TIMEOUT after {self.timeout}s.")
             return False
+
+    def _get_lt_disk_path(self, file_index: int) -> str:
+        """Return the absolute disk path where libtorrent stores a file by default."""
+        lt_path = self.torrent_info_obj.files().file_path(file_index)
+        return os.path.join(self.temp_dir, lt_path)
 
     def _find_file_index(self, target_filename: str) -> Optional[int]:
         """Find the libtorrent file index matching the requested filename."""
@@ -470,7 +476,6 @@ class SessionContext:
         
         last_save_time = time.time()
         last_diag_time = 0  # Force first diagnostic log immediately
-        recheck_triggered = False  # Track if we've already triggered a recheck for stale files
         
         while self.is_valid and self.handle:
             time.sleep(1)
@@ -564,66 +569,54 @@ class SessionContext:
                     file_progress = self.handle.file_progress()
                     files = self.torrent_info_obj.files()
                     
-                    # Track if any pending files have stale progress despite torrent being complete
-                    needs_recheck = False
-                    
                     for filename in list(pending_files):
                         file_index = self._find_file_index(filename)
                         if file_index is not None:
-                            # IMPORTANT: Check if we need to map the file belatedly due to metadata delay
                             destination = self.file_destinations[filename]
                             
-                            # There's no great way to check if rename_file was called, so we just
-                            # proactively do it here for pending files if priority is 0
+                            # Belatedly set priority for files queued before metadata arrived
                             if self.handle.file_priorities()[file_index] == 0:
-                                import os
-                                os.makedirs(os.path.dirname(destination), exist_ok=True)
-                                self.handle.rename_file(file_index, destination)
                                 self.handle.file_priority(file_index, 1)
-                                logger.info(f"[{self.repo_id}] Belatedly mapped {filename} -> {destination}")
+                                logger.info(f"[{self.repo_id}] Belatedly prioritized {filename} (Index {file_index})")
                             
                             file_size = files.file_size(file_index)
                             progress_bytes = file_progress[file_index]
                             
                             if progress_bytes == file_size and file_size > 0:
-                                # File is fully downloaded!
-                                # Because we used rename_file, the data is ALREADY in destination!
-                                destination = self.file_destinations[filename]
-                                logger.info(f"[{self.repo_id}] File {filename} complete directly at {destination}")
-                                
-                                # Unblock the HTTP thread
-                                self.file_events[filename].set()
+                                # File is fully downloaded at libtorrent's default path.
+                                # Copy/move it to the HF destination.
+                                src = self._get_lt_disk_path(file_index)
+                                try:
+                                    self._deliver_file(src, destination)
+                                    logger.info(f"[{self.repo_id}] File {filename} complete. Delivered {src} -> {destination}")
+                                    self.file_events[filename].set()
+                                except Exception as deliver_err:
+                                    logger.error(f"[{self.repo_id}] Failed to deliver {filename}: {deliver_err}")
+                                    # Don't set event - let it timeout and fallback to HTTP
 
-                                # Also lower priority to 0? Not strictly necessary since it's 100% 
-                                # downloaded, but good for cleanup
                                 self.handle.file_priority(file_index, 0)
-                                
-                                # File is fully downloaded, good time to save resume state
                                 self.handle.save_resume_data(lt.save_resume_flags_t.flush_disk_cache)
-                            elif status.state in (4, 5) and progress_bytes < file_size:
-                                # BUG FIX: Torrent is finished/seeding (all pieces downloaded) but
-                                # this file's progress doesn't reflect that. This happens when
-                                # rename_file() was called AFTER the piece containing this file's
-                                # data was already downloaded and written to the OLD path.
-                                # libtorrent doesn't automatically re-write data to renamed paths.
-                                # Solution: force a recheck so libtorrent re-verifies pieces against
-                                # the current (renamed) file paths, which triggers a disk write.
-                                if not recheck_triggered:
-                                    logger.info(
-                                        f"[{self.repo_id}] Torrent complete (state={status.state}) but "
-                                        f"file {filename} progress stale ({progress_bytes}/{file_size}). "
-                                        f"Triggering force_recheck to flush data to renamed paths."
-                                    )
-                                    needs_recheck = True
-                    
-                    if needs_recheck and not recheck_triggered:
-                        recheck_triggered = True
-                        self.handle.force_recheck()
                                 
             except Exception as e:
                 logger.error(f"[{self.repo_id}] Monitor loop exception: {e}")
                 
     def _deliver_file(self, src: str, dst: str):
-        # DEPRECATED: We now use libtorrent's built-in target file renaming mechanism
-        # into the HF blobs directy to achieve zero-copy. This is no longer called.
-        pass
+        """Copy a completed file from libtorrent's download path to the HF destination.
+        
+        Uses os.link() (hard link) for zero-copy on the same filesystem,
+        falls back to shutil.copy2() for cross-device.
+        """
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        
+        # Remove destination if it already exists (e.g., stale .incomplete file)
+        if os.path.exists(dst):
+            os.unlink(dst)
+        
+        try:
+            # Hard link: instant, no extra disk space on same filesystem
+            os.link(src, dst)
+            logger.debug(f"[{self.repo_id}] Hard-linked {src} -> {dst}")
+        except OSError:
+            # Cross-device fallback
+            shutil.copy2(src, dst)
+            logger.debug(f"[{self.repo_id}] Copied {src} -> {dst}")
