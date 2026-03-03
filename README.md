@@ -146,10 +146,11 @@ pip install -e ".[dev]"
 ### 运行测试
 
 ```bash
-pytest tests/
-```
-
-```bash
+# 单元测试
+pytest tests/unit/
+# 集成测试
+pytest tests/integration/ --run-integration
+# 端到端测试
 docker compose -f docker-compose.test.yml down
 docker compose -f docker-compose.test.yml up --build
 ```
