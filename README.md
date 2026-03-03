@@ -186,11 +186,10 @@ pip install -e ".[dev]"
 # 单元测试
 pytest tests/unit/
 
-# 集成测试
+# 集成测试（宿主机直接运行，需要网络连接）
 pytest tests/integration/ --run-integration
 
-# 端到端测试（Docker，需要 Tracker 服务可用）
-docker compose -f docker-compose.test.yml down
+# E2E 测试（Docker 多容器，验证完整 P2P 下载链路）
 docker compose -f docker-compose.test.yml up --build
 ```
 
@@ -211,7 +210,8 @@ llmpt-client/
 │   └── utils.py              # 工具函数
 ├── tests/                    # 测试
 │   ├── unit/                 # 单元测试
-│   └── integration/          # 集成测试 + Docker E2E 测试
+│   ├── integration/          # 集成测试（宿主机运行）
+│   └── e2e/                  # E2E 测试（Docker 容器运行）
 ├── examples/                 # 示例脚本
 ├── docs/                     # 文档
 ├── setup.py                  # 安装配置

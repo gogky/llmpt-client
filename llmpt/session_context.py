@@ -50,6 +50,7 @@ class SessionContext:
         self.fastresume_path = os.path.join(self.fastresume_dir, f"{safe_repo}_{self.revision}.fastresume")
         
         self.worker_thread = None
+        self.test_peer_addr = None  # (ip, port) tuple for direct peer connection in test environments
 
     def _init_torrent(self) -> bool:
         """Initialize the libtorrent handle if not already done."""
@@ -125,8 +126,9 @@ class SessionContext:
                 import socket
                 try:
                     ip = socket.gethostbyname(test_peer)
+                    self.test_peer_addr = (ip, 6881)
                     logger.info(f"[{self.repo_id}] Test environment detected. Explicitly connecting to peer {test_peer} ({ip}):6881")
-                    self.handle.connect_peer((ip, 6881), 0)
+                    self.handle.connect_peer(self.test_peer_addr, 0)
                 except Exception as e:
                     logger.warning(f"Failed to resolve test peer {test_peer}: {e}")
             

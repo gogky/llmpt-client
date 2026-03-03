@@ -1,0 +1,20 @@
+- 关于revision的设计
+    - 前端至少revison为commit hash 才能与服务端兼容，做种和下载都应该明确使用 commit hash
+- 混合下载
+    - 层次1： webseed
+    - 层次2： p2p中断后，http能否接上
+- 分片大小的选择
+- 服务端存储.torrent/为.torrent添加缓存/自动做种
+- 在服务端magnet中添加更多信息，比如文件大小与磁盘预分配
+- 服务端的校验与安全问题
+- 对llmpt/seeder.py的重构
+- resume 支持旧版本 lib
+- timeout时间与meta data等待时间变为可配置
+- monitor守护进程与session不一一对应
+- 进度条
+- 同一模型的多个版本。跨swarm问题？或许通过tracker服务器返回旧版本peer并注明相同文件来实现。
+- 6881端口需要动态
+- 服务端支持/api/v1/health
+- 支持huggingface_xet
+- 通过缓存.fastresume 或后台生成跳过验证阶段
+- 测试真实场景的api，而不调用内部函数

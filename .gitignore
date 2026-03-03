@@ -68,8 +68,6 @@ Thumbs.db
 *.incomplete
 AGENTS.md
 API.md
-docs/
-
 # Docker
 tests/integration/docker/hf_cache_downloader/
 tests/integration/docker/hf_cache_seeder/

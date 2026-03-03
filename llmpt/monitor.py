@@ -35,6 +35,7 @@ def run_monitor_loop(ctx: "SessionContext") -> None:
 
     last_save_time = time.time()
     last_diag_time = 0  # Force first diagnostic log immediately
+    last_peer_retry_time = 0  # Track last connect_peer retry
 
     while ctx.is_valid and ctx.handle:
         time.sleep(1)
@@ -45,6 +46,11 @@ def run_monitor_loop(ctx: "SessionContext") -> None:
         if now - last_diag_time > 5:
             last_diag_time = now
             _log_diagnostics(ctx)
+
+        # --- Periodic peer reconnection for test environments (every 10 s) ---
+        if now - last_peer_retry_time > 10:
+            last_peer_retry_time = now
+            _retry_test_peer_connection(ctx)
 
         # --- Periodic fastresume save (every 5 s) ---
         if now - last_save_time > 5:
@@ -82,6 +88,29 @@ def _log_diagnostics(ctx: "SessionContext") -> None:
             )
     except Exception as diag_err:
         logger.debug(f"[{ctx.repo_id}] Diagnostic log error: {diag_err}")
+
+
+def _retry_test_peer_connection(ctx: "SessionContext") -> None:
+    """Periodically retry connect_peer in Docker test environments.
+
+    In Docker bridge networks, the external tracker returns the host's public
+    NAT IP which is unreachable from within the container network. This function
+    retries the direct Docker-internal connection when no peers are connected.
+    """
+    if not ctx.test_peer_addr:
+        return
+
+    try:
+        if ctx.handle and ctx.handle.is_valid():
+            s = ctx.handle.status()
+            if s.num_peers == 0:
+                ctx.handle.connect_peer(ctx.test_peer_addr, 0)
+                logger.info(
+                    f"[{ctx.repo_id}] Retrying connect_peer to "
+                    f"{ctx.test_peer_addr[0]}:{ctx.test_peer_addr[1]} (peers=0)"
+                )
+    except Exception as e:
+        logger.debug(f"[{ctx.repo_id}] Peer reconnect attempt failed: {e}")
 
 
 def _save_resume_data(ctx: "SessionContext") -> None:
