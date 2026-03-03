@@ -88,7 +88,7 @@ graph TD
   2. 下载端应保持当前的 `enable_p2p()` → `snapshot_download()` 路径（已正确）
   3. 断言应通过公共接口（`get_download_stats()`、`get_seeding_status()`）而非内部状态验证
 
-### 1.5 - logging.basicConfig 不应在库中调用
+### ~~1.5 - logging.basicConfig 不应在库中调用~~ ✅
 - **现状**：`__init__.py` L28-31 调用了 `logging.basicConfig(level=logging.INFO, ...)`。
 - **问题**：这是 Python 库的严重反模式。`basicConfig()` 会覆盖用户应用程序自己的日志配置。用户 `import llmpt` 后，整个应用的日志格式和级别都被静默修改。
 - **方案**：

@@ -24,12 +24,11 @@ from typing import Optional
 
 from .utils import lt, LIBTORRENT_AVAILABLE as _LIBTORRENT_AVAILABLE
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(name)s] %(levelname)s: %(message)s'
-)
+# Setup logging — use NullHandler per Python library best practices.
+# This avoids "No handlers found" warnings while leaving log
+# configuration (level, format, handlers) entirely to the end-user.
 logger = logging.getLogger('llmpt')
+logger.addHandler(logging.NullHandler())
 
 # Global state
 _patched = False
