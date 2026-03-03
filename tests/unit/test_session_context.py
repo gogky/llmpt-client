@@ -346,6 +346,22 @@ class TestInitTorrent:
         with patch('llmpt.session_context.run_monitor_loop'), \
              patch('os.path.exists', return_value=False), \
              patch('os.makedirs'), \
+             patch.dict(os.environ, {'TEST_SEEDER_PEER': 'seeder-host:6881'}), \
+             patch('socket.gethostbyname', return_value='10.0.0.5') as mock_dns:
+            result = ctx._init_torrent()
+
+        assert result is True
+        mock_dns.assert_called_once_with('seeder-host')
+        mock_handle.connect_peer.assert_called_once_with(('10.0.0.5', 6881), 0)
+
+    def test_test_seeder_peer_no_port(self, make_ctx, mock_lt):
+        """When TEST_SEEDER_PEER has no port, should default to 6881."""
+        ctx = make_ctx()
+        mock_handle, mock_ti = _setup_successful_init(ctx, mock_lt)
+
+        with patch('llmpt.session_context.run_monitor_loop'), \
+             patch('os.path.exists', return_value=False), \
+             patch('os.makedirs'), \
              patch.dict(os.environ, {'TEST_SEEDER_PEER': 'seeder-host'}), \
              patch('socket.gethostbyname', return_value='10.0.0.5') as mock_dns:
             result = ctx._init_torrent()
@@ -353,6 +369,23 @@ class TestInitTorrent:
         assert result is True
         mock_dns.assert_called_once_with('seeder-host')
         mock_handle.connect_peer.assert_called_once_with(('10.0.0.5', 6881), 0)
+
+    def test_test_seeder_peer_ipv6_bracket(self, make_ctx, mock_lt):
+        """When TEST_SEEDER_PEER uses [IPv6]:port notation, should parse correctly."""
+        ctx = make_ctx()
+        mock_handle, mock_ti = _setup_successful_init(ctx, mock_lt)
+
+        with patch('llmpt.session_context.run_monitor_loop'), \
+             patch('os.path.exists', return_value=False), \
+             patch('os.makedirs'), \
+             patch.dict(os.environ, {'TEST_SEEDER_PEER': '[::1]:7000'}), \
+             patch('socket.gethostbyname', return_value='::1') as mock_dns:
+            result = ctx._init_torrent()
+
+        assert result is True
+        mock_dns.assert_called_once_with('::1')
+        mock_handle.connect_peer.assert_called_once_with(('::1', 7000), 0)
+
 
 
 # ─── download_file ────────────────────────────────────────────────────────────

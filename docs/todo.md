@@ -1,5 +1,7 @@
 # llmpt-client 开发路线图
 
+注意本项目使用uv管理python环境，本地存在.venv目录
+
 ## 依赖关系总览
 
 ```mermaid
@@ -30,10 +32,8 @@ graph TD
 
 ## P0 — 基础保障（不需要大改动，但影响全局正确性）
 
-### 0.1 · 服务端 `/api/v1/health` 端点
-- **现状**：`docker-compose.test.yml` 的 healthcheck 已经在调用 `/api/v1/health`，但不确定服务端是否已稳定实现。
-- **范围**：纯服务端工作。客户端无需改动，但 E2E 测试的可靠性依赖于此。
-- **建议**：确认服务端已实现，若无则补充。
+### ~~0.1 · 服务端 `/api/v1/health` 端点~~ ✅
+- **已完成**：服务端 `web-server` 和 `tracker` 均已注册 `/api/v1/health`（复用 `/health` handler）。
 
 ---
 
@@ -108,7 +108,7 @@ graph TD
 - **收益**：消除 metadata 等待超时（当前最常见的失败原因之一）
 
 ### 2.2 · 服务端自动做种 (Webseed 前提)
-- **现状**：做种完全依赖已有用户的客户端持续运行。如果没人在线做种，新用户的 P2P 请求 100% 失败。
+- **现状**：做种完全依赖已有用户的客户端持续运行。如果没人在线做种，新用户的 P2P 请求 100% 失败。（客户关闭huggingface_hub后仍可以做种的解决方案）
 - **方案**：
   1. Tracker 服务端收到 torrent 注册后，自动启动一个做种进程
   2. 利用原始 HF Hub HTTP URL 作为 webseed（BEP 17/19），让 libtorrent 在没有 peer 时从 HF 官方 HTTP 拉取

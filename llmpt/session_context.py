@@ -125,9 +125,24 @@ class SessionContext:
             if test_peer:
                 import socket
                 try:
-                    ip = socket.gethostbyname(test_peer)
-                    self.test_peer_addr = (ip, 6881)
-                    logger.info(f"[{self.repo_id}] Test environment detected. Explicitly connecting to peer {test_peer} ({ip}):6881")
+                    # Parse host:port with IPv6-safe handling
+                    # Supported formats: "hostname", "hostname:port",
+                    #   "1.2.3.4:port", "[::1]:port"
+                    if test_peer.startswith('['):
+                        # IPv6 bracket notation: [::1]:port
+                        bracket_end = test_peer.index(']')
+                        host = test_peer[1:bracket_end]
+                        port = int(test_peer[bracket_end + 2:]) if len(test_peer) > bracket_end + 2 else 6881
+                    elif ':' in test_peer:
+                        host, port_str = test_peer.rsplit(':', 1)
+                        port = int(port_str)
+                    else:
+                        host = test_peer
+                        port = 6881
+                    
+                    ip = socket.gethostbyname(host)
+                    self.test_peer_addr = (ip, port)
+                    logger.info(f"[{self.repo_id}] Test environment detected. Explicitly connecting to peer {host} ({ip}):{port}")
                     self.handle.connect_peer(self.test_peer_addr, 0)
                 except Exception as e:
                     logger.warning(f"Failed to resolve test peer {test_peer}: {e}")

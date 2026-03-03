@@ -18,6 +18,46 @@ from .session_context import SessionContext  # noqa: F401
 
 logger = logging.getLogger('llmpt.p2p_batch')
 
+# Default port range for libtorrent listen interface.
+_DEFAULT_PORT = 6881
+_MAX_PORT = 6999
+
+
+def _resolve_listen_interfaces(configured_port) -> str:
+    """Resolve the ``listen_interfaces`` setting for libtorrent.
+
+    Strategy:
+      * ``configured_port > 0``  → use exactly that port (user/env override).
+      * ``configured_port`` is ``None`` or ``0`` → try *_DEFAULT_PORT* first,
+        then walk 6882 … *_MAX_PORT*.  If every port in the range is busy,
+        fall back to ``0`` (OS-assigned).
+
+    The pre-check uses a quick ``socket.bind()`` probe.  There is a tiny
+    TOCTOU window between releasing the socket and libtorrent binding, but
+    in practice this is reliable enough and libtorrent will simply skip a
+    failed interface.
+    """
+    if configured_port and configured_port > 0:
+        return f'0.0.0.0:{configured_port},[::]:{configured_port}'
+
+    import socket
+
+    for port in range(_DEFAULT_PORT, _MAX_PORT + 1):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind(('0.0.0.0', port))
+            return f'0.0.0.0:{port},[::]:{port}'
+        except OSError:
+            continue
+
+    logger.warning(
+        f"All ports {_DEFAULT_PORT}-{_MAX_PORT} occupied, "
+        "falling back to OS-assigned port"
+    )
+    return '0.0.0.0:0,[::]:0'
+
+
 class P2PBatchManager:
     """
     Manages global P2P download sessions for different HuggingFace repositories.
@@ -41,10 +81,14 @@ class P2PBatchManager:
             # Mapping from (repo_id, revision) -> SessionContext
             self.sessions: Dict[tuple, SessionContext] = {}
             if LIBTORRENT_AVAILABLE:
+                from . import get_config
+                configured_port = get_config().get('port')
                 self.lt_session = lt.session()
                 settings = self.lt_session.get_settings()
-                settings['listen_interfaces'] = '0.0.0.0:6881'
+                settings['listen_interfaces'] = _resolve_listen_interfaces(configured_port)
                 self.lt_session.apply_settings(settings)
+                actual_port = self.lt_session.listen_port()
+                logger.info(f"libtorrent listening on port {actual_port}")
             else:
                 self.lt_session = None
 

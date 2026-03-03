@@ -38,6 +38,7 @@ _config = {
     'auto_seed': True,
     'seed_duration': 3600,  # 1 hour
     'timeout': 300,  # 5 minutes
+    'port': None,  # None = use default 6881 with auto-fallback; set int to override
 }
 
 __version__ = "0.1.0"
@@ -55,6 +56,7 @@ def enable_p2p(
     auto_seed: bool = True,
     seed_duration: int = 3600,
     timeout: int = 300,
+    port: Optional[int] = None,
 ) -> None:
     """
     Enable P2P-accelerated downloads for HuggingFace Hub.
@@ -65,6 +67,8 @@ def enable_p2p(
         auto_seed: Whether to automatically seed downloaded files.
         seed_duration: How long to seed in seconds (0 = forever).
         timeout: P2P download timeout in seconds.
+        port: The port to bind libtorrent to. Defaults to HF_P2P_PORT env var,
+              or auto-selects from 6881-6999 range.
 
     Example:
         >>> from llmpt import enable_p2p
@@ -94,6 +98,10 @@ def enable_p2p(
     _config['auto_seed'] = auto_seed
     _config['seed_duration'] = seed_duration
     _config['timeout'] = timeout
+    if port is not None:
+        _config['port'] = port
+    elif os.getenv('HF_P2P_PORT'):
+        _config['port'] = int(os.getenv('HF_P2P_PORT'))
 
     # Disable Xet Storage engine so ALL files (including LFS) go through http_get.
     # Without this, huggingface_hub routes LFS files via xet_get() which completely

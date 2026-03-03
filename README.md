@@ -103,6 +103,10 @@ HF_USE_P2P=1
 # Tracker 服务器地址（可选）
 HF_P2P_TRACKER=http://your-tracker.com
 
+# libtorrent 监听端口（可选）
+# 不设置时自动从 6881-6999 中选择可用端口
+HF_P2P_PORT=6881
+
 # 下载后自动做种（默认：1）
 HF_P2P_AUTO_SEED=1
 
@@ -112,6 +116,8 @@ HF_P2P_SEED_TIME=3600
 # P2P 下载超时时间（秒，默认：300）
 HF_P2P_TIMEOUT=300
 ```
+
+**端口选择策略**：不设置 `HF_P2P_PORT` 时，llmpt 会自动从 6881 开始探测可用端口（6881 → 6882 → … → 6999）。若该范围全部被占用，则由操作系统随机分配。显式设置 `HF_P2P_PORT` 可固定端口，适用于需要配置防火墙规则的场景。
 
 ### Python API
 
@@ -123,7 +129,8 @@ enable_p2p(
     tracker_url="http://your-tracker.com",
     auto_seed=True,
     seed_duration=3600,  # 做种 1 小时
-    timeout=300
+    timeout=300,
+    port=6881,           # 可选，指定监听端口
 )
 
 # 检查 P2P 是否启用
@@ -190,6 +197,7 @@ pytest tests/unit/
 pytest tests/integration/ --run-integration
 
 # E2E 测试（Docker 多容器，验证完整 P2P 下载链路）
+docker compose -f docker-compose.test.yml down
 docker compose -f docker-compose.test.yml up --build
 ```
 

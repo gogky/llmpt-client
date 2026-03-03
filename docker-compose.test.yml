@@ -16,6 +16,7 @@ services:
       - HF_HOME=/tmp/hf_cache_seeder
       - ROLE=seeder
       - TRACKER_URL=http://118.195.159.242
+      - HF_P2P_PORT=6881
     networks:
       - llmpt_test
     command: ["python", "-m", "pytest", "tests/e2e/run_seeder.py", "--run-integration", "-s"]
@@ -28,7 +29,7 @@ services:
   downloader:
     build:
       context: .
-      dockerfile: tests/integration/docker/Dockerfile.test
+      dockerfile: tests/e2e/Dockerfile.test
     container_name: llmpt-downloader
     depends_on:
       seeder:
@@ -39,7 +40,7 @@ services:
       - HF_HOME=/tmp/hf_cache_downloader
       - ROLE=downloader
       - TRACKER_URL=http://118.195.159.242
-      - TEST_SEEDER_PEER=llmpt-seeder
+      - TEST_SEEDER_PEER=llmpt-seeder:6881
     networks:
       - llmpt_test
     command: ["python", "-m", "pytest", "tests/e2e/test_docker_p2p.py", "--run-integration", "-v", "-s"]
