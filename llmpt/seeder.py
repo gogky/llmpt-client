@@ -6,12 +6,7 @@ We now unify all seeding directly into the P2PBatchManager.
 import logging
 from typing import Dict, Any, Optional
 
-try:
-    import libtorrent as lt
-    LIBTORRENT_AVAILABLE = True
-except ImportError:
-    LIBTORRENT_AVAILABLE = False
-    lt = None
+from .utils import lt, LIBTORRENT_AVAILABLE
 
 from llmpt.p2p_batch import P2PBatchManager
 

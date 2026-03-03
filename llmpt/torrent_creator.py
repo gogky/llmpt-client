@@ -6,12 +6,7 @@ import logging
 from pathlib import Path
 from typing import Optional, Any
 
-try:
-    import libtorrent as lt
-    LIBTORRENT_AVAILABLE = True
-except ImportError:
-    LIBTORRENT_AVAILABLE = False
-    lt = None
+from .utils import lt, LIBTORRENT_AVAILABLE
 
 logger = logging.getLogger('llmpt.torrent_creator')
 

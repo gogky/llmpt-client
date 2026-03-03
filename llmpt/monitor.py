@@ -13,10 +13,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .session_context import SessionContext
 
-try:
-    import libtorrent as lt
-except ImportError:
-    lt = None
+from .utils import lt
 
 logger = logging.getLogger('llmpt.p2p_batch')
 

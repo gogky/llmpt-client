@@ -10,12 +10,7 @@ import threading
 import logging
 from typing import Dict, Any, Optional
 
-try:
-    import libtorrent as lt
-    LIBTORRENT_AVAILABLE = True
-except ImportError:
-    LIBTORRENT_AVAILABLE = False
-    lt = None
+from .utils import lt, LIBTORRENT_AVAILABLE
 
 # Re-export SessionContext for backward compatibility.
 # All existing imports like ``from llmpt.p2p_batch import SessionContext`` continue to work.

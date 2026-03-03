@@ -15,12 +15,7 @@ from typing import Dict, Any, Optional
 
 from .monitor import run_monitor_loop
 
-try:
-    import libtorrent as lt
-    LIBTORRENT_AVAILABLE = True
-except ImportError:
-    LIBTORRENT_AVAILABLE = False
-    lt = None
+from .utils import lt, LIBTORRENT_AVAILABLE
 
 logger = logging.getLogger('llmpt.p2p_batch')
 

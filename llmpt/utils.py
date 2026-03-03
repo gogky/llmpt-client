@@ -3,6 +3,15 @@ Utility functions.
 """
 
 import hashlib
+
+# Centralized libtorrent availability check.
+# All modules should use: from .utils import lt, LIBTORRENT_AVAILABLE
+try:
+    import libtorrent as lt
+    LIBTORRENT_AVAILABLE = True
+except ImportError:
+    LIBTORRENT_AVAILABLE = False
+    lt = None
 from pathlib import Path
 from typing import Optional
 

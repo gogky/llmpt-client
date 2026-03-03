@@ -22,13 +22,7 @@ import os
 import logging
 from typing import Optional
 
-# Check libtorrent availability
-try:
-    import libtorrent as lt
-    _LIBTORRENT_AVAILABLE = True
-except ImportError:
-    _LIBTORRENT_AVAILABLE = False
-    lt = None
+from .utils import lt, LIBTORRENT_AVAILABLE as _LIBTORRENT_AVAILABLE
 
 # Setup logging
 logging.basicConfig(
