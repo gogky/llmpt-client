@@ -132,7 +132,8 @@ class TestCmdSeed:
     @patch('llmpt.cli.start_seeding', create=True)
     @patch('llmpt.cli.create_and_register_torrent', create=True)
     @patch('llmpt.cli.TrackerClient', create=True)
-    def test_seed_creation_failure(self, MockTracker, mock_create, mock_start):
+    @patch('llmpt.utils.resolve_commit_hash', side_effect=lambda repo, rev, repo_type='model': rev)
+    def test_seed_creation_failure(self, mock_resolve, MockTracker, mock_create, mock_start):
         """If create_and_register_torrent fails, should exit(1)."""
         mock_create.return_value = False
 
@@ -154,7 +155,8 @@ class TestCmdSeed:
     @patch('llmpt.cli.start_seeding', create=True)
     @patch('llmpt.cli.create_and_register_torrent', create=True)
     @patch('llmpt.cli.TrackerClient', create=True)
-    def test_seed_success_and_ctrl_c(self, MockTracker, mock_create, mock_start, mock_sleep):
+    @patch('llmpt.utils.resolve_commit_hash', side_effect=lambda repo, rev, repo_type='model': rev)
+    def test_seed_success_and_ctrl_c(self, mock_resolve, MockTracker, mock_create, mock_start, mock_sleep):
         """Successful seed should loop until KeyboardInterrupt."""
         mock_create.return_value = True
 

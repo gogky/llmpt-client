@@ -65,12 +65,20 @@ def _truncate_temp_file(temp_file, filename: str) -> None:
 def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
     """Patched version of hf_hub_download that injects P2P context."""
     from .tracker_client import TrackerClient
+    from .utils import resolve_commit_hash
 
     # Query tracker for torrent info
     tracker = TrackerClient(_config['tracker_url'])
 
-    # Get commit_hash from kwargs or resolve it
-    revision = kwargs.get('revision', 'main')
+    # Resolve revision to a 40-char commit hash so the tracker query matches
+    # what seeders registered.  If resolution fails (e.g. network error),
+    # fall back to the raw value — the download still works via HTTP.
+    raw_revision = kwargs.get('revision', 'main')
+    try:
+        revision = resolve_commit_hash(repo_id, raw_revision)
+    except Exception as e:
+        logger.debug(f"[P2P] Could not resolve revision '{raw_revision}': {e}")
+        revision = raw_revision
 
     # Resolve subfolder exactly as huggingface_hub does
     actual_filename = filename

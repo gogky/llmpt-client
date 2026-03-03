@@ -154,15 +154,30 @@ def cmd_seed(args):
     from llmpt.tracker_client import TrackerClient
     from llmpt.torrent_creator import create_and_register_torrent
     from llmpt.seeder import start_seeding
+    from llmpt.utils import resolve_commit_hash
 
     tracker = TrackerClient(args.tracker or 'http://localhost:8080')
 
-    print(f"Resolving caching structure and creating torrent for {args.repo_id}@{args.revision}...")
+    # Resolve revision (e.g. "main") to a 40-char commit hash so the tracker
+    # entry is always keyed by the immutable commit identifier.
+    raw_revision = args.revision
+    try:
+        revision = resolve_commit_hash(
+            args.repo_id, raw_revision, repo_type=args.repo_type
+        )
+    except Exception as e:
+        print(f"Error: Could not resolve revision '{raw_revision}': {e}")
+        sys.exit(1)
+
+    if revision != raw_revision:
+        print(f"Resolved revision: {raw_revision} → {revision}")
+
+    print(f"Resolving caching structure and creating torrent for {args.repo_id}@{revision}...")
 
     # Create and register torrent
     success = create_and_register_torrent(
         repo_id=args.repo_id,
-        revision=args.revision,
+        revision=revision,
         repo_type=args.repo_type,
         name=args.name,
         tracker_client=tracker,
@@ -178,7 +193,7 @@ def cmd_seed(args):
     # Start unified seeding natively in P2PBatch
     start_seeding(
         repo_id=args.repo_id,
-        revision=args.revision,
+        revision=revision,
         tracker_client=tracker
     )
     

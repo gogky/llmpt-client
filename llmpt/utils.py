@@ -3,6 +3,9 @@ Utility functions.
 """
 
 import hashlib
+import logging
+import re
+import threading
 
 # Centralized libtorrent availability check.
 # All modules should use: from .utils import lt, LIBTORRENT_AVAILABLE
@@ -14,6 +17,72 @@ except ImportError:
     lt = None
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger('llmpt.utils')
+
+# ── Revision resolution ────────────────────────────────────────────────────────
+# Matches a 40-character lowercase hexadecimal string (Git commit hash format).
+_COMMIT_HASH_RE = re.compile(r'^[0-9a-f]{40}$')
+
+# In-memory cache: (repo_id, revision, repo_type) → resolved commit hash.
+# Populated lazily by resolve_commit_hash(). Never expires within a process
+# because commit hashes are immutable.
+_revision_cache: dict = {}
+_revision_cache_lock = threading.Lock()
+
+
+def resolve_commit_hash(
+    repo_id: str,
+    revision: str = 'main',
+    repo_type: str = 'model',
+) -> str:
+    """Resolve a branch name, tag, or partial ref to a full 40-char commit hash.
+
+    If *revision* is already a 40-character hex string it is returned as-is
+    (no network call).  Otherwise ``HfApi.repo_info()`` is called once and the
+    result is cached for the lifetime of the process.
+
+    Args:
+        repo_id: HuggingFace repository ID (e.g. ``"meta-llama/Llama-2-7b"``).
+        revision: Branch name, tag, or commit hash to resolve.
+        repo_type: Repository type (``"model"``, ``"dataset"``, ``"space"``).
+
+    Returns:
+        The resolved 40-character commit hash.
+
+    Raises:
+        Exception: If the HuggingFace Hub API call fails (caller should handle).
+    """
+    # Fast-path: already a full commit hash
+    if _COMMIT_HASH_RE.match(revision):
+        return revision
+
+    cache_key = (repo_id, revision, repo_type)
+
+    with _revision_cache_lock:
+        if cache_key in _revision_cache:
+            return _revision_cache[cache_key]
+
+    # Call HuggingFace Hub API to resolve the revision
+    from huggingface_hub import HfApi
+
+    api = HfApi()
+    info = api.repo_info(repo_id=repo_id, revision=revision, repo_type=repo_type)
+    commit_hash = info.sha
+
+    if not commit_hash or not _COMMIT_HASH_RE.match(commit_hash):
+        raise ValueError(
+            f"HfApi.repo_info() returned unexpected sha '{commit_hash}' "
+            f"for {repo_id}@{revision}"
+        )
+
+    with _revision_cache_lock:
+        _revision_cache[cache_key] = commit_hash
+
+    logger.info(
+        f"Resolved revision '{revision}' -> '{commit_hash}' for {repo_id}"
+    )
+    return commit_hash
 
 
 def calculate_file_hash(file_path: str, algorithm: str = 'sha256') -> str:

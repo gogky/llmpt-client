@@ -28,6 +28,7 @@ def test_tracker_url_normalization():
 @responses.activate
 def test_get_torrent_info_success(tracker_client):
     """Test successful retrieval of torrent info."""
+    # Call without revision — server returns all, client takes first
     responses.add(
         responses.GET,
         "http://tracker.example.com/api/v1/torrents",
@@ -36,30 +37,47 @@ def test_get_torrent_info_success(tracker_client):
                 {
                     "info_hash": "12345",
                     "magnet_link": "magnet:?xt=urn:btih:12345",
-                    "revision": "main"
+                    "revision": "abc123"
                 },
-                {
-                    "info_hash": "67890",
-                    "magnet_link": "magnet:?xt=urn:btih:67890",
-                    "revision": "old_branch"
-                }
             ],
-            "total": 2
+            "total": 1
         },
         status=200
     )
     
-    # 1. Test getting latest (no revision specified) - should return first item
     result = tracker_client.get_torrent_info("meta-llama/Llama-2")
     assert result is not None
     assert result["info_hash"] == "12345"
-    
-    # 2. Test getting specific revision
-    result_rev = tracker_client.get_torrent_info("meta-llama/Llama-2", revision="old_branch")
+
+    # Call with specific revision — server filters, client takes first
+    responses.add(
+        responses.GET,
+        "http://tracker.example.com/api/v1/torrents",
+        json={
+            "data": [
+                {
+                    "info_hash": "67890",
+                    "magnet_link": "magnet:?xt=urn:btih:67890",
+                    "revision": "old_hash"
+                }
+            ],
+            "total": 1
+        },
+        status=200
+    )
+
+    result_rev = tracker_client.get_torrent_info("meta-llama/Llama-2", revision="old_hash")
     assert result_rev is not None
     assert result_rev["info_hash"] == "67890"
 
-    # 3. Test non-existent revision
+    # Call with revision that server has no match for — empty list
+    responses.add(
+        responses.GET,
+        "http://tracker.example.com/api/v1/torrents",
+        json={"data": [], "total": 0},
+        status=200
+    )
+
     result_none = tracker_client.get_torrent_info("meta-llama/Llama-2", revision="nonexistent")
     assert result_none is None
 

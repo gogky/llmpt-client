@@ -35,7 +35,7 @@ class TrackerClient:
 
         Args:
             repo_id: HuggingFace repository ID (e.g., "meta-llama/Llama-2-7b").
-            revision: Git commit hash or branch name. If None, uses latest.
+            revision: Git commit hash or branch name. If None, returns the most recent.
 
         Returns:
             Dictionary containing torrent info (magnet_link, info_hash, etc.)
@@ -43,9 +43,10 @@ class TrackerClient:
         """
         try:
             url = urljoin(self.tracker_url, '/api/v1/torrents')
-            # Server only filters by repo_id
             params = {'repo_id': repo_id}
-            
+            if revision:
+                params['revision'] = revision
+
             logger.debug(f"Querying tracker: {url} with params {params}")
 
             response = self.session.get(
@@ -65,22 +66,13 @@ class TrackerClient:
             torrents = data.get('data', [])
             
             if not torrents:
-                logger.debug(f"No torrent found for {repo_id}")
+                logger.debug(f"No torrent found for {repo_id}" + (f" (revision: {revision})" if revision else ""))
                 return None
 
-            # Filter locally by revision if provided
-            if revision:
-                for t in torrents:
-                    if t.get('revision') == revision:
-                        logger.info(f"Found torrent for {repo_id} (revision: {revision}): {t.get('info_hash', 'N/A')}")
-                        return t
-                logger.debug(f"No torrent found for {repo_id} at revision {revision}")
-                return None
-            else:
-                # Return the most recently created one (server sorts by created_at DESC)
-                torrent = torrents[0]
-                logger.info(f"Found latest torrent for {repo_id}: {torrent.get('info_hash', 'N/A')}")
-                return torrent
+            # Server now filters by revision, so the first result is the match
+            torrent = torrents[0]
+            logger.info(f"Found torrent for {repo_id} (revision: {torrent.get('revision', 'N/A')}): {torrent.get('info_hash', 'N/A')}")
+            return torrent
 
         except requests.RequestException as e:
             logger.warning(f"Failed to query tracker: {e}")

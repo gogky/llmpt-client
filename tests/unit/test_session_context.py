@@ -213,28 +213,20 @@ class TestInitTorrent:
         assert result is False
         assert ctx.is_valid is False
 
-    def test_hash_revision_fallback_to_main(self, make_ctx, mock_lt):
-        """When revision is a 40+ char hash and first lookup fails, should retry with 'main'."""
+    def test_hash_revision_no_fallback_to_main(self, make_ctx, mock_lt):
+        """After revision unification (1.1), there is no 'retry with main'
+        fallback.  A missing tracker entry should fail immediately."""
         ctx = make_ctx(revision="a" * 40)
-        ctx.tracker_client.get_torrent_info.side_effect = [
-            None,  # First lookup with hash
-            {"info_hash": "abc", "magnet_link": "magnet:?xt=urn:btih:abc"},  # Retry with 'main'
-        ]
+        ctx.tracker_client.get_torrent_info.return_value = None
 
-        mock_handle, mock_ti = _setup_successful_init(ctx, mock_lt)
-        # Override the side_effect we just set up (setup helper overrides return_value)
-        ctx.tracker_client.get_torrent_info.side_effect = [
-            None,
-            {"info_hash": "abc", "magnet_link": "magnet:?xt=urn:btih:abc"},
-        ]
+        result = ctx._init_torrent()
 
-        with patch('llmpt.session_context.run_monitor_loop'), \
-             patch('os.path.exists', return_value=False), \
-             patch('os.makedirs'):
-            result = ctx._init_torrent()
-
-        assert result is True
-        assert ctx.tracker_client.get_torrent_info.call_count == 2
+        assert result is False
+        assert ctx.is_valid is False
+        # Should only call tracker once, no second call with 'main'
+        ctx.tracker_client.get_torrent_info.assert_called_once_with(
+            "test/repo", "a" * 40
+        )
 
     def test_successful_magnet_init(self, make_ctx, mock_lt):
         """Full successful path: tracker → parse_magnet → add_torrent → metadata → resume."""

@@ -153,10 +153,20 @@ def create_and_register_torrent(
     if not torrent_info:
         return False
 
-    # Register with tracker using the human-readable revision
+    # Always register with the resolved commit hash from the snapshot path.
+    # This provides defense-in-depth: even if the caller passed a branch name
+    # like "main", the tracker entry will use the immutable commit hash.
+    resolved_revision = torrent_info.get('commit_hash', revision)
+    if resolved_revision != revision:
+        logger.info(
+            f"Revision override: registering with commit hash "
+            f"'{resolved_revision}' instead of '{revision}'"
+        )
+
+    # Register with tracker using the resolved commit hash
     success = tracker_client.register_torrent(
         repo_id=repo_id,
-        revision=revision,
+        revision=resolved_revision,
         repo_type=repo_type,
         name=name,
         info_hash=torrent_info['info_hash'],

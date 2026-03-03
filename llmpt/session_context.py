@@ -66,12 +66,7 @@ class SessionContext:
         
         # 1. Ask tracker for torrent info
         torrent_metadata = self.tracker_client.get_torrent_info(self.repo_id, self.revision)
-        
-        # If not found and we used a commit hash naturally, try the human-readable 'main' fallback branch
-        if not torrent_metadata and len(self.revision) >= 40:
-            logger.info(f"[{self.repo_id}] Hash lookup failed, retrying tracker lookup using 'main' alias...")
-            torrent_metadata = self.tracker_client.get_torrent_info(self.repo_id, "main")
-            
+
         if not torrent_metadata or 'magnet_link' not in torrent_metadata:
             logger.warning(f"[{self.repo_id}] No torrent metadata found on tracker.")
             self.is_valid = False

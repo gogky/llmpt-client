@@ -94,11 +94,29 @@ llmpt-cli stop
 
 ## 配置
 
+### 快速开始
+
+如果无法直接访问 `huggingface.co`，需要设置 HuggingFace 镜像。llmpt 完全兼容 `HF_ENDPOINT` 环境变量：
+
+```bash
+# 设置 HuggingFace 镜像（如果无法访问 huggingface.co）
+export HF_ENDPOINT=https://hf-mirror.com
+
+# 启用 P2P 加速
+export HF_USE_P2P=1
+export HF_P2P_TRACKER=http://your-tracker.com
+```
+
+> **注意**：llmpt 在做种和下载时需要调用 HuggingFace API 解析仓库版本信息。如果未设置镜像且无法访问 `huggingface.co`，版本解析将超时失败。
+
 ### 环境变量
 
 ```bash
 # 启用 P2P
 HF_USE_P2P=1
+
+# HuggingFace 镜像（如果无法访问 huggingface.co）
+HF_ENDPOINT=https://hf-mirror.com
 
 # Tracker 服务器地址（可选）
 HF_P2P_TRACKER=http://your-tracker.com

@@ -41,15 +41,16 @@ graph TD
 
 ## P1 — 高优先级（核心正确性 & 阻塞其他工作）
 
-### 1.1 · revision 统一为 commit hash0
-- **现状**：`_patched_hf_hub_download` 中 `revision` 来自 `kwargs.get('revision', 'main')`，而 `huggingface_hub` 实际会在内部将 `main` 解析为 40 字符 commit hash。`session_context._init_torrent()` 虽然有"hash lookup 失败后 fallback 到 main"的逻辑（L65-67），但这只是一个 workaround。
-- **问题**：
-  - 做种时通过 CLI 传入的 `--revision main` 与下载时 huggingface_hub 内部解析的 commit hash 不匹配，导致 tracker 查询失败
-  - 同一个仓库随着更新会产生不同的 commit hash，如果 tracker 上存的是 `main` 则无法区分版本
-- **方案**：
-  1. 在 `_patched_hf_hub_download` 中，调用 `huggingface_hub.hf_api.repo_info()` 或类似 API 将 `main` 解析为具体 commit hash
-  2. CLI `seed` 命令也应自动解析 revision → commit hash
-  3. Tracker 端始终以 commit hash 为 key 存储
+### ~~1.1 · revision 统一为 commit hash~~ ✅
+- **已完成**：
+  - `utils.py` 新增 `resolve_commit_hash()` —— 通过 `HfApi.repo_info()` 将分支名/标签解析为 40 字符 commit hash，带进程内缓存
+  - `patch.py`：`_patched_hf_hub_download` 在存储 P2P 上下文前解析 revision（失败时 gracefully fallback 为原始值）
+  - `cli.py`：`cmd_seed` 在创建 torrent 和注册前解析 revision
+  - `torrent_creator.py`：`create_and_register_torrent` 使用 snapshot 路径中的实际 commit hash 进行注册（defense-in-depth）
+  - `session_context.py`：移除了 "hash lookup failed → retry with main" 的 workaround
+  - **服务端** `publish.go`：新增 commit hash 格式校验（拒绝非 40 字符 hex 的 revision）
+  - **服务端** `torrents.go`：`ListTorrents` 支持 `revision` 查询参数（之前仅支持 `repo_id`）
+  - **客户端** `tracker_client.py`：`get_torrent_info` 将 revision 作为服务端查询参数传递（之前为客户端本地过滤）
 - **阻塞**：跨版本 swarm 共享 (3.1)、服务端存储 .torrent (2.1) 都依赖 revision 语义的明确性
 
 ### ~~1.2 · 端口动态分配~~ ✅
