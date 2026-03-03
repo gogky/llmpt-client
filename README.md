@@ -7,9 +7,9 @@ HuggingFace Hub 模型的 P2P 加速下载客户端
 - 🚀 **无缝集成**：无需修改代码，直接替换 `huggingface_hub` 下载
 - 🌐 **P2P 加速**：通过 BitTorrent 从其他用户处下载模型
 - 📦 **自动降级**：P2P 失败时自动降级到 HTTP
-- 🔄 **自动做种**：下载完成后自动做种，帮助其他用户
-- 💾 **断点续传**：支持恢复中断的下载
+-  **断点续传**：支持 fastresume，恢复中断的下载
 - 🎯 **最小代码修改**：只需添加一行 `import llmpt` 即可启用 P2P
+- 🖥️ **CLI 工具**：提供 `llmpt-cli` 命令行工具，支持下载、做种、状态查看
 
 ## 安装
 
@@ -58,17 +58,39 @@ snapshot_download("meta-llama/Llama-2-7b")
 
 ## 工作原理
 
-1. **首次下载**：当你第一次下载某个模型时：
-   - 检查 tracker 是否有现有种子
-   - 如果没有，通过 HTTP 下载
-   - 自动创建种子并开始做种
-   - 上传种子元数据到 tracker
+llmpt 通过 Monkey Patch 拦截 `huggingface_hub` 的下载流程，将文件请求路由到 BitTorrent 网络：
 
-2. **后续下载**：当其他人下载相同模型时：
-   - 从 tracker 获取种子信息
-   - 从多个节点下载（P2P）
-   - 如果 P2P 太慢或失败，降级到 HTTP
-   - 下载完成后自动做种
+1. **Monkey Patch 拦截**：`enable_p2p()` 对 `hf_hub_download` 和 `http_get` 进行 Monkey Patch
+2. **上下文注入**：当 `hf_hub_download` 被调用时，注入 P2P 上下文（repo_id、filename、tracker 信息）
+3. **HTTP 请求拦截**：每个文件的 `http_get` 调用被拦截，转交给 `P2PBatchManager`
+4. **BitTorrent 下载**：`P2PBatchManager` 为每个仓库维护一个 `SessionContext`，通过 magnet link 加入 BitTorrent swarm 下载文件
+5. **自动降级**：如果 P2P 下载超时或失败，自动回退到原始 HTTP 下载
+
+> **注意**：做种需要通过 CLI 工具 `llmpt-cli seed` 手动触发，下载时不会自动创建种子。
+
+## CLI 工具
+
+安装后可使用 `llmpt-cli` 命令行工具：
+
+```bash
+# 通过 P2P 下载模型
+llmpt-cli download meta-llama/Llama-2-7b
+
+# 指定 Tracker 下载
+llmpt-cli download gpt2 --tracker http://tracker.example.com
+
+# 为已缓存的仓库创建种子并做种
+llmpt-cli seed --repo-id gpt2 --revision main
+
+# 查看做种状态
+llmpt-cli status
+
+# 停止指定仓库的做种
+llmpt-cli stop gpt2@main
+
+# 停止所有做种
+llmpt-cli stop
+```
 
 ## 配置
 
@@ -94,7 +116,7 @@ HF_P2P_TIMEOUT=300
 ### Python API
 
 ```python
-from llmpt import enable_p2p, disable_p2p, stop_seeding
+from llmpt import enable_p2p, disable_p2p, is_enabled, stop_seeding, get_config
 
 # 使用自定义设置启用
 enable_p2p(
@@ -103,6 +125,12 @@ enable_p2p(
     seed_duration=3600,  # 做种 1 小时
     timeout=300
 )
+
+# 检查 P2P 是否启用
+is_enabled()  # -> True
+
+# 获取当前配置
+get_config()  # -> {'tracker_url': '...', 'auto_seed': True, ...}
 
 # 禁用 P2P
 disable_p2p()
@@ -118,11 +146,20 @@ stop_seeding()
     ↓
 huggingface_hub.snapshot_download()
     ↓
-llmpt (Monkey Patch)
+llmpt Monkey Patch (hf_hub_download + http_get)
     ↓
-    ├─→ 查询 Tracker：种子是否存在？
-    │   ├─→ 是：P2P 下载（libtorrent）
-    │   └─→ 否：HTTP 下载 → 创建种子 → 做种
+    ├─→ _patched_hf_hub_download: 注入 P2P 上下文
+    │     ↓
+    │   _patched_http_get: 拦截 HTTP 请求
+    │     ↓
+    │   P2PBatchManager.register_request()
+    │     ↓
+    │   SessionContext.download_file()
+    │     ├─→ 查询 Tracker (magnet link)
+    │     ├─→ 加入 BitTorrent swarm (libtorrent)
+    │     ├─→ monitor 后台监控 & 交付文件
+    │     ├─→ 成功 → 跳过 HTTP ✓
+    │     └─→ 超时/失败 → Fallback 到原始 HTTP
     ↓
 返回文件路径
 ```
@@ -148,9 +185,11 @@ pip install -e ".[dev]"
 ```bash
 # 单元测试
 pytest tests/unit/
+
 # 集成测试
 pytest tests/integration/ --run-integration
-# 端到端测试
+
+# 端到端测试（Docker，需要 Tracker 服务可用）
 docker compose -f docker-compose.test.yml down
 docker compose -f docker-compose.test.yml up --build
 ```
@@ -160,95 +199,28 @@ docker compose -f docker-compose.test.yml up --build
 ```
 llmpt-client/
 ├── llmpt/                    # 主包
-│   ├── __init__.py           # 入口点，Monkey Patch
-│   ├── patch.py              # Monkey Patch 实现
+│   ├── __init__.py           # 入口点，自动启用逻辑
+│   ├── patch.py              # Monkey Patch 实现（hf_hub_download + http_get）
+│   ├── p2p_batch.py          # P2P 批量管理器（单例，调度核心）
+│   ├── session_context.py    # 会话上下文（管理单个 torrent 生命周期）
+│   ├── monitor.py            # 后台监控循环（进度跟踪 & 文件交付）
 │   ├── tracker_client.py     # Tracker API 客户端
-│   ├── downloader.py         # P2P 下载器（libtorrent）
 │   ├── seeder.py             # 做种管理器
-│   ├── torrent_creator.py    # 种子创建
+│   ├── torrent_creator.py    # 种子创建（v1_only 模式）
+│   ├── cli.py                # CLI 工具 (llmpt-cli)
 │   └── utils.py              # 工具函数
 ├── tests/                    # 测试
+│   ├── unit/                 # 单元测试
+│   └── integration/          # 集成测试 + Docker E2E 测试
 ├── examples/                 # 示例脚本
 ├── docs/                     # 文档
-└── setup.py                  # 安装配置
+├── setup.py                  # 安装配置
+├── setup.cfg                 # pytest / flake8 / mypy 配置
+├── requirements.txt          # 运行依赖
+├── requirements-dev.txt      # 开发依赖
+└── docker-compose.test.yml   # E2E 测试 Docker 编排
 ```
 
 ## 兼容性
 
-- ✅ Windows
 - ✅ Linux
-- ✅ macOS
-- ✅ Python 3.8+
-
-## 许可证
-
-MIT License
-
-## 贡献
-
-欢迎贡献！请随时提交 Pull Request。
-
-## 故障排除
-
-### libtorrent 安装失败
-
-如果 `python-libtorrent` 安装失败：
-
-```bash
-# Ubuntu/Debian
-sudo apt-get install python3-libtorrent
-
-# macOS
-brew install libtorrent-rasterbar
-pip install python-libtorrent
-
-# Windows
-# 从 https://github.com/arvidn/libtorrent/releases 下载预编译的 wheel
-pip install python_libtorrent-2.0.9-cp311-cp311-win_amd64.whl
-```
-
-### P2P 不工作
-
-1. 检查 P2P 是否已启用：
-```python
-import llmpt
-print(llmpt.is_enabled())
-```
-
-2. 检查 libtorrent 是否可用：
-```python
-try:
-    import libtorrent
-    print("libtorrent 可用")
-except ImportError:
-    print("libtorrent 不可用")
-```
-
-3. 检查 tracker 连接：
-```bash
-curl http://your-tracker.com/api/v1/torrents
-```
-
-### P2P 下载失效（退化为纯 HTTP 下载）
-
-如果你在 Python 脚本中调用，但发现 P2P 完全没起作用（甚至没有尝试），请确认：
-
-**`llmpt.enable_p2p()` 必须在任何下载调用（`snapshot_download` / `hf_hub_download`）之前执行。**
-
-`import` 的顺序不影响补丁效果——无论 `huggingface_hub` 在 `llmpt` 之前还是之后导入，补丁都会在 `enable_p2p()` 调用时正确注入到对应的子模块命名空间中。
-
-
-## 路线图
-
-- [x] 基础 P2P 下载
-- [x] 自动创建种子
-- [x] 自动做种
-- [ ] DHT 支持
-- [ ] 多 tracker 支持
-- [ ] 做种管理 Web UI
-- [ ] 下载统计
-
-## 致谢
-
-- [HuggingFace Hub](https://github.com/huggingface/huggingface_hub) - 官方 Python 客户端
-- [libtorrent](https://www.libtorrent.org/) - BitTorrent 库
