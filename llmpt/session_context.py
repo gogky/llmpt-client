@@ -19,6 +19,11 @@ from .utils import lt, LIBTORRENT_AVAILABLE
 
 logger = logging.getLogger('llmpt.p2p_batch')
 
+# ── Timeout defaults (seconds) ────────────────────────────────────────────────
+# Internal tuning knobs, NOT exposed to end users via the public API.
+# Override via environment variables for debugging / testing only.
+METADATA_TIMEOUT = int(os.environ.get('LLMPT_METADATA_TIMEOUT', '8'))
+
 
 class SessionContext:
     """
@@ -157,8 +162,8 @@ class SessionContext:
             
             start_time = time.time()
             while not self.handle.status().has_metadata:
-                if time.time() - start_time > 8: # Reduced to 8s for timeout
-                    logger.warning(f"[{self.repo_id}] Timeout waiting for torrent metadata. Falling back.")
+                if time.time() - start_time > METADATA_TIMEOUT:
+                    logger.warning(f"[{self.repo_id}] Timeout waiting for torrent metadata after {METADATA_TIMEOUT}s. Falling back.")
                     return False
                 time.sleep(1)
                 
@@ -357,20 +362,25 @@ class SessionContext:
         self.handle.force_recheck()
         logger.info(f"[{self.repo_id}] Force recheck initiated. Waiting for piece verification...")
         
-        # Wait for the recheck to complete (state transitions: checking_files -> seeding/finished)
+        # Wait for the recheck to complete (state transitions: checking_files -> seeding/finished).
+        # No hard timeout: seeding is a background operation and large models (400GB+) can
+        # take 10+ minutes to hash-verify on HDD. We log progress every 10s so the caller
+        # knows it's alive.
         recheck_start = time.time()
-        recheck_timeout = 120  # 2 minutes max for hash check
-        while time.time() - recheck_start < recheck_timeout:
+        last_log_time = 0.0
+        while True:
             s = self.handle.status()
             # State 1 = checking_files, State 7 = checking_resume_data
             if s.state not in (1, 7):
-                logger.info(f"[{self.repo_id}] Recheck complete. State: {s.state}, Progress: {s.progress*100:.1f}%, Pieces: {s.num_pieces}")
+                elapsed = time.time() - recheck_start
+                logger.info(f"[{self.repo_id}] Recheck complete in {elapsed:.0f}s. State: {s.state}, Progress: {s.progress*100:.1f}%, Pieces: {s.num_pieces}")
                 break
-            if int(time.time() - recheck_start) % 5 == 0:
-                logger.info(f"[{self.repo_id}] Rechecking... {s.progress*100:.1f}%")
+            now = time.time()
+            if now - last_log_time >= 10:
+                last_log_time = now
+                elapsed = now - recheck_start
+                logger.info(f"[{self.repo_id}] Rechecking... {s.progress*100:.1f}% ({elapsed:.0f}s elapsed)")
             time.sleep(0.5)
-        else:
-            logger.warning(f"[{self.repo_id}] Recheck timed out after {recheck_timeout}s")
         
         return True
 

@@ -108,7 +108,7 @@ class P2PBatchManager:
                     revision=revision,
                     tracker_client=tracker_client,
                     lt_session=self.lt_session,
-                    timeout=30, # short timeout for initialization
+                    timeout=0,  # unused: seeding path never calls download_file()
                     torrent_data=torrent_data,
                 )
             session_ctx = self.sessions[repo_key]
