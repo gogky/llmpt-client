@@ -61,6 +61,7 @@ def stop_seeding(repo_id: str, revision: str) -> bool:
             return False
             
         session_info = manager.sessions[repo_key]
+        session_info._cleanup_seeding_hardlinks()
         if session_info.handle:
             manager.lt_session.remove_torrent(session_info.handle)
             session_info.handle = None
@@ -80,6 +81,7 @@ def stop_all_seeding() -> int:
     count = 0
     with manager._lock:
         for repo_key, session_info in list(manager.sessions.items()):
+            session_info._cleanup_seeding_hardlinks()
             if session_info.handle:
                 manager.lt_session.remove_torrent(session_info.handle)
             del manager.sessions[repo_key]

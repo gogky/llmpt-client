@@ -143,19 +143,22 @@ class TestGetLtDiskPath:
 class TestDeliverFile:
 
     def test_hard_link_success(self, make_ctx, tmp_path):
-        """When src and dst are on the same filesystem, os.link should be used."""
+        """When src and dst are on same filesystem, os.link is used and src is cleaned up."""
         ctx = make_ctx()
 
         src = tmp_path / "src.bin"
         src.write_bytes(b"hello")
+        src_inode = os.stat(str(src)).st_ino
         dst = tmp_path / "subdir" / "dst.bin"
 
         ctx._deliver_file(str(src), str(dst))
 
         assert dst.exists()
         assert dst.read_bytes() == b"hello"
-        # Verify it's a hard link (same inode)
-        assert os.stat(str(src)).st_ino == os.stat(str(dst)).st_ino
+        # src should have been cleaned up after delivery
+        assert not src.exists()
+        # dst should retain the original inode (same data, hardlink)
+        assert os.stat(str(dst)).st_ino == src_inode
 
     def test_cross_device_fallback(self, make_ctx, tmp_path):
         """When os.link fails with OSError, should fall back to shutil.copy2."""
@@ -494,8 +497,8 @@ class TestMapAllFilesForSeeding:
         ctx.torrent_info_obj = None
         assert ctx.map_all_files_for_seeding() is False
 
-    def test_normal_file_mapping(self, make_ctx, mock_lt):
-        """Normal files should be resolved via try_to_load_from_cache and rename_file'd."""
+    def test_normal_file_mapping_uses_hardlinks_and_seed_mode(self, make_ctx, mock_lt):
+        """Normal files should be hardlinked and seed_mode enabled (no force_recheck)."""
         ctx = make_ctx()
         ctx.handle = MagicMock()
         ctx.temp_dir = "/tmp/p2p_root"
@@ -513,14 +516,10 @@ class TestMapAllFilesForSeeding:
         mock_ti.num_files.return_value = 2
         ctx.torrent_info_obj = mock_ti
 
-        # Simulate recheck completing immediately (state=5 → seeding)
-        mock_status = MagicMock()
-        mock_status.state = 5
-        mock_status.progress = 1.0
-        mock_status.num_pieces = 10
-        ctx.handle.status.return_value = mock_status
-
         with patch('os.makedirs'), \
+             patch('os.path.exists', return_value=False), \
+             patch('os.link') as mock_link, \
+             patch('os.unlink'), \
              patch('huggingface_hub.try_to_load_from_cache') as mock_cache, \
              patch('os.path.realpath') as mock_realpath:
 
@@ -534,12 +533,18 @@ class TestMapAllFilesForSeeding:
             result = ctx.map_all_files_for_seeding()
 
         assert result is True
-        assert ctx.handle.rename_file.call_count == 2
+        # Hardlinks should be created (not rename_file)
+        assert mock_link.call_count == 2
+        ctx.handle.rename_file.assert_not_called()
+        # seed_mode should be set (not force_recheck)
+        ctx.handle.set_flags.assert_called_once_with(mock_lt.torrent_flags.seed_mode)
         ctx.handle.resume.assert_called_once()
-        ctx.handle.force_recheck.assert_called_once()
+        ctx.handle.force_recheck.assert_not_called()
+        # Hardlink paths should be tracked for cleanup
+        assert len(ctx.seeding_hardlinks) == 2
 
     def test_padding_file_handling(self, make_ctx, mock_lt, tmp_path):
-        """Padding files (.pad/) should create zero-filled files on disk."""
+        """Padding files (.pad/) should create zero-filled files at the expected lt path."""
         ctx = make_ctx()
         ctx.handle = MagicMock()
         ctx.temp_dir = str(tmp_path)
@@ -554,22 +559,19 @@ class TestMapAllFilesForSeeding:
         mock_ti.num_files.return_value = 1
         ctx.torrent_info_obj = mock_ti
 
-        mock_status = MagicMock()
-        mock_status.state = 5
-        mock_status.progress = 1.0
-        mock_status.num_pieces = 1
-        ctx.handle.status.return_value = mock_status
-
         result = ctx.map_all_files_for_seeding()
 
         assert result is True
-        ctx.handle.rename_file.assert_called_once()
-        # Verify the padding file path was passed to rename_file
-        pad_path = ctx.handle.rename_file.call_args[0][1]
-        assert "pad_0_1024" in pad_path
+        # Padding file should be created at the expected libtorrent path
+        expected_pad_path = str(tmp_path / "root" / ".pad" / "1024")
+        assert os.path.exists(expected_pad_path)
+        assert os.path.getsize(expected_pad_path) == 1024
+        # seed_mode should still be enabled
+        ctx.handle.set_flags.assert_called_once_with(mock_lt.torrent_flags.seed_mode)
+        ctx.handle.force_recheck.assert_not_called()
 
     def test_cache_miss_continues(self, make_ctx, mock_lt):
-        """Files not in HF cache should be skipped (logged as warning) but not fail."""
+        """Files not in HF cache should be skipped but not fail."""
         ctx = make_ctx()
         ctx.handle = MagicMock()
         ctx.temp_dir = "/tmp/p2p_root"
@@ -584,20 +586,68 @@ class TestMapAllFilesForSeeding:
         mock_ti.num_files.return_value = 1
         ctx.torrent_info_obj = mock_ti
 
-        mock_status = MagicMock()
-        mock_status.state = 5
-        mock_status.progress = 1.0
-        mock_status.num_pieces = 1
-        ctx.handle.status.return_value = mock_status
-
         with patch('os.makedirs'), \
              patch('huggingface_hub.try_to_load_from_cache', return_value=None):
             result = ctx.map_all_files_for_seeding()
 
         assert result is True
-        # rename_file should NOT be called for cache-missed files
+        # No hardlinks or rename_file for cache-missed files
         ctx.handle.rename_file.assert_not_called()
-        # But resume and force_recheck should still be called
+        # seed_mode and resume should still be called
+        ctx.handle.set_flags.assert_called_once_with(mock_lt.torrent_flags.seed_mode)
         ctx.handle.resume.assert_called_once()
-        ctx.handle.force_recheck.assert_called_once()
+        ctx.handle.force_recheck.assert_not_called()
 
+    def test_cross_filesystem_fallback(self, make_ctx, mock_lt):
+        """When hardlink fails (OSError), should fall back to legacy rename_file + force_recheck."""
+        ctx = make_ctx()
+        ctx.handle = MagicMock()
+        ctx.temp_dir = "/tmp/p2p_root"
+
+        mock_files = MagicMock()
+        mock_files.num_files.return_value = 1
+        mock_files.file_path.return_value = "root/model.bin"
+        mock_files.file_size.return_value = 5000
+
+        mock_ti = MagicMock()
+        mock_ti.files.return_value = mock_files
+        mock_ti.num_files.return_value = 1
+        ctx.torrent_info_obj = mock_ti
+
+        # Simulate recheck completing immediately
+        mock_status = MagicMock()
+        mock_status.state = 5  # seeding
+        mock_status.progress = 1.0
+        mock_status.num_pieces = 10
+        ctx.handle.status.return_value = mock_status
+
+        with patch('os.makedirs'), \
+             patch('os.path.exists', return_value=False), \
+             patch('os.link', side_effect=OSError("cross-device link")), \
+             patch('huggingface_hub.try_to_load_from_cache', return_value="/hf/blobs/abc"), \
+             patch('os.path.realpath', return_value="/hf/blobs/abc"):
+            result = ctx.map_all_files_for_seeding()
+
+        assert result is True
+        # Should have fallen back to legacy: rename_file + force_recheck
+        ctx.handle.rename_file.assert_called()
+        ctx.handle.force_recheck.assert_called_once()
+        # seed_mode should NOT have been set
+        ctx.handle.set_flags.assert_not_called()
+
+    def test_cleanup_seeding_hardlinks(self, make_ctx, tmp_path):
+        """_cleanup_seeding_hardlinks should remove tracked hardlink files."""
+        ctx = make_ctx()
+
+        # Create some fake hardlink files
+        f1 = tmp_path / "link1.bin"
+        f2 = tmp_path / "link2.bin"
+        f1.write_bytes(b"data")
+        f2.write_bytes(b"data")
+
+        ctx.seeding_hardlinks = [str(f1), str(f2)]
+        ctx._cleanup_seeding_hardlinks()
+
+        assert not f1.exists()
+        assert not f2.exists()
+        assert ctx.seeding_hardlinks == []

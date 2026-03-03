@@ -287,42 +287,125 @@ class SessionContext:
 
     def map_all_files_for_seeding(self) -> bool:
         """
-        For a seeding task, we aggressively proactively map every single file in the torrent
-        to its local Hugging Face blob so that libtorrent can hash-check the whole repo instantly.
+        Map every file in the torrent to its local HuggingFace blob for seeding.
+
+        Strategy: create hardlinks at the paths libtorrent expects (its default
+        save_path layout) pointing to the real HF blob files, then enable
+        seed_mode so libtorrent starts serving immediately (0 seconds) with
+        lazy per-piece SHA1 verification on first peer request.
+
+        Falls back to the legacy rename_file() + force_recheck() approach if
+        hardlinks fail (e.g. cross-filesystem).
         """
         if not self.handle or not self.torrent_info_obj:
             return False
-        
-        pad_dir = os.path.join(self.temp_dir, ".pad_files")
-        os.makedirs(pad_dir, exist_ok=True)
-            
+
         logger.info(f"[{self.repo_id}] Mapping all files for background seeding...")
-        
+
         files = self.torrent_info_obj.files()
+        use_seed_mode = True  # optimistic; set to False on first hardlink failure
+
+        # Track created hardlinks so we can clean them up when seeding stops
+        self.seeding_hardlinks = []
+
         mapped_count = 0
-        pad_count = 0
         for file_index in range(files.num_files()):
             lt_path = files.file_path(file_index).replace('\\', '/')
             file_size = files.file_size(file_index)
-            
+
             parts = lt_path.split('/', 1)
             target_norm = parts[1] if len(parts) == 2 else lt_path
-            
-            # Handle libtorrent padding files (.pad/XXXXXX) - these are zero-byte virtual
-            # files inserted to align file boundaries to piece boundaries. We must create
-            # real zero-filled files of the correct size, otherwise piece hash checks fail
-            # and the seeder cannot provide any data to peers.
+
+            # Handle libtorrent padding files (.pad/XXXXXX) — zero-filled virtual
+            # files that align file boundaries to piece boundaries.
             if target_norm.startswith('.pad/') or '/.pad/' in target_norm:
+                expected_path = os.path.join(self.temp_dir, lt_path)
+                os.makedirs(os.path.dirname(expected_path), exist_ok=True)
+                if not os.path.exists(expected_path):
+                    with open(expected_path, 'wb') as f:
+                        f.write(b'\x00' * file_size)
+                    self.seeding_hardlinks.append(expected_path)
+                logger.info(f"[{self.repo_id}] Created padding file [{file_index}]: {target_norm} ({file_size} bytes)")
+                continue
+
+            # Resolve the HF cache blob path
+            try:
+                from huggingface_hub import try_to_load_from_cache
+                local_path = try_to_load_from_cache(
+                    repo_id=self.repo_id,
+                    filename=target_norm,
+                    revision=self.revision
+                )
+                if not local_path or not isinstance(local_path, str):
+                    logger.warning(f"[{self.repo_id}] Cache miss for seeding [{file_index}]: {target_norm} (revision={self.revision})")
+                    continue
+
+                # Resolve symlinks: snapshots/xxx/file -> ../../blobs/sha256hash
+                real_path = os.path.realpath(local_path)
+
+                # Create hardlink at the path libtorrent expects
+                expected_path = os.path.join(self.temp_dir, lt_path)
+                os.makedirs(os.path.dirname(expected_path), exist_ok=True)
+
+                # Remove stale hardlink if it exists
+                if os.path.exists(expected_path):
+                    os.unlink(expected_path)
+
+                try:
+                    os.link(real_path, expected_path)
+                    self.seeding_hardlinks.append(expected_path)
+                    mapped_count += 1
+                    logger.info(f"[{self.repo_id}] Hardlinked for seeding [{file_index}]: {target_norm} -> {real_path}")
+                except OSError:
+                    # Cross-filesystem: cannot hardlink, fall back to legacy approach
+                    logger.warning(f"[{self.repo_id}] Hardlink failed (cross-filesystem?) for {target_norm}. Falling back to force_recheck.")
+                    use_seed_mode = False
+                    self._cleanup_seeding_hardlinks()
+                    return self._map_all_files_legacy()
+
+            except Exception as e:
+                logger.warning(f"[{self.repo_id}] Failed to map file {target_norm} for seeding: {e}")
+
+        logger.info(f"[{self.repo_id}] Hardlinked {mapped_count}/{files.num_files()} files for seeding.")
+
+        # Enable seed_mode: libtorrent assumes all pieces are present and lazily
+        # verifies each piece's SHA1 hash on first peer request. If any piece
+        # fails verification, libtorrent automatically exits seed_mode and does
+        # a full recheck. This is safe because HF blobs are content-addressed
+        # (named by hash) and immutable after download.
+        self.handle.set_flags(lt.torrent_flags.seed_mode)
+        self.handle.resume()
+        logger.info(f"[{self.repo_id}] Seeding started with seed_mode (0s startup, lazy verification).")
+
+        return True
+
+    def _map_all_files_legacy(self) -> bool:
+        """Legacy seeding: rename_file() + force_recheck().
+
+        Used as fallback when hardlinks fail (cross-filesystem scenario).
+        This requires a full hash verification of all pieces, which can take
+        minutes for large models.
+        """
+        files = self.torrent_info_obj.files()
+        mapped_count = 0
+
+        for file_index in range(files.num_files()):
+            lt_path = files.file_path(file_index).replace('\\', '/')
+            file_size = files.file_size(file_index)
+
+            parts = lt_path.split('/', 1)
+            target_norm = parts[1] if len(parts) == 2 else lt_path
+
+            if target_norm.startswith('.pad/') or '/.pad/' in target_norm:
+                pad_dir = os.path.join(self.temp_dir, ".pad_files")
+                os.makedirs(pad_dir, exist_ok=True)
                 pad_file_path = os.path.join(pad_dir, f"pad_{file_index}_{file_size}")
                 if not os.path.exists(pad_file_path):
                     with open(pad_file_path, 'wb') as f:
                         f.write(b'\x00' * file_size)
                 self.handle.rename_file(file_index, pad_file_path)
-                pad_count += 1
-                logger.info(f"[{self.repo_id}] Created padding file [{file_index}]: {target_norm} ({file_size} bytes)")
                 continue
-            
-            # Request the local path from Hugging Face cache
+
             try:
                 from huggingface_hub import try_to_load_from_cache
                 local_path = try_to_load_from_cache(
@@ -331,64 +414,57 @@ class SessionContext:
                     revision=self.revision
                 )
                 if local_path and isinstance(local_path, str):
-                    # CRITICAL: Resolve symlinks to real blob paths!
-                    # HF cache uses symlinks: snapshots/xxx/config.json -> ../../blobs/sha256hash
-                    # libtorrent cannot serve data through symlinks — it needs
-                    # the actual blob file path to read and hash-check pieces.
                     real_path = os.path.realpath(local_path)
                     self.handle.rename_file(file_index, real_path)
                     mapped_count += 1
-                    if real_path != local_path:
-                        logger.info(f"[{self.repo_id}] Mapped for seeding [{file_index}]: {target_norm} -> {real_path} (resolved from symlink {local_path})")
-                    else:
-                        logger.info(f"[{self.repo_id}] Mapped for seeding [{file_index}]: {target_norm} -> {real_path}")
+                    logger.info(f"[{self.repo_id}] [legacy] Mapped [{file_index}]: {target_norm} -> {real_path}")
                 else:
-                    logger.warning(f"[{self.repo_id}] Cache miss for seeding [{file_index}]: {target_norm} (revision={self.revision})")
+                    logger.warning(f"[{self.repo_id}] [legacy] Cache miss [{file_index}]: {target_norm}")
             except Exception as e:
-                logger.warning(f"[{self.repo_id}] Failed to map file {target_norm} for seeding: {e}")
-        
-        logger.info(f"[{self.repo_id}] Mapped {mapped_count}/{files.num_files()} real files + {pad_count} pad files.")
-                
-        # Resume and force recheck so libtorrent verifies all pieces against the
-        # renamed file paths. This is required because we used rename_file() to
-        # point each torrent file to its actual HF blob path. Without a recheck,
-        # libtorrent doesn't know the pieces are already present on disk.
-        #
-        # NOTE: We intentionally do NOT use seed_mode here. seed_mode is incompatible
-        # with rename_file() — it assumes files are at their original torrent-internal
-        # paths and silently reports 0 pieces when they've been remapped. The result is
-        # a seeder that connects to peers but has nothing to offer, causing 100% timeouts.
+                logger.warning(f"[{self.repo_id}] [legacy] Failed to map {target_norm}: {e}")
+
+        logger.info(f"[{self.repo_id}] [legacy] Mapped {mapped_count}/{files.num_files()} files. Starting force_recheck...")
+
         self.handle.resume()
         self.handle.force_recheck()
-        logger.info(f"[{self.repo_id}] Force recheck initiated. Waiting for piece verification...")
-        
-        # Wait for the recheck to complete (state transitions: checking_files -> seeding/finished).
-        # No hard timeout: seeding is a background operation and large models (400GB+) can
-        # take 10+ minutes to hash-verify on HDD. We log progress every 10s so the caller
-        # knows it's alive.
+
+        # Wait for recheck (no hard timeout — large models can take 10+ min on HDD)
         recheck_start = time.time()
         last_log_time = 0.0
         while True:
             s = self.handle.status()
-            # State 1 = checking_files, State 7 = checking_resume_data
             if s.state not in (1, 7):
                 elapsed = time.time() - recheck_start
-                logger.info(f"[{self.repo_id}] Recheck complete in {elapsed:.0f}s. State: {s.state}, Progress: {s.progress*100:.1f}%, Pieces: {s.num_pieces}")
+                logger.info(f"[{self.repo_id}] [legacy] Recheck complete in {elapsed:.0f}s. Pieces: {s.num_pieces}")
                 break
             now = time.time()
             if now - last_log_time >= 10:
                 last_log_time = now
                 elapsed = now - recheck_start
-                logger.info(f"[{self.repo_id}] Rechecking... {s.progress*100:.1f}% ({elapsed:.0f}s elapsed)")
+                logger.info(f"[{self.repo_id}] [legacy] Rechecking... {s.progress*100:.1f}% ({elapsed:.0f}s)")
             time.sleep(0.5)
-        
+
         return True
+
+    def _cleanup_seeding_hardlinks(self):
+        """Remove hardlinks created for seeding in p2p_root."""
+        for path in getattr(self, 'seeding_hardlinks', []):
+            try:
+                if os.path.exists(path):
+                    os.unlink(path)
+                    logger.debug(f"[{self.repo_id}] Cleaned up seeding hardlink: {path}")
+            except OSError as e:
+                logger.warning(f"[{self.repo_id}] Failed to clean up {path}: {e}")
+        self.seeding_hardlinks = []
 
     def _deliver_file(self, src: str, dst: str):
         """Copy a completed file from libtorrent's download path to the HF destination.
         
         Uses os.link() (hard link) for zero-copy on the same filesystem,
         falls back to shutil.copy2() for cross-device.
+        After delivery, removes the source file from p2p_root to avoid
+        leaving behind duplicate directory entries (or real copies on
+        cross-filesystem setups).
         """
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         
@@ -404,3 +480,11 @@ class SessionContext:
             # Cross-device fallback
             shutil.copy2(src, dst)
             logger.debug(f"[{self.repo_id}] Copied {src} -> {dst}")
+        
+        # Clean up source: for hardlinks this just decrements the inode refcount
+        # (data remains at dst); for copies this frees the duplicate disk space.
+        try:
+            os.unlink(src)
+            logger.debug(f"[{self.repo_id}] Cleaned up source: {src}")
+        except OSError as e:
+            logger.debug(f"[{self.repo_id}] Could not remove source {src}: {e}")

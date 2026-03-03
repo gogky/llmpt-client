@@ -26,6 +26,8 @@ graph TD
     G --> T["P2: 进程退出清理"]
     V["P2: 返回值类型修正"]
     W["P3: 死代码清理"]
+    G --> X["P2: P2P 超时改为卡顿检测"]
+    X --> E
 ```
 
 ---
@@ -39,7 +41,7 @@ graph TD
 
 ## P1 — 高优先级（核心正确性 & 阻塞其他工作）
 
-### 1.1 · revision 统一为 commit hash
+### 1.1 · revision 统一为 commit hash0
 - **现状**：`_patched_hf_hub_download` 中 `revision` 来自 `kwargs.get('revision', 'main')`，而 `huggingface_hub` 实际会在内部将 `main` 解析为 40 字符 commit hash。`session_context._init_torrent()` 虽然有"hash lookup 失败后 fallback 到 main"的逻辑（L65-67），但这只是一个 workaround。
 - **问题**：
   - 做种时通过 CLI 传入的 `--revision main` 与下载时 huggingface_hub 内部解析的 commit hash 不匹配，导致 tracker 查询失败
@@ -50,7 +52,7 @@ graph TD
   3. Tracker 端始终以 commit hash 为 key 存储
 - **阻塞**：跨版本 swarm 共享 (3.1)、服务端存储 .torrent (2.1) 都依赖 revision 语义的明确性
 
-### 1.2 · 端口动态分配
+### ~~1.2 · 端口动态分配~~ ✅
 - **现状**：`p2p_batch.py` 第 46 行硬编码 `listen_interfaces = '0.0.0.0:6881'`。
 - **问题**：
   - 同一台机器无法运行多个 llmpt 实例（测试、多用户场景）
@@ -60,13 +62,18 @@ graph TD
   2. 或直接使用 `0.0.0.0:0` 让 OS 分配随机端口
   3. 支持通过环境变量 `HF_P2P_PORT` 或 `enable_p2p(port=...)` 覆盖
 
-### 1.3 · timeout / metadata 等待时间可配置化
-- **现状**：
-  - P2P 整体 timeout 已可配置（`enable_p2p(timeout=300)`），✅
-  - 但 metadata 等待时间硬编码为 8 秒（`session_context.py` L143）
-  - seeding 的 register timeout 硬编码为 30 秒（`p2p_batch.py` L67）
-  - recheck timeout 硬编码为 120 秒（`session_context.py` L345）
-- **方案**：将这些超时统一纳入 `_config` 字典或作为 `SessionContext` 的构造参数，允许通过环境变量或 API 覆盖
+### ~~1.3 · timeout / metadata 等待时间可配置化~~ ✅
+- **已完成**：
+  - metadata 等待 8s 提取为 `METADATA_TIMEOUT` 常量（支持环境变量 `LLMPT_METADATA_TIMEOUT` 覆盖）
+  - recheck 硬超时 120s **移除**（做种场景不应有硬超时，400GB 模型在 HDD 上需要 40+ 分钟，改为无限等待 + 进度日志）
+  - seed init timeout 30s **移除**（发现是死代码：`self.timeout` 只在 `download_file()` 中使用，做种路径从不调用）
+  - P2P 整体 per-file timeout 300s 保留当前设计，但识别出需要改进 → 见 2.11
+- ~~**现状**~~：
+  - ~~P2P 整体 timeout 已可配置（`enable_p2p(timeout=300)`），✅~~
+  - ~~但 metadata 等待时间硬编码为 8 秒（`session_context.py` L143）~~
+  - ~~seeding 的 register timeout 硬编码为 30 秒（`p2p_batch.py` L67）~~
+  - ~~recheck timeout 硬编码为 120 秒（`session_context.py` L345）~~
+- ~~**方案**：将这些超时统一纳入 `_config` 字典或作为 `SessionContext` 的构造参数，允许通过环境变量或 API 覆盖~~
 
 ### 1.4 · E2E 测试应覆盖真实用户路径，而非绕过公共接口调用内部函数
 - **现状**：用户使用 llmpt 有两条入口路径，但 E2E 测试都没有完整覆盖：
@@ -154,13 +161,17 @@ graph TD
   2. 对 lt >= 2.0：使用 `lt.read_resume_data()`
   3. 添加单元测试 mock 两种版本
 
-### 2.8 · 通过缓存 fastresume 或后台预生成跳过验证阶段
-- **现状**：做种时 `map_all_files_for_seeding()` 会调用 `force_recheck()`，对大模型可能耗时数十秒。
-- **方案**：
-  1. 注册做种后，保存 fastresume data（包含已校验的 piece 状态）
-  2. 下次启动时加载 fastresume 跳过 recheck
-  3. 或后台预先计算 piece hash 并缓存
-- **注意**：需要处理文件被修改/删除后 fastresume 失效的情况
+### ~~2.8 · 通过缓存 fastresume 或后台预生成跳过验证阶段~~ ✅
+- **已完成**：采用比原方案更优的 **hardlink + seed_mode** 方案：
+  - 在 libtorrent 期望的路径创建硬链接指向 HF blob，然后启用 `seed_mode`
+  - 0 秒启动（每次都是，不只是第 2 次），libtorrent 在 peer 请求时按需验证 SHA1
+  - 跨文件系统时自动 fallback 到 legacy `rename_file()` + `force_recheck()`
+  - 做种停止后自动清理硬链接（`_cleanup_seeding_hardlinks()`）
+  - 下载路径的 `_deliver_file()` 也增加了源文件清理，避免 p2p_root 残留
+- ~~**原方案**~~：
+  - ~~注册做种后，保存 fastresume data（包含已校验的 piece 状态）~~
+  - ~~下次启动时加载 fastresume 跳过 recheck~~
+  - ~~或后台预先计算 piece hash 并缓存~~
 
 ### 2.9 - 进程退出时优雅清理
 - **现状**：没有 atexit 或 signal handler。进程退出时未保存最终的 fastresume 数据，libtorrent session 未正常关闭（不会向 tracker 发送 stopped 事件），临时文件未清理。
@@ -172,6 +183,15 @@ graph TD
 ### 2.10 - create_and_register_torrent 返回值类型不一致
 - **现状**：类型标注为 `-> bool`，但实际返回 torrent_info (dict) 或 None。`run_seeder.py` 依赖它返回 dict（`torrent_info['torrent_data']`）。
 - **方案**：修正类型标注为 `-> Optional[dict]`，或统一返回值语义
+
+### 2.11 - P2P 下载超时改为基于进度的卡顿检测
+- **现状**：`download_file()` 使用固定 `timeout=300s` 的 `event.wait()`。300s 对 50GB 文件太短（50MB/s 需要 1000s），对卡住的下载又太长（白等 5 分钟）。超时后 fallback HTTP 会丢弃所有已下载数据（`_truncate_temp_file`）。
+- **问题**：固定超时无法区分"P2P 在努力下载但文件太大"和"P2P 完全卡住没有进展"
+- **方案**：改为"如果连续 N 秒没有新数据下载，才放弃 P2P"（stall detection）
+  1. monitor 线程追踪 per-file 的字节进度变化
+  2. 如果 `STALL_TIMEOUT`（如 60s）内 `file_progress[i]` 没有增长，视为卡住
+  3. 只要有进展，就不超时——大文件可以安心下载
+- **收益**：大文件不再被错误中断；卡住的下载更快 fallback；WebSeed (3.2) 实现后此机制自然兼容
 
 ---
 
