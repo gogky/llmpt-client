@@ -1,96 +1,96 @@
 """
 Tests for HuggingFace Hub patching.
+
+Uses the REAL huggingface_hub package (which must be installed) so that
+apply_patch / remove_patch can exercise the actual import path
+(`from huggingface_hub import file_download, _snapshot_download`).
+
+Previous approach injected fake sys.modules entries which broke apply_patch
+and also polluted the module namespace for later tests in the same session.
 """
 
-import sys
 import pytest
 from unittest.mock import patch, MagicMock
 
-# Create mock objects
-class MockFileDownload:
-    def http_get(self, url, temp_file, **kwargs):
-        pass
-
-class MockHfHub:
-    def __init__(self):
-        self.file_download = MockFileDownload()
-        
-    def hf_hub_download(self, repo_id, filename, **kwargs):
-        pass
-
-# Inject mocks into sys.modules BEFORE importing llmpt.patch
-sys.modules['huggingface_hub'] = MockHfHub()
-sys.modules['huggingface_hub.file_download'] = MockFileDownload()
-
 import huggingface_hub
-import huggingface_hub.file_download
+from huggingface_hub import file_download
 
 import llmpt
 from llmpt.patch import apply_patch, remove_patch
+
 
 @pytest.fixture(autouse=True)
 def cleanup_patches():
     """Ensure patches are removed after each test."""
     yield
     remove_patch()
+    # Also reset the module-level guard so apply_patch can be called again
+    import llmpt.patch as pm
+    pm._original_hf_hub_download = None
+    pm._original_http_get = None
+    pm._config = {}
+
 
 def test_apply_patch_success():
-    """Test that patch applies correctly to mock hf_hub."""
-    # Capture the exact bound method
-    original_download = huggingface_hub.hf_hub_download
-    
+    """Test that patch applies correctly to real hf_hub modules."""
+    original_http_get = file_download.http_get
+
     apply_patch({'tracker_url': 'http://test'})
-    
-    assert huggingface_hub.hf_hub_download is not original_download
-    assert callable(huggingface_hub.hf_hub_download)
-    
+
+    # http_get on the real file_download module should be replaced
+    assert file_download.http_get is not original_http_get
+    assert callable(file_download.http_get)
+
+
 def test_remove_patch_success():
     """Test that patch removal restores original functions."""
-    original_download = huggingface_hub.hf_hub_download
-    
+    original_http_get = file_download.http_get
+
     apply_patch({'tracker_url': 'http://test'})
-    assert huggingface_hub.hf_hub_download is not original_download
-    
+    assert file_download.http_get is not original_http_get
+
     remove_patch()
-    
-    # We must compare against the stored global original reference in llmpt.patch
-    # because 'is' comparison of bound methods from classes can sometimes fail
+
+    # After removal the original should be restored
+    assert file_download.http_get is original_http_get
+
     import llmpt.patch as patch_module
     assert patch_module._original_hf_hub_download is None
 
+
 def test_p2p_interception_flow():
-    """Test the complete intercepted P2P flow inside http_get."""
+    """Test the complete intercepted P2P flow inside http_get.
+
+    We apply a real patch (so http_get is replaced), then manually set up
+    the ThreadLocal context and call the patched http_get directly to verify
+    that P2PBatchManager.register_request is invoked with the correct args.
+    """
     config = {'tracker_url': 'http://test', 'timeout': 300}
     apply_patch(config)
-    
-    patched_hf = huggingface_hub.hf_hub_download
-    
-    # The logic is intercepted in `patched_http_get`. We can invoke that directly.
-    # To invoke it, we need to set up the ThreadLocal context that `patched_hf_hub_download` would have set.
+
     import llmpt.patch as patch_module
-    
+
     mock_tracker_client = MagicMock()
     mock_batch_manager = MagicMock()
     mock_batch_manager.register_request.return_value = True
-    
-    with patch('llmpt.patch.TrackerClient', return_value=mock_tracker_client, create=True), \
-         patch('llmpt.p2p_batch.P2PBatchManager', return_value=mock_batch_manager, create=True):
-        
-        # Manually set ThreadLocal context
+
+    with patch('llmpt.p2p_batch.P2PBatchManager', return_value=mock_batch_manager):
+
+        # Manually set ThreadLocal context (normally done by patched_hf_hub_download)
         patch_module._context.repo_id = "demo/repo"
         patch_module._context.filename = "model.bin"
         patch_module._context.revision = "main"
         patch_module._context.tracker = mock_tracker_client
         patch_module._context.config = config
-        
+
         try:
-            # 1. Trigger the patched http_get
-            patched_http_get = huggingface_hub.file_download.http_get
+            # Trigger the patched http_get via the real module reference
+            patched_http_get = file_download.http_get
             temp_mock = MagicMock()
             temp_mock.name = "/tmp/fake"
             patched_http_get("http://dummy_url", temp_file=temp_mock)
-            
-            # 2. Check that the intercept happened
+
+            # Check that the intercept happened
             mock_batch_manager.register_request.assert_called_once_with(
                 repo_id="demo/repo",
                 revision="main",
@@ -103,3 +103,6 @@ def test_p2p_interception_flow():
             # Cleanup context
             patch_module._context.repo_id = None
             patch_module._context.filename = None
+            patch_module._context.revision = None
+            patch_module._context.tracker = None
+            patch_module._context.config = None
