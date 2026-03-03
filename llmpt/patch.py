@@ -17,6 +17,33 @@ _original_http_get = None
 # Thread-local storage for P2P context
 _context = threading.local()
 
+# Download statistics: tracks which files went through P2P vs HTTP fallback
+_stats_lock = threading.Lock()
+_download_stats = {
+    'p2p': set(),      # filenames successfully delivered via P2P
+    'http': set(),     # filenames that fell back to HTTP
+}
+
+
+def get_download_stats() -> dict:
+    """Return a snapshot of download statistics.
+
+    Returns:
+        Dictionary with 'p2p' and 'http' sets of filenames.
+    """
+    with _stats_lock:
+        return {
+            'p2p': set(_download_stats['p2p']),
+            'http': set(_download_stats['http']),
+        }
+
+
+def reset_download_stats() -> None:
+    """Clear all download statistics."""
+    with _stats_lock:
+        _download_stats['p2p'].clear()
+        _download_stats['http'].clear()
+
 
 def apply_patch(config: dict) -> None:
     """
@@ -116,6 +143,8 @@ def apply_patch(config: dict) -> None:
 
                 if success:
                     logger.info(f"[P2P] Successfully delivered {filename} via P2P.")
+                    with _stats_lock:
+                        _download_stats['p2p'].add(filename)
                     return  # Skip original http_get completely!
                 else:
                     logger.warning(f"[P2P] P2P fulfillment failed for {filename}. Falling back to HTTP.")
@@ -140,6 +169,9 @@ def apply_patch(config: dict) -> None:
 
         # Fall back to original HTTP download via local reference if P2P failed or unavailable
         # Pass resume_size=0 explicitly since we've truncated the file
+        if filename:
+            with _stats_lock:
+                _download_stats['http'].add(filename)
         return orig_http(url, temp_file, **{**kwargs, 'resume_size': 0})
 
     # Apply patches
