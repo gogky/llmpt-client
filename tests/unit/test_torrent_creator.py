@@ -60,12 +60,21 @@ class TestCreateTorrent:
         mock_torrent_obj.generate.return_value = {'info': 'data'}
         mock_lt.create_torrent.return_value = mock_torrent_obj
 
+        # Mock torrent_info and its files() for file_list extraction
+        mock_files = MagicMock()
+        mock_files.num_files.return_value = 2
+        mock_files.file_path.side_effect = lambda i: [
+            "snapshot_abc123/config.json",
+            "snapshot_abc123/model.bin",
+        ][i]
+        mock_files.file_size.side_effect = lambda i: [14, 1000][i]
+
         mock_info = MagicMock()
         mock_info.info_hash.return_value = "abcdef1234567890"
         mock_info.num_pieces.return_value = 1
         mock_info.num_files.return_value = 2
+        mock_info.files.return_value = mock_files
         mock_lt.torrent_info.return_value = mock_info
-        mock_lt.make_magnet_uri.return_value = "magnet:?xt=urn:btih:abcdef1234567890"
         mock_lt.bencode.return_value = b'bencoded_torrent'
 
         with patch('huggingface_hub.snapshot_download', return_value=str(snap_dir)):
@@ -75,7 +84,7 @@ class TestCreateTorrent:
 
         assert result is not None
         assert result['info_hash'] == 'abcdef1234567890'
-        assert result['magnet_link'] == 'magnet:?xt=urn:btih:abcdef1234567890'
+        assert 'magnet_link' not in result
         # piece_length is auto-computed, just verify it's a positive power of two
         pl = result['piece_length']
         assert pl > 0 and (pl & (pl - 1)) == 0, f"piece_length {pl} is not a power of two"
@@ -83,6 +92,11 @@ class TestCreateTorrent:
         assert result['num_files'] == 2
         assert result['torrent_data'] == b'bencoded_torrent'
         assert result['file_size'] > 0
+        # Verify files list
+        assert result['files'] == [
+            {'path': 'config.json', 'size': 14},
+            {'path': 'model.bin', 'size': 1000},
+        ]
 
         # Verify tracker URL was formatted correctly
         mock_torrent_obj.add_tracker.assert_called_once_with("http://tracker.example.com/announce")
@@ -127,10 +141,11 @@ class TestCreateAndRegisterTorrent:
 
         mock_create.return_value = {
             'info_hash': 'abc',
-            'magnet_link': 'magnet:?xt=urn:btih:abc',
             'file_size': 1000,
             'piece_length': get_optimal_piece_length(1000),
             'num_files': 1,
+            'torrent_data': b'fake_torrent',
+            'files': [{'path': 'model.bin', 'size': 1000}],
         }
         tracker = MagicMock()
         tracker.tracker_url = "http://tracker.example.com"
@@ -148,11 +163,16 @@ class TestCreateAndRegisterTorrent:
 
         torrent_info = {
             'info_hash': 'abc',
-            'magnet_link': 'magnet:?xt=urn:btih:abc',
             'file_size': 5000,
             'piece_length': get_optimal_piece_length(5000),
             'num_files': 3,
             'num_pieces': 2,
+            'torrent_data': b'fake_torrent_data',
+            'files': [
+                {'path': 'config.json', 'size': 100},
+                {'path': 'model-00001.bin', 'size': 2450},
+                {'path': 'model-00002.bin', 'size': 2450},
+            ],
         }
         mock_create.return_value = torrent_info
 
@@ -173,6 +193,11 @@ class TestCreateAndRegisterTorrent:
             info_hash='abc',
             total_size=5000,
             file_count=3,
-            magnet_link='magnet:?xt=urn:btih:abc',
             piece_length=get_optimal_piece_length(5000),
+            torrent_data=b'fake_torrent_data',
+            files=[
+                {'path': 'config.json', 'size': 100},
+                {'path': 'model-00001.bin', 'size': 2450},
+                {'path': 'model-00002.bin', 'size': 2450},
+            ],
         )

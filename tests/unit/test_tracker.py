@@ -36,8 +36,9 @@ def test_get_torrent_info_success(tracker_client):
             "data": [
                 {
                     "info_hash": "12345",
-                    "magnet_link": "magnet:?xt=urn:btih:12345",
-                    "revision": "abc123"
+                    "revision": "abc123",
+                    "total_size": 1000,
+                    "files": [{"path": "model.bin", "size": 1000}],
                 },
             ],
             "total": 1
@@ -57,8 +58,8 @@ def test_get_torrent_info_success(tracker_client):
             "data": [
                 {
                     "info_hash": "67890",
-                    "magnet_link": "magnet:?xt=urn:btih:67890",
-                    "revision": "old_hash"
+                    "revision": "old_hash",
+                    "total_size": 2000,
                 }
             ],
             "total": 1
@@ -123,6 +124,36 @@ def test_get_torrent_info_timeout(tracker_client):
 
 
 @responses.activate
+def test_download_torrent_success(tracker_client):
+    """Test successful .torrent file download."""
+    torrent_bytes = b'\xd8\x03\xe5...'  # fake bencoded data
+    responses.add(
+        responses.GET,
+        "http://tracker.example.com/api/v1/torrents/torrent",
+        body=torrent_bytes,
+        content_type="application/x-bittorrent",
+        status=200
+    )
+
+    result = tracker_client.download_torrent("test/repo", "abc123")
+    assert result == torrent_bytes
+
+
+@responses.activate
+def test_download_torrent_not_found(tracker_client):
+    """Test 404 when .torrent is not available."""
+    responses.add(
+        responses.GET,
+        "http://tracker.example.com/api/v1/torrents/torrent",
+        json={"error": "not found"},
+        status=404
+    )
+
+    result = tracker_client.download_torrent("test/repo", "nonexistent")
+    assert result is None
+
+
+@responses.activate
 def test_register_torrent_success(tracker_client):
     """Test successful torrent registration."""
     responses.add(
@@ -140,8 +171,9 @@ def test_register_torrent_success(tracker_client):
         info_hash="abc",
         total_size=100,
         file_count=1,
-        magnet_link="magnet:?xt=abc",
-        piece_length=1024
+        piece_length=1024,
+        torrent_data=b'fake_torrent',
+        files=[{"path": "model.bin", "size": 100}],
     )
     
     assert success is True
@@ -149,9 +181,13 @@ def test_register_torrent_success(tracker_client):
     
     # Verify exact JSON payload sent
     import json
+    import base64
     request_body = json.loads(responses.calls[0].request.body)
     assert request_body["repo_id"] == "test"
     assert request_body["info_hash"] == "abc"
+    assert request_body["torrent_data"] == base64.b64encode(b'fake_torrent').decode('ascii')
+    assert request_body["files"] == [{"path": "model.bin", "size": 100}]
+    assert "magnet_link" not in request_body
 
 
 @responses.activate
@@ -166,7 +202,8 @@ def test_register_torrent_failure(tracker_client):
     success = tracker_client.register_torrent(
         repo_id="test", revision="main", repo_type="model",
         name="test model", info_hash="abc", total_size=100,
-        file_count=1, magnet_link="magnet:?xt=abc", piece_length=1024
+        file_count=1, piece_length=1024,
+        torrent_data=b'fake', files=[],
     )
     
     assert success is False

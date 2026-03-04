@@ -81,7 +81,7 @@ def test_register_request_no_torrent(mock_libtorrent):
     """Test registering a request when tracker has no torrent."""
     from llmpt.p2p_batch import P2PBatchManager
     tracker = MagicMock()
-    tracker.get_torrent_info.return_value = None
+    tracker.download_torrent.return_value = None
 
     manager = P2PBatchManager()
 
@@ -103,10 +103,7 @@ def test_register_request_success(mock_libtorrent):
     from llmpt.p2p_batch import SessionContext
 
     tracker = MagicMock()
-    tracker.get_torrent_info.return_value = {
-        "info_hash": "abc",
-        "magnet_link": "magnet:?xt=urn:btih:abc"
-    }
+    tracker.download_torrent.return_value = b'fake_torrent_bytes'
 
     manager = P2PBatchManager()
 
@@ -130,44 +127,31 @@ def test_session_context_init_torrent(mock_libtorrent):
     """Test internal initialization of libtorrent session inside SessionContext.
 
     The _init_torrent() flow:
-      1. tracker.get_torrent_info() → returns magnet link
-      2. lt.parse_magnet_uri(magnet_link) → returns add_torrent_params
-      3. lt_session.add_torrent(params) → returns handle
-      4. Starts monitor thread (daemon)
-      5. Waits for handle.status().has_metadata → True
-      6. handle.torrent_file() → torrent_info_obj
+      1. tracker.download_torrent() → returns raw .torrent bytes
+      2. lt.bdecode(torrent_data) → decoded dict
+      3. lt.torrent_info(decoded) → torrent_info object
+      4. lt_session.add_torrent(params) → returns handle
+      5. Starts monitor thread (daemon)
+      6. handle.torrent_file() → torrent_info_obj (immediately available)
       7. handle.prioritize_files([0] * num_files)
       8. handle.resume()
     """
     from llmpt.p2p_batch import SessionContext
 
     tracker = MagicMock()
-    tracker.get_torrent_info.return_value = {
-        "info_hash": "abc",
-        "magnet_link": "magnet:?xt=urn:btih:abc"
-    }
+    tracker.download_torrent.return_value = b'fake_torrent_bytes'
 
     mock_lt_session = MagicMock()
 
     # Mock add_torrent return handle
     mock_handle = MagicMock()
 
-    # _init_torrent() checks handle.status().has_metadata in a while loop
-    mock_status = MagicMock()
-    mock_status.has_metadata = True
-    mock_handle.status.return_value = mock_status
-
-    # After metadata resolves, it calls handle.torrent_file()
+    # After init, it calls handle.torrent_file() (immediately, no metadata wait)
     mock_torrent_info = MagicMock()
     mock_torrent_info.num_files.return_value = 1
     mock_handle.torrent_file.return_value = mock_torrent_info
 
     mock_lt_session.add_torrent.return_value = mock_handle
-
-    # lt.parse_magnet_uri is called in _init_torrent
-    mock_params = MagicMock()
-    mock_params.flags = 0
-    mock_libtorrent.parse_magnet_uri.return_value = mock_params
 
     ctx = SessionContext("demo", "main", tracker, mock_lt_session, timeout=10)
 
@@ -181,4 +165,8 @@ def test_session_context_init_torrent(mock_libtorrent):
     mock_handle.resume.assert_called_once()
     assert ctx.handle is mock_handle
     assert ctx.torrent_info_obj is mock_torrent_info
+    # Verify we used bdecode + torrent_info path, not parse_magnet_uri
+    mock_libtorrent.bdecode.assert_called_once_with(b'fake_torrent_bytes')
+    mock_libtorrent.torrent_info.assert_called_once()
+    mock_libtorrent.parse_magnet_uri.assert_not_called()
 

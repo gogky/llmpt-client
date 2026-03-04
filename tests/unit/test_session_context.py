@@ -44,19 +44,14 @@ def make_ctx(mock_lt):
 
 def _setup_successful_init(ctx, mock_lt):
     """Helper: configure mocks for a successful _init_torrent() execution."""
-    ctx.tracker_client.get_torrent_info.return_value = {
-        "info_hash": "abc",
-        "magnet_link": "magnet:?xt=urn:btih:abc",
-    }
+    # Mock download_torrent to return raw bytes
+    ctx.tracker_client.download_torrent.return_value = b'fake_torrent_bytes'
+
     mock_params = MagicMock()
     mock_params.flags = 0
-    mock_lt.parse_magnet_uri.return_value = mock_params
+    mock_lt.add_torrent_params.return_value = mock_params
 
     mock_handle = MagicMock()
-    mock_status = MagicMock()
-    mock_status.has_metadata = True
-    mock_handle.status.return_value = mock_status
-
     mock_ti = MagicMock()
     mock_ti.num_files.return_value = 1
     mock_handle.torrent_file.return_value = mock_ti
@@ -220,18 +215,10 @@ class TestInitTorrent:
         ctx.handle = MagicMock()
         assert ctx._init_torrent() is True
 
-    def test_no_tracker_metadata(self, make_ctx, mock_lt):
-        """If tracker returns None, should mark invalid and return False."""
+    def test_no_torrent_data_available(self, make_ctx, mock_lt):
+        """If tracker returns no torrent data, should mark invalid and return False."""
         ctx = make_ctx()
-        ctx.tracker_client.get_torrent_info.return_value = None
-        result = ctx._init_torrent()
-        assert result is False
-        assert ctx.is_valid is False
-
-    def test_tracker_returns_no_magnet_link(self, make_ctx, mock_lt):
-        """Tracker returns dict without 'magnet_link' key."""
-        ctx = make_ctx()
-        ctx.tracker_client.get_torrent_info.return_value = {"info_hash": "abc"}
+        ctx.tracker_client.download_torrent.return_value = None
         result = ctx._init_torrent()
         assert result is False
         assert ctx.is_valid is False
@@ -240,19 +227,19 @@ class TestInitTorrent:
         """After revision unification (1.1), there is no 'retry with main'
         fallback.  A missing tracker entry should fail immediately."""
         ctx = make_ctx(revision="a" * 40)
-        ctx.tracker_client.get_torrent_info.return_value = None
+        ctx.tracker_client.download_torrent.return_value = None
 
         result = ctx._init_torrent()
 
         assert result is False
         assert ctx.is_valid is False
         # Should only call tracker once, no second call with 'main'
-        ctx.tracker_client.get_torrent_info.assert_called_once_with(
+        ctx.tracker_client.download_torrent.assert_called_once_with(
             "test/repo", "a" * 40
         )
 
-    def test_successful_magnet_init(self, make_ctx, mock_lt):
-        """Full successful path: tracker → parse_magnet → add_torrent → metadata → resume."""
+    def test_successful_torrent_init(self, make_ctx, mock_lt):
+        """Full successful path: download_torrent → bdecode → add_torrent → resume."""
         ctx = make_ctx()
         mock_handle, mock_ti = _setup_successful_init(ctx, mock_lt)
         mock_ti.num_files.return_value = 3
@@ -267,24 +254,17 @@ class TestInitTorrent:
         assert ctx.torrent_info_obj is mock_ti
         mock_handle.resume.assert_called_once()
         mock_handle.prioritize_files.assert_called_once_with([0, 0, 0])
+        mock_lt.bdecode.assert_called_once_with(b'fake_torrent_bytes')
+        mock_lt.torrent_info.assert_called_once()
 
-    def test_torrent_data_path(self, make_ctx, mock_lt):
-        """When torrent_data is provided, should use bdecode + torrent_info instead of magnet."""
-        ctx = make_ctx(torrent_data=b'raw_torrent_bytes')
-        ctx.tracker_client.get_torrent_info.return_value = {
-            "info_hash": "abc",
-            "magnet_link": "magnet:?xt=urn:btih:abc",
-        }
+    def test_local_torrent_data_skips_tracker(self, make_ctx, mock_lt):
+        """When torrent_data is provided locally, should skip tracker download."""
+        ctx = make_ctx(torrent_data=b'local_torrent_bytes')
 
         mock_handle = MagicMock()
-        mock_status = MagicMock()
-        mock_status.has_metadata = True
-        mock_handle.status.return_value = mock_status
-
         mock_ti = MagicMock()
         mock_ti.num_files.return_value = 1
         mock_handle.torrent_file.return_value = mock_ti
-
         ctx.lt_session.add_torrent.return_value = mock_handle
 
         with patch('llmpt.session_context.run_monitor_loop'), \
@@ -293,18 +273,16 @@ class TestInitTorrent:
             result = ctx._init_torrent()
 
         assert result is True
-        mock_lt.bdecode.assert_called_once_with(b'raw_torrent_bytes')
+        mock_lt.bdecode.assert_called_once_with(b'local_torrent_bytes')
         mock_lt.torrent_info.assert_called_once()
-        mock_lt.parse_magnet_uri.assert_not_called()
+        # Should NOT call tracker since local data was available
+        ctx.tracker_client.download_torrent.assert_not_called()
 
     def test_exception_marks_invalid(self, make_ctx, mock_lt):
         """Exception during init should set is_valid=False and return False."""
         ctx = make_ctx()
-        ctx.tracker_client.get_torrent_info.return_value = {
-            "info_hash": "abc",
-            "magnet_link": "magnet:?xt=urn:btih:abc",
-        }
-        mock_lt.parse_magnet_uri.side_effect = RuntimeError("bad magnet")
+        ctx.tracker_client.download_torrent.return_value = b'bad_data'
+        mock_lt.bdecode.side_effect = RuntimeError("bad torrent data")
 
         with patch('os.path.exists', return_value=False), \
              patch('os.makedirs'):
@@ -418,7 +396,7 @@ class TestDownloadFile:
     def test_returns_false_when_init_fails_and_invalid(self, make_ctx, mock_lt):
         """If _init_torrent fails and marks invalid, should return False."""
         ctx = make_ctx()
-        ctx.tracker_client.get_torrent_info.return_value = None  # Will fail init
+        ctx.tracker_client.download_torrent.return_value = None  # Will fail init
         result = ctx.download_file("model.bin", "/dest/model.bin")
         assert result is False
 

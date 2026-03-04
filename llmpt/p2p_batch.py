@@ -83,9 +83,12 @@ class P2PBatchManager:
             if LIBTORRENT_AVAILABLE:
                 from . import get_config
                 configured_port = get_config().get('port')
+                # Resolve listen interfaces BEFORE creating lt.session()
+                # so that lt.session() doesn't implicitly take 6881 before we check it.
+                listen_ifaces = _resolve_listen_interfaces(configured_port)
                 self.lt_session = lt.session()
                 settings = self.lt_session.get_settings()
-                settings['listen_interfaces'] = _resolve_listen_interfaces(configured_port)
+                settings['listen_interfaces'] = listen_ifaces
                 self.lt_session.apply_settings(settings)
                 actual_port = self.lt_session.listen_port()
                 logger.info(f"libtorrent listening on port {actual_port}")
@@ -108,12 +111,13 @@ class P2PBatchManager:
                     revision=revision,
                     tracker_client=tracker_client,
                     lt_session=self.lt_session,
+                    session_mode='full_seed',
                     timeout=0,  # unused: seeding path never calls download_file()
                     torrent_data=torrent_data,
                 )
             session_ctx = self.sessions[repo_key]
             
-        # Ensure torrent is initialized with the magnet link via tracker
+        # Ensure torrent is initialized with .torrent data from tracker
         if not session_ctx.is_valid:
             return False
             
@@ -162,6 +166,7 @@ class P2PBatchManager:
                     revision=revision,
                     tracker_client=tracker_client,
                     lt_session=self.lt_session,
+                    session_mode='on_demand',
                     timeout=timeout,
                     auto_seed=config.get('auto_seed', True),
                     seed_duration=config.get('seed_duration', 3600),

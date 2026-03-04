@@ -19,17 +19,15 @@ from .utils import lt, LIBTORRENT_AVAILABLE
 
 logger = logging.getLogger('llmpt.p2p_batch')
 
-# ── Timeout defaults (seconds) ────────────────────────────────────────────────
-# Internal tuning knobs, NOT exposed to end users via the public API.
-# Override via environment variables for debugging / testing only.
-METADATA_TIMEOUT = int(os.environ.get('LLMPT_METADATA_TIMEOUT', '8'))
-
 
 class SessionContext:
     """
     Manages a single libtorrent torrent_handle for a specific repo/revision.
     """
-    def __init__(self, repo_id: str, revision: str, tracker_client: Any, lt_session: Any, timeout: int, torrent_data: Optional[bytes] = None, *, auto_seed: bool = True, seed_duration: int = 3600):
+    def __init__(self, repo_id: str, revision: str, tracker_client: Any, lt_session: Any, session_mode: str, timeout: int, torrent_data: Optional[bytes] = None, *, auto_seed: bool = True, seed_duration: int = 3600):
+        if session_mode not in ('on_demand', 'full_seed'):
+            raise ValueError("session_mode must be 'on_demand' or 'full_seed'")
+        self.session_mode = session_mode
         self.repo_id = repo_id
         self.revision = revision
         self.tracker_client = tracker_client
@@ -72,30 +70,24 @@ class SessionContext:
             
         logger.info(f"[{self.repo_id}] Initializing P2P session for revision {self.revision}")
         
-        # 1. Ask tracker for torrent info
-        torrent_metadata = self.tracker_client.get_torrent_info(self.repo_id, self.revision)
-
-        if not torrent_metadata or 'magnet_link' not in torrent_metadata:
-            logger.warning(f"[{self.repo_id}] No torrent metadata found on tracker.")
+        # 1. Obtain torrent_data: prefer local (seeder path), else download from tracker
+        torrent_data = self.torrent_data
+        if not torrent_data:
+            torrent_data = self.tracker_client.download_torrent(
+                self.repo_id, self.revision
+            )
+        
+        if not torrent_data:
+            logger.warning(f"[{self.repo_id}] No torrent data available from tracker.")
             self.is_valid = False
             return False
-            
-        magnet_link = torrent_metadata['magnet_link']
         
-        # 2. Add torrent based on magnet link or raw torrent data
+        # 2. Initialize directly from torrent_data (0 delay, no metadata wait)
         try:
-            if self.torrent_data:
-                logger.info(f"[{self.repo_id}] Initializing session with native raw torrent metadata.")
-                info = lt.torrent_info(lt.bdecode(self.torrent_data))
-                params = lt.add_torrent_params()
-                params.ti = info
-            else:
-                params = lt.parse_magnet_uri(magnet_link)
-            
-            # We don't use tempdir anymore. We save everything into a common root 
-            # (e.g., the HF blobs root) but we'll use rename_file to pinpoint exact locations.
-            # We just need some dummy directory here, or maybe the HF cache dir root.
-            # Using ~/.cache/huggingface/hub/p2p_root as a safe anchor point
+            info = lt.torrent_info(lt.bdecode(torrent_data))
+            params = lt.add_torrent_params()
+            params.ti = info
+
             self.temp_dir = os.path.expanduser("~/.cache/huggingface/hub/p2p_root")
             os.makedirs(self.temp_dir, exist_ok=True)
             params.save_path = self.temp_dir
@@ -103,29 +95,29 @@ class SessionContext:
             # Start paused to set priorities before downloading anything
             params.flags |= lt.torrent_flags.paused
             
-            # Load fastresume data if it exists
-            if os.path.exists(self.fastresume_path):
-                try:
-                    with open(self.fastresume_path, "rb") as f:
-                        resume_data = f.read()
+            # If it's a dedicated full_seed session, start in seed mode and avoid stale fastresume data
+            if self.session_mode == 'full_seed':
+                params.flags |= lt.torrent_flags.seed_mode
+            else:
+                # Load fastresume data if it exists for downloaders
+                if os.path.exists(self.fastresume_path):
                     try:
-                        decoded = lt.bdecode(resume_data)
-                        if isinstance(decoded, dict):
-                            params.renamed_files = decoded.get(b'mapped_files', {})
-                    except Exception:
-                        pass
-                    
-                    # We inject the raw byte array and let libtorrent parse it
-                    # depending on the libtorrent version, params may have a different interface
-                    if hasattr(lt.add_torrent_params, "parse_resume_data"):
-                         # lt>1.2 API
-                         params = lt.read_resume_data(resume_data)
-                         # gotta re-apply the magnet options
-                         params.save_path = self.temp_dir
-                         params.url = magnet_link
-                         params.flags |= lt.torrent_flags.paused
-                except Exception as e:
-                    logger.warning(f"[{self.repo_id}] Failed to load resume data: {e}")
+                        with open(self.fastresume_path, "rb") as f:
+                            resume_data = f.read()
+                        try:
+                            decoded = lt.bdecode(resume_data)
+                            if isinstance(decoded, dict):
+                                params.renamed_files = decoded.get(b'mapped_files', {})
+                        except Exception:
+                            pass
+                        
+                        if hasattr(lt.add_torrent_params, "parse_resume_data"):
+                             params = lt.read_resume_data(resume_data)
+                             params.save_path = self.temp_dir
+                             params.ti = info
+                             params.flags |= lt.torrent_flags.paused
+                    except Exception as e:
+                        logger.warning(f"[{self.repo_id}] Failed to load resume data: {e}")
                     
             self.handle = self.lt_session.add_torrent(params)
             
@@ -133,11 +125,7 @@ class SessionContext:
             if test_peer:
                 import socket
                 try:
-                    # Parse host:port with IPv6-safe handling
-                    # Supported formats: "hostname", "hostname:port",
-                    #   "1.2.3.4:port", "[::1]:port"
                     if test_peer.startswith('['):
-                        # IPv6 bracket notation: [::1]:port
                         bracket_end = test_peer.index(']')
                         host = test_peer[1:bracket_end]
                         port = int(test_peer[bracket_end + 2:]) if len(test_peer) > bracket_end + 2 else 6881
@@ -155,35 +143,25 @@ class SessionContext:
                 except Exception as e:
                     logger.warning(f"Failed to resolve test peer {test_peer}: {e}")
             
-            # 3. Wait for metadata to resolve to get the file tree
-            logger.info(f"[{self.repo_id}] Waiting for torrent metadata resolution...")
+            # torrent_info is immediately available — no metadata wait needed
+            self.torrent_info_obj = self.handle.torrent_file()
             
-            # Start background monitoring thread immediately so it can pick up metadata 
-            # later if it times out here and we fall back to HTTP!
+            # Start background monitoring thread
             self.worker_thread = threading.Thread(target=run_monitor_loop, args=(self,), daemon=True)
             self.worker_thread.start()
             
-            start_time = time.time()
-            while not self.handle.status().has_metadata:
-                if time.time() - start_time > METADATA_TIMEOUT:
-                    logger.warning(f"[{self.repo_id}] Timeout waiting for torrent metadata after {METADATA_TIMEOUT}s. Falling back.")
-                    return False
-                time.sleep(1)
-                
-            self.torrent_info_obj = self.handle.torrent_file()
-            
-            # Initialize all file priorities to 0 (don't download)
+            # Initialize all file priorities to 0 (don't download) for on-demand downloading sessions.
+            # Pure full_seed sessions should keep default priority so seed_mode works.
             num_files = self.torrent_info_obj.num_files()
-            self.handle.prioritize_files([0] * num_files)
+            if self.session_mode == 'on_demand':
+                self.handle.prioritize_files([0] * num_files)
             
-            # Unpause
-            self.handle.resume()
+            # Do not unpause here; let the caller unpause after explicit config (e.g. priorities or seed mode)
             logger.info(f"[{self.repo_id}] P2P session initialized. {num_files} files available.")
             
             return True
         except Exception as e:
             logger.error(f"[{self.repo_id}] Error initializing torrent: {e}")
-            # If a strict exception occurs (e.g. bad magnet link), we DO kill the handle.
             self.is_valid = False
             if self.handle:
                 self.lt_session.remove_torrent(self.handle)
@@ -250,7 +228,12 @@ class SessionContext:
                         logger.info(f"[{self.repo_id}] Meta still loading. Queueing file {filename} for background BT tracking.")
                     else:
                         logger.warning(f"[{self.repo_id}] File {filename} not found in metadata. Fallback to HTTP.")
+                        if self.handle:
+                            self.handle.resume()
                         return False
+            
+            if self.handle:
+                self.handle.resume()
         
         # Block until the background thread signals completion
         logger.debug(f"[{self.repo_id}] Blocking waiting for P2P download of {filename}...")

@@ -31,7 +31,7 @@ def create_torrent(
         tracker_url: Tracker announce URL.
 
     Returns:
-        Dictionary containing torrent info (info_hash, magnet_link, etc.)
+        Dictionary containing torrent info (info_hash, torrent_data, files, etc.)
         or None if creation failed.
     """
     if not LIBTORRENT_AVAILABLE:
@@ -119,20 +119,30 @@ def create_torrent(
         info = lt.torrent_info(torrent)
         info_hash = str(info.info_hash())
 
-        # Generate magnet link
-        magnet_link = lt.make_magnet_uri(info)
+        # Extract per-file metadata
+        files = info.files()
+        file_list = []
+        for i in range(files.num_files()):
+            lt_file_path = files.file_path(i).replace('\\', '/')
+            # Strip the root folder (torrent wrapping dir)
+            parts = lt_file_path.split('/', 1)
+            relative_path = parts[1] if len(parts) == 2 else lt_file_path
+            file_list.append({
+                'path': relative_path,
+                'size': files.file_size(i),
+            })
 
         logger.info(f"Torrent created: {info_hash}")
 
         return {
             'info_hash': info_hash,
-            'magnet_link': magnet_link,
             'file_size': sum(f.stat().st_size for f in file_path.rglob('*') if f.is_file()) if file_path.is_dir() else file_path.stat().st_size,
             'piece_length': piece_length,
             'num_pieces': info.num_pieces(),
             'num_files': info.num_files(),
             'torrent_data': lt.bencode(torrent),
             'commit_hash': file_path.name,
+            'files': file_list,
         }
 
     except Exception as e:
@@ -189,8 +199,9 @@ def create_and_register_torrent(
         info_hash=torrent_info['info_hash'],
         total_size=torrent_info['file_size'],
         file_count=torrent_info.get('num_files', 1),
-        magnet_link=torrent_info['magnet_link'],
         piece_length=torrent_info['piece_length'],
+        torrent_data=torrent_info['torrent_data'],
+        files=torrent_info['files'],
     )
 
     if success:

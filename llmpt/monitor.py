@@ -223,7 +223,6 @@ def _check_pending_files(ctx: "SessionContext") -> bool:
                         logger.error(f"[{ctx.repo_id}] Failed to deliver {filename}: {deliver_err}")
                         # Don't set event — let it timeout and fallback to HTTP
 
-                    ctx.handle.file_priority(file_index, 0)
                     ctx.handle.save_resume_data(lt.save_resume_flags_t.flush_disk_cache)
 
     return False

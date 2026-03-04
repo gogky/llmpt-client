@@ -117,9 +117,17 @@ graph TD
   1. `create_and_register_torrent()` 在注册时把 `torrent_data`（bencode 后的完整 torrent 文件）一并上传给 tracker
   2. Tracker 提供 `/api/v1/torrents/<id>/torrent` 端点返回 .torrent 文件
   3. 客户端优先下载 .torrent 文件直接初始化（跳过 metadata 等待阶段），fallback 到 magnet link
-- **收益**：消除 metadata 等待超时（当前最常见的失败原因之一）
 
-### 2.2 · 服务端自动做种
+### 2.2 · magnet link 携带扩展元数据
+- **现状**：magnet link 只含 info_hash 和 tracker announce URL。
+- **方案**：在 tracker 返回的 JSON 中增加：
+  - `total_size`（已有字段，但客户端未使用）→ 用于磁盘预分配和用户提示
+  - `file_list` → 包含每个文件的大小，用于客户端预判磁盘空间
+  - `piece_length` → 客户端可决定是否适合当前网络环境
+- **注意**：这不是修改 magnet link 本身（magnet URI 格式有限），而是丰富 tracker API 返回的元数据
+
+
+### 2.3 · 服务端自动做种
 - **现状**：做种完全依赖已有用户的客户端持续运行。如果没人在线做种，新用户的 P2P 请求 100% 失败。（客户关闭huggingface_hub后仍可以做种的解决方案）
 - **方案**：
   1. Tracker 服务端收到 torrent 注册后，自动启动一个做种进程
@@ -127,13 +135,7 @@ graph TD
   3. 服务端做种可以保证 swarm 永远有至少一个 seed
 - **依赖**：需要 revision = commit hash (1.1) 以及 .torrent 存储 (2.1)
 
-### 2.3 · magnet link 携带扩展元数据
-- **现状**：magnet link 只含 info_hash 和 tracker announce URL。
-- **方案**：在 tracker 返回的 JSON 中增加：
-  - `total_size`（已有字段，但客户端未使用）→ 用于磁盘预分配和用户提示
-  - `file_list` → 包含每个文件的大小，用于客户端预判磁盘空间
-  - `piece_length` → 客户端可决定是否适合当前网络环境
-- **注意**：这不是修改 magnet link 本身（magnet URI 格式有限），而是丰富 tracker API 返回的元数据
+
 
 ### ~~2.4 · 分片大小 (piece_length) 自动选择~~ ✅
 - **已完成**：

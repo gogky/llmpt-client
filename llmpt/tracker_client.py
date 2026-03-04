@@ -38,7 +38,7 @@ class TrackerClient:
             revision: Git commit hash or branch name. If None, returns the most recent.
 
         Returns:
-            Dictionary containing torrent info (magnet_link, info_hash, etc.)
+            Dictionary containing torrent info (info_hash, total_size, files, etc.)
             or None if torrent doesn't exist.
         """
         try:
@@ -78,6 +78,42 @@ class TrackerClient:
             logger.warning(f"Failed to query tracker: {e}")
             return None
 
+    def download_torrent(
+        self,
+        repo_id: str,
+        revision: str,
+    ) -> Optional[bytes]:
+        """
+        Download raw .torrent file from tracker.
+
+        Args:
+            repo_id: HuggingFace repository ID.
+            revision: Git commit hash.
+
+        Returns:
+            Raw torrent bytes, or None if not found.
+        """
+        try:
+            url = urljoin(self.tracker_url, '/api/v1/torrents/torrent')
+
+            response = self.session.get(
+                url,
+                params={'repo_id': repo_id, 'revision': revision},
+                timeout=self.timeout
+            )
+
+            if response.status_code == 404:
+                logger.debug(f"No .torrent file found for {repo_id}@{revision}")
+                return None
+
+            response.raise_for_status()
+            logger.info(f"Downloaded .torrent for {repo_id}@{revision} ({len(response.content)} bytes)")
+            return response.content
+
+        except requests.RequestException as e:
+            logger.warning(f"Failed to download .torrent: {e}")
+            return None
+
     def register_torrent(
         self,
         repo_id: str,
@@ -87,8 +123,9 @@ class TrackerClient:
         info_hash: str,
         total_size: int,
         file_count: int,
-        magnet_link: str,
         piece_length: int,
+        torrent_data: bytes,
+        files: list,
     ) -> bool:
         """
         Register a new torrent with the tracker.
@@ -101,12 +138,15 @@ class TrackerClient:
             info_hash: BitTorrent info hash.
             total_size: Total size in bytes.
             file_count: Number of files in the torrent.
-            magnet_link: Magnet link for the torrent.
             piece_length: Piece length in bytes.
+            torrent_data: Raw .torrent file bytes (will be base64-encoded for transport).
+            files: List of dicts with 'path' and 'size' keys.
 
         Returns:
             True if registration successful, False otherwise.
         """
+        import base64
+
         try:
             url = urljoin(self.tracker_url, '/api/v1/publish')
             data = {
@@ -117,8 +157,9 @@ class TrackerClient:
                 'info_hash': info_hash,
                 'total_size': total_size,
                 'file_count': file_count,
-                'magnet_link': magnet_link,
                 'piece_length': piece_length,
+                'torrent_data': base64.b64encode(torrent_data).decode('ascii'),
+                'files': files,
             }
 
             logger.debug(f"Registering torrent: {url}")
@@ -138,7 +179,7 @@ class TrackerClient:
             return False
 
     # NOTE: This method is currently unused. libtorrent handles announce internally
-    # once a magnet link / torrent is added to the session. Manual announce is not needed.
+    # once a torrent is added to the session. Manual announce is not needed.
     def announce(
         self,
         info_hash: str,
