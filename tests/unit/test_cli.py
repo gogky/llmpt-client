@@ -86,10 +86,11 @@ class TestMainDispatch:
 
 class TestCmdDownload:
 
+    @patch('time.sleep', side_effect=KeyboardInterrupt)
     @patch('llmpt.cli.snapshot_download', create=True)
     @patch('llmpt.cli.enable_p2p', create=True)
-    def test_basic_download(self, mock_enable, mock_download):
-        """Should enable P2P with tracker URL and call snapshot_download."""
+    def test_basic_download(self, mock_enable, mock_download, mock_sleep):
+        """Should enable P2P with tracker URL, download, and block for seeding."""
         mock_download.return_value = "/path/to/download"
 
         args = MagicMock()
@@ -98,9 +99,10 @@ class TestCmdDownload:
         args.repo_id = "gpt2"
         args.local_dir = None
 
-        with patch('huggingface_hub.snapshot_download', mock_download):
-            with patch('llmpt.enable_p2p', mock_enable):
-                cmd_download(args)
+        with patch('huggingface_hub.snapshot_download', mock_download), \
+             patch('llmpt.enable_p2p', mock_enable), \
+             patch('llmpt.get_config', return_value={'seed_duration': 3600}):
+            cmd_download(args)
 
         mock_enable.assert_called_once_with(
             tracker_url="http://tracker.example.com",

@@ -9,7 +9,7 @@ graph TD
     A["P1: revision 统一为 commit hash"] --> B["P3: 跨版本 swarm 共享"]
     A --> C["P2: 服务端存储 .torrent"]
     C --> D["P2: 服务端自动做种 webseed"]
-    D --> E["P3: 混合下载 - webseed"]
+    D --> E["P2: WebSeed - HF HTTP 兜底"]
     F["P1: 端口动态分配"] --> G["P2: monitor 守护进程解耦"]
     G --> H["P3: 进度条"]
     I["P1: timeout/metadata 等待可配置"] --> J["P2: seeder.py 重构"]
@@ -23,7 +23,8 @@ graph TD
     R["P3: 混合下载 - P2P 中断后 HTTP 续传"]
     S["P1: logging.basicConfig 反模式"]
     U["P1: auto_seed/seed_duration 死配置"]
-    G --> T["P2: 进程退出清理"]
+    U --> T["P2: 进程退出清理"]
+    G --> T
     V["P2: 返回值类型修正"]
     W["P3: 死代码清理"]
     G --> X["P2: P2P 超时改为卡顿检测"]
@@ -96,13 +97,17 @@ graph TD
   2. 改为 `logger.addHandler(logging.NullHandler())`（Python 官方推荐的库日志实践）
   3. 让用户在自己的应用中决定日志的级别和格式
 
-### 1.6 - auto_seed 和 seed_duration 是死配置
-- **现状**：`enable_p2p(auto_seed=True, seed_duration=3600)` 接受这两个参数并存入 `_config`，但整个代码库没有任何地方读取 `_config['auto_seed']` 或 `_config['seed_duration']` 来执行实际逻辑。
-- **问题**：用户以为设置了自动做种1小时，实际上完全无效，造成误导。
-- **方案**：
-  - **方案 A**：实现它们 - 下载完成后根据 auto_seed 自动调用 start_seeding，根据 seed_duration 设置定时器停止
-  - **方案 B**：先从 API 中移除，在文档中说明做种需要手动通过 CLI 触发，避免误导用户
-
+### ~~1.6 - auto_seed 和 seed_duration 是死配置~~ ✅
+- **已完成**：采用「进程内后台做种 + atexit 优雅退出 + CLI 阻塞」方案：
+  - `SessionContext` 新增 `auto_seed` / `seed_duration` / `seed_start_time` 字段
+  - `P2PBatchManager.register_request()` 从全局 `_config` 读取并传入
+  - `_deliver_file()`：当 `auto_seed=True` 时保留 p2p_root 中的源文件（hardlink，零额外空间），使 libtorrent 可以继续向其他 peer 供种
+  - `monitor.py`：所有文件交付后设置 `seed_start_time`，在主循环中检测 `seed_duration` 到期后清理
+  - `cli.py`：`cmd_download()` 下载完成后阻塞做种（显示时长提示，Ctrl+C 退出）；`--no-seed` 跳过
+  - `__init__.py`：注册 `atexit` 回调，进程退出时调用 `P2PBatchManager.shutdown()` 清理硬链接、源文件、关闭 lt_session（顺带部分解决 2.9）
+  - `download_file()` 注册新文件时重置 `seed_start_time`，避免 snapshot 下载中途误启做种计时器
+- ~~**现状**~~：~~`enable_p2p(auto_seed=True, seed_duration=3600)` 接受这两个参数并存入 `_config`，但整个代码库没有任何地方读取 `_config['auto_seed']` 或 `_config['seed_duration']` 来执行实际逻辑。~~
+- ~~**问题**~~：~~用户以为设置了自动做种1小时，实际上完全无效，造成误导。~~
 ---
 
 ## P2 — 中优先级（功能增强 & 架构改善）
@@ -174,12 +179,14 @@ graph TD
   - ~~下次启动时加载 fastresume 跳过 recheck~~
   - ~~或后台预先计算 piece hash 并缓存~~
 
-### 2.9 - 进程退出时优雅清理
-- **现状**：没有 atexit 或 signal handler。进程退出时未保存最终的 fastresume 数据，libtorrent session 未正常关闭（不会向 tracker 发送 stopped 事件），临时文件未清理。
-- **方案**：
-  1. 注册 `atexit.register()` 回调，在进程退出时保存 fastresume、关闭 lt_session
-  2. 捕获 SIGTERM/SIGINT 信号做同样的清理
-  3. 在 P2PBatchManager 中添加 `shutdown()` 方法供手动调用
+### ~~2.9 - 进程退出时优雅清理~~ ✅（基础版）
+- **已完成**（随 1.6 auto_seed 一并实现）：
+  - `enable_p2p()` 注册 `atexit.register(_cleanup_on_exit)` 回调
+  - `P2PBatchManager.shutdown()` 清理所有 session 的做种硬链接、下载源文件、移除 torrent handle
+  - 公共 API `llmpt.shutdown()` 可供手动调用
+- **未完成**：
+  - 捕获 SIGTERM/SIGINT 信号做同样的清理（atexit 在某些信号场景下不会触发）
+  - 保存最终 fastresume 数据（当前 monitor 线程周期性保存，但退出时可能遗漏最新状态）
 
 ### 2.10 - create_and_register_torrent 返回值类型不一致
 - **现状**：类型标注为 `-> bool`，但实际返回 torrent_info (dict) 或 None。`run_seeder.py` 依赖它返回 dict（`torrent_info['torrent_data']`）。
@@ -207,12 +214,30 @@ graph TD
 - **依赖**：revision = commit hash (1.1)
 - **复杂度**：极高，需要 tracker 和客户端深度配合
 
-### 3.2 · 混合下载 — WebSeed
-- **概念**：利用 BEP 17/19，在 torrent 中嵌入 HF Hub 的 HTTP URL 作为 web seed。当没有 peer 可用时，libtorrent 自动从 HTTP 源下载 piece。
-- **好处**：P2P 的效率 + HTTP 的可靠性，消除"无 seed 可用"的问题
-- **实现**：在 `create_torrent()` 中 `t.add_url_seed(hf_download_url)` 
-- **挑战**：HF Hub 的 URL 中包含 token 和 commit hash，需要正确构造 per-file URL
-- **依赖**：服务端 .torrent 存储 (2.1) + 服务端自动做种 (2.2)
+### 2.12 · WebSeed — HF HTTP 作为 P2P 兜底（BEP 19）
+- **优先级提升理由**：WebSeed 从根本上解决「做种人数不够」的问题。有了它，P2P 变成纯粹的加速层——有 peer 就更快，没 peer 也完全不影响（libtorrent 自动从 HTTP 拉取）。
+- **当前架构问题**：
+  - 没有 peer 在线 → P2P 超时 → fallback HTTP（白等 5 分钟，所有 P2P 开销浪费）
+  - 做种人数完全依赖客户端自觉，不可控
+- **WebSeed 架构**：
+  - 0 个做种者：libtorrent 直接从 HF HTTP 下载 piece（速度 = 原始 HTTP 速度）
+  - 1 个做种者：P2P + HTTP 混合，速度 ≥ 纯 HTTP
+  - 多个做种者：P2P 为主，HTTP 补缺，速度最大化
+  - 做种者中途退出：libtorrent 自动切到 HTTP 补完剩余 piece
+- **实现**：
+  1. `torrent_creator.py`：创建 torrent 时添加 `t.add_url_seed(base_url)`
+     - 公有仓库：`https://huggingface.co/{repo_id}/resolve/{revision}/`
+     - 私有仓库：需要在 URL 中携带 token 或使用 `t.add_http_seed()` (BEP 17，支持自定义 header)
+  2. libtorrent 内置 BEP 19 支持，自动在 peer 不足时从 web seed 拉取 piece
+  3. 下载的 piece 同样参与 SHA1 校验，安全性不变
+- **挑战**：
+  - HF URL 中可能包含 token（私有仓库），需要确保 token 不被泄漏到 .torrent 文件中
+  - per-file URL 映射需要与 torrent 内部文件路径一致（BEP 19 要求 URL 按 torrent 文件结构拼接）
+  - HF CDN 可能对高频 Range 请求有限流
+- **依赖**：无硬依赖（公有仓库可立即实现）；私有仓库需要 token 透传机制
+- **实现复杂度**：低（核心只需一行 `add_url_seed`），收益极高
+
+### ~~3.2 · 混合下载 — WebSeed~~（已合并入 2.12）
 
 ### 3.3 · 混合下载 — P2P 中断后 HTTP 续传
 - **概念**：P2P 超时后启动 HTTP fallback 时，不从头下载，而是从 P2P 已下载的 offset 继续。
@@ -255,9 +280,9 @@ graph TD
 | 版本 | 包含内容 | 目标 |
 |---|---|---|
 | **v0.2** | P0 全部 + P1 全部 (1.1~1.6) | 核心正确性，日志/API 规范化 |
-| **v0.3** | P2.1 ~ P2.5 | 服务端增强，架构改善 |
-| **v0.4** | P2.6 ~ P2.10 | 架构解耦，性能优化，代码质量 |
-| **v1.0** | P3 选择性实现 | 生产可用，混合下载 |
+| **v0.3** | P2.1 ~ P2.5, P2.12 (WebSeed) | 服务端增强，架构改善，P2P 可靠性兜底 |
+| **v0.4** | P2.6 ~ P2.11 | 架构解耦，性能优化，代码质量 |
+| **v1.0** | P3 选择性实现 | 生产可用 |
 
 ---
 

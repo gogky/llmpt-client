@@ -57,6 +57,18 @@ def run_monitor_loop(ctx: "SessionContext") -> None:
             _save_resume_data(ctx)
             last_save_time = now
 
+        # --- Check seed_duration timeout (outside lock) ---
+        if ctx.seed_start_time is not None and ctx.seed_duration > 0:
+            elapsed = now - ctx.seed_start_time
+            if elapsed >= ctx.seed_duration:
+                logger.info(
+                    f"[{ctx.repo_id}] Seed duration {ctx.seed_duration}s elapsed. "
+                    f"Stopping auto-seed."
+                )
+                ctx._cleanup_download_sources()
+                ctx.is_valid = False
+                break
+
         try:
             # --- Process libtorrent alerts ---
             _process_alerts(ctx)
@@ -154,6 +166,19 @@ def _check_pending_files(ctx: "SessionContext") -> bool:
         # Identify files still waiting for completion
         pending_files = [f for f, e in ctx.file_events.items() if not e.is_set()]
         if not pending_files:
+            # Start seed timer when all registered downloads are delivered
+            if ctx.file_events and ctx.auto_seed and ctx.seed_start_time is None:
+                ctx.seed_start_time = time.time()
+                if ctx.seed_duration > 0:
+                    logger.info(
+                        f"[{ctx.repo_id}] All files delivered. "
+                        f"Auto-seeding for {ctx.seed_duration}s."
+                    )
+                else:
+                    logger.info(
+                        f"[{ctx.repo_id}] All files delivered. "
+                        f"Auto-seeding indefinitely."
+                    )
             return False
 
         # If metadata finally arrived, belatedly map requested files

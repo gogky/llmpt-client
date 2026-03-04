@@ -142,9 +142,31 @@ class TestGetLtDiskPath:
 
 class TestDeliverFile:
 
-    def test_hard_link_success(self, make_ctx, tmp_path):
-        """When src and dst are on same filesystem, os.link is used and src is cleaned up."""
+    def test_hard_link_success_auto_seed(self, make_ctx, tmp_path):
+        """When auto_seed=True (default), src is preserved for seeding."""
         ctx = make_ctx()
+        assert ctx.auto_seed is True  # default
+
+        src = tmp_path / "src.bin"
+        src.write_bytes(b"hello")
+        src_inode = os.stat(str(src)).st_ino
+        dst = tmp_path / "subdir" / "dst.bin"
+
+        ctx._deliver_file(str(src), str(dst))
+
+        assert dst.exists()
+        assert dst.read_bytes() == b"hello"
+        # src should be preserved for seeding (hardlink → same inode, no extra space)
+        assert src.exists()
+        assert os.stat(str(dst)).st_ino == src_inode
+        # Source should be tracked for later cleanup
+        assert str(src) in ctx.download_source_files
+
+    def test_hard_link_success_no_auto_seed(self, make_ctx, tmp_path):
+        """When auto_seed=False, src is cleaned up after delivery."""
+        from llmpt.session_context import SessionContext
+        ctx = make_ctx()
+        ctx.auto_seed = False
 
         src = tmp_path / "src.bin"
         src.write_bytes(b"hello")
@@ -157,8 +179,9 @@ class TestDeliverFile:
         assert dst.read_bytes() == b"hello"
         # src should have been cleaned up after delivery
         assert not src.exists()
-        # dst should retain the original inode (same data, hardlink)
         assert os.stat(str(dst)).st_ino == src_inode
+        # No sources tracked
+        assert len(ctx.download_source_files) == 0
 
     def test_cross_device_fallback(self, make_ctx, tmp_path):
         """When os.link fails with OSError, should fall back to shutil.copy2."""

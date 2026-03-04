@@ -29,13 +29,18 @@ class SessionContext:
     """
     Manages a single libtorrent torrent_handle for a specific repo/revision.
     """
-    def __init__(self, repo_id: str, revision: str, tracker_client: Any, lt_session: Any, timeout: int, torrent_data: Optional[bytes] = None):
+    def __init__(self, repo_id: str, revision: str, tracker_client: Any, lt_session: Any, timeout: int, torrent_data: Optional[bytes] = None, *, auto_seed: bool = True, seed_duration: int = 3600):
         self.repo_id = repo_id
         self.revision = revision
         self.tracker_client = tracker_client
         self.lt_session = lt_session
         self.timeout = timeout
         self.torrent_data = torrent_data
+        
+        # Seeding configuration
+        self.auto_seed = auto_seed
+        self.seed_duration = seed_duration
+        self.seed_start_time = None  # Set when all downloads complete; seeds until seed_duration elapses
         
         self.handle = None
         self.is_valid = True
@@ -46,6 +51,9 @@ class SessionContext:
         # Maps filename -> threading.Event (to notify completion)
         self.file_events: Dict[str, threading.Event] = {}
         self.file_destinations: Dict[str, str] = {}
+        
+        # Track source files kept for auto-seeding (cleaned up when seeding stops)
+        self.download_source_files = []
         
         # Determine paths for fastresume data
         self.fastresume_dir = os.path.expanduser("~/.cache/llmpt/p2p_resume")
@@ -206,6 +214,10 @@ class SessionContext:
                 event = threading.Event()
                 self.file_events[filename] = event
                 self.file_destinations[filename] = destination
+                
+                # Reset seed timer — new download activity means we haven't
+                # finished the full snapshot yet.
+                self.seed_start_time = None
                 
                 # Try finding the file. BUT, if torrent_info_obj is None because we 
                 # fell back to HTTP during metadata fetch, we just queue it up and
@@ -457,9 +469,12 @@ class SessionContext:
         
         Uses os.link() (hard link) for zero-copy on the same filesystem,
         falls back to shutil.copy2() for cross-device.
-        After delivery, removes the source file from p2p_root to avoid
-        leaving behind duplicate directory entries (or real copies on
-        cross-filesystem setups).
+        
+        When auto_seed is True, the source file in p2p_root is preserved so
+        libtorrent can continue serving pieces to other peers.  These sources
+        are cleaned up later via _cleanup_download_sources().
+        
+        When auto_seed is False, the source is removed immediately.
         """
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         
@@ -476,10 +491,28 @@ class SessionContext:
             shutil.copy2(src, dst)
             logger.debug(f"[{self.repo_id}] Copied {src} -> {dst}")
         
-        # Clean up source: for hardlinks this just decrements the inode refcount
-        # (data remains at dst); for copies this frees the duplicate disk space.
-        try:
-            os.unlink(src)
-            logger.debug(f"[{self.repo_id}] Cleaned up source: {src}")
-        except OSError as e:
-            logger.debug(f"[{self.repo_id}] Could not remove source {src}: {e}")
+        if self.auto_seed:
+            # Keep source so libtorrent can continue seeding pieces.
+            # For hardlinks this costs zero extra disk space (same inode).
+            self.download_source_files.append(src)
+            logger.debug(f"[{self.repo_id}] Kept source for seeding: {src}")
+        else:
+            # Clean up source immediately: for hardlinks this just decrements
+            # the inode refcount (data remains at dst); for copies this frees
+            # the duplicate disk space.
+            try:
+                os.unlink(src)
+                logger.debug(f"[{self.repo_id}] Cleaned up source: {src}")
+            except OSError as e:
+                logger.debug(f"[{self.repo_id}] Could not remove source {src}: {e}")
+
+    def _cleanup_download_sources(self):
+        """Remove source files preserved for auto-seeding in p2p_root."""
+        for path in self.download_source_files:
+            try:
+                if os.path.exists(path):
+                    os.unlink(path)
+                    logger.debug(f"[{self.repo_id}] Cleaned up seeding source: {path}")
+            except OSError as e:
+                logger.warning(f"[{self.repo_id}] Failed to clean up {path}: {e}")
+        self.download_source_files = []

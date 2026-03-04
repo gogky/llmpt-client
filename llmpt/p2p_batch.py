@@ -155,14 +155,38 @@ class P2PBatchManager:
         
         with self._lock:
             if repo_key not in self.sessions:
+                from . import get_config
+                config = get_config()
                 self.sessions[repo_key] = SessionContext(
                     repo_id=repo_id,
                     revision=revision,
                     tracker_client=tracker_client,
                     lt_session=self.lt_session,
-                    timeout=timeout
+                    timeout=timeout,
+                    auto_seed=config.get('auto_seed', True),
+                    seed_duration=config.get('seed_duration', 3600),
                 )
             session_ctx = self.sessions[repo_key]
         
         # Register the file with the session context and wait for it
         return session_ctx.download_file(filename, temp_file_path)
+
+    def shutdown(self) -> None:
+        """Gracefully shut down all sessions and release resources.
+
+        Called by atexit handler or directly by user code.  Cleans up
+        seeding hardlinks, download source files, removes all torrent
+        handles, and clears session state.
+        """
+        with self._lock:
+            for repo_key, ctx in list(self.sessions.items()):
+                ctx._cleanup_seeding_hardlinks()
+                ctx._cleanup_download_sources()
+                if ctx.handle:
+                    try:
+                        self.lt_session.remove_torrent(ctx.handle)
+                    except Exception:
+                        pass
+                ctx.is_valid = False
+            self.sessions.clear()
+        logger.info("P2PBatchManager shutdown complete.")

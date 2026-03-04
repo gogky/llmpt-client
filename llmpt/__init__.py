@@ -19,6 +19,7 @@ Usage:
 """
 
 import os
+import atexit
 import logging
 from typing import Optional
 
@@ -32,6 +33,7 @@ logger.addHandler(logging.NullHandler())
 
 # Global state
 _patched = False
+_atexit_registered = False
 _config = {
     'tracker_url': None,
     'auto_seed': True,
@@ -46,6 +48,7 @@ __all__ = [
     'disable_p2p',
     'is_enabled',
     'stop_seeding',
+    'shutdown',
     'get_config',
 ]
 
@@ -75,7 +78,7 @@ def enable_p2p(
         >>> from huggingface_hub import snapshot_download
         >>> snapshot_download("gpt2")  # Uses P2P
     """
-    global _patched, _config
+    global _patched, _config, _atexit_registered
 
     if not _LIBTORRENT_AVAILABLE:
         logger.warning(
@@ -123,6 +126,12 @@ def enable_p2p(
     apply_patch(_config)
 
     _patched = True
+
+    # Register atexit handler (once) so process exit always cleans up
+    if not _atexit_registered:
+        atexit.register(_cleanup_on_exit)
+        _atexit_registered = True
+
     logger.info(f"✓ P2P enabled (tracker: {_config['tracker_url']})")
 
 
@@ -204,6 +213,32 @@ def get_config() -> dict:
         >>> print(config['tracker_url'])
     """
     return _config.copy()
+
+
+def shutdown() -> None:
+    """
+    Gracefully shut down P2P: stop all seeding, clean up temp files,
+    and release the libtorrent session.
+
+    This is called automatically via atexit when the process exits.
+    You may also call it explicitly when you no longer need P2P.
+
+    Example:
+        >>> from llmpt import shutdown
+        >>> shutdown()
+    """
+    from .p2p_batch import P2PBatchManager
+    try:
+        manager = P2PBatchManager()
+        manager.shutdown()
+    except Exception:
+        pass  # Best-effort during interpreter shutdown
+
+
+def _cleanup_on_exit():
+    """atexit callback — delegates to shutdown()."""
+    if _patched:
+        shutdown()
 
 
 # Auto-enable from environment variable
