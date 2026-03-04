@@ -6,30 +6,30 @@
 
 ```mermaid
 graph TD
-    A["P1: revision 统一为 commit hash"] --> B["P3: 跨版本 swarm 共享"]
+    A["✅ P1: revision 统一为 commit hash"] --> B["P3: 跨版本 swarm 共享"]
     A --> C["P2: 服务端存储 .torrent"]
-    C --> D["P2: 服务端自动做种 webseed"]
-    D --> E["P2: WebSeed - HF HTTP 兜底"]
-    F["P1: 端口动态分配"] --> G["P2: monitor 守护进程解耦"]
+    C --> D["P2: 服务端自动做种"]
+    E["P2: WebSeed - HF HTTP 作为虚拟 seed"]
+    F["✅ P1: 端口动态分配"] --> G["P2: monitor 守护进程解耦"]
     G --> H["P3: 进度条"]
-    I["P1: timeout/metadata 等待可配置"] --> J["P2: seeder.py 重构"]
-    K["P1: E2E 测试覆盖真实路径"] --> J
+    I["✅ P1: timeout/metadata 等待可配置"] --> J["P2: seeder.py 重构"]
+    K["✅ P1: E2E 测试覆盖真实路径"] --> J
     K --> L["P2: fastresume 兼容旧版 libtorrent"]
     C --> M["P2: magnet 携带扩展元数据"]
     N["P3: 服务端校验与安全"]
     O["P3: 支持 huggingface_xet"]
     P["P2: 分片大小自动选择"]
-    Q["P2: fastresume 跳过验证"]
+    Q["✅ P2: fastresume 跳过验证"]
     R["P3: 混合下载 - P2P 中断后 HTTP 续传"]
-    S["P1: logging.basicConfig 反模式"]
-    U["P1: auto_seed/seed_duration 死配置"]
+    S["✅ P1: logging.basicConfig 反模式"]
+    U["✅ P1: auto_seed/seed_duration"]
     U --> T["P2: 进程退出清理"]
     G --> T
     V["P2: 返回值类型修正"]
     W["P3: 死代码清理"]
     G --> X["P2: P2P 超时改为卡顿检测"]
-    X --> E
 ```
+
 
 ---
 
@@ -77,17 +77,16 @@ graph TD
   - ~~recheck timeout 硬编码为 120 秒（`session_context.py` L345）~~
 - ~~**方案**：将这些超时统一纳入 `_config` 字典或作为 `SessionContext` 的构造参数，允许通过环境变量或 API 覆盖~~
 
-### 1.4 · E2E 测试应覆盖真实用户路径，而非绕过公共接口调用内部函数
-- **现状**：用户使用 llmpt 有两条入口路径，但 E2E 测试都没有完整覆盖：
-  - **CLI 路径**：`llmpt-cli seed` / `llmpt-cli download` — 未通过 CLI 入口测试
-  - **API 路径**：`enable_p2p()` → `snapshot_download()` — 下载端走了这条路，但做种端没有
-  - `run_seeder.py` 直接调用了 `TrackerClient`、`P2PBatchManager`、`create_and_register_torrent` 等内部类来拼装做种流程，绕过了 `llmpt-cli seed` 或 `seeder.start_seeding()` 的真实路径
-  - `test_docker_p2p.py` 断言时直接访问 `P2PBatchManager().sessions` 内部状态，而非通过公共 API（如 `get_download_stats()`）验证
-- **问题**：这样测试的是内部组件的拼装，而不是用户实际使用时的行为。如果 CLI 或公共 API 的封装层有 bug，E2E 测试发现不了。
-- **方案**：
-  1. 做种端应通过 CLI 命令（`llmpt-cli seed --repo-id xxx --revision main`）或公共 API（`seeder.start_seeding()`）驱动
-  2. 下载端应保持当前的 `enable_p2p()` → `snapshot_download()` 路径（已正确）
-  3. 断言应通过公共接口（`get_download_stats()`、`get_seeding_status()`）而非内部状态验证
+### ~~1.4 · E2E 测试应覆盖真实用户路径，而非绕过公共接口调用内部函数~~ ✅
+- **已完成**：
+  - **做种端**：`run_seeder.py` 重构为直接调用 `cmd_seed()` — `llmpt-cli seed` 背后的同一个函数。覆盖完整 CLI 路径：参数解析 → revision 解析 → torrent 创建 → tracker 注册 → 做种引擎启动。通过 `SIGALRM` 模拟 Ctrl+C 退出。
+  - **下载端**：`test_docker_p2p.py` 保持 `enable_p2p()` → `snapshot_download()` 路径（API 路径，已正确）
+  - 断言改为通过 `get_download_stats()` 公共 API 验证，移除了对 `P2PBatchManager().sessions` 内部状态的直接访问
+  - 修复了 `create_torrent` 使用 `local_files_only=True`（不再偷偷触发网络下载，避免 P2P 自拦截）
+  - 修复了 `start_seeding` / `cmd_seed` 缺少 `torrent_data` 透传的 bug
+- ~~**现状**~~：~~用户使用 llmpt 有两条入口路径，但 E2E 测试都没有完整覆盖~~
+- ~~**问题**~~：~~这样测试的是内部组件的拼装，而不是用户实际使用时的行为~~
+
 
 ### ~~1.5 - logging.basicConfig 不应在库中调用~~ ✅
 - **现状**：`__init__.py` L28-31 调用了 `logging.basicConfig(level=logging.INFO, ...)`。
@@ -120,7 +119,7 @@ graph TD
   3. 客户端优先下载 .torrent 文件直接初始化（跳过 metadata 等待阶段），fallback 到 magnet link
 - **收益**：消除 metadata 等待超时（当前最常见的失败原因之一）
 
-### 2.2 · 服务端自动做种 (Webseed 前提)
+### 2.2 · 服务端自动做种
 - **现状**：做种完全依赖已有用户的客户端持续运行。如果没人在线做种，新用户的 P2P 请求 100% 失败。（客户关闭huggingface_hub后仍可以做种的解决方案）
 - **方案**：
   1. Tracker 服务端收到 torrent 注册后，自动启动一个做种进程

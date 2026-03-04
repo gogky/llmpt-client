@@ -204,7 +204,7 @@ def cmd_seed(args):
     print(f"Resolving caching structure and creating torrent for {args.repo_id}@{revision}...")
 
     # Create and register torrent
-    success = create_and_register_torrent(
+    torrent_info = create_and_register_torrent(
         repo_id=args.repo_id,
         revision=revision,
         repo_type=args.repo_type,
@@ -212,8 +212,10 @@ def cmd_seed(args):
         tracker_client=tracker,
     )
 
-    if not success:
-        print("Error: Failed to create or register torrent")
+    if not torrent_info:
+        print("Error: Failed to create or register torrent.")
+        print("Hint: Make sure the model is already downloaded locally:")
+        print(f"  llmpt-cli download {args.repo_id}")
         sys.exit(1)
 
     print("✓ Torrent created and registered")
@@ -223,7 +225,8 @@ def cmd_seed(args):
     start_seeding(
         repo_id=args.repo_id,
         revision=revision,
-        tracker_client=tracker
+        tracker_client=tracker,
+        torrent_data=torrent_info.get('torrent_data'),
     )
     
     try:

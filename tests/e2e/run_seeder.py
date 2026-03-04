@@ -1,71 +1,66 @@
 """
 Run the background seeder for the true P2P test.
+
+Drives seeding through the public CLI entry point `cmd_seed`, verifying the
+exact same code path that `llmpt-cli seed` uses (see todo 1.4).
 """
 
 import os
 import time
+import signal
+import threading
 import pytest
-import llmpt
 from huggingface_hub import snapshot_download
+
 
 def test_seeder_initialization():
     """
-    1. Create a dummy model.
-    2. Start the seeder.
-    3. Block and wait to serve downlaoder.
+    Real-user seeding flow via CLI:
+      1. Download the repo via HuggingFace HTTP (populates local cache).
+      2. Invoke `cmd_seed()` — the same function behind `llmpt-cli seed`.
+         A background timer sends KeyboardInterrupt after 3 minutes to break
+         out of the infinite seeding loop, just like a real user pressing Ctrl+C.
     """
     tracker_url = os.environ.get("TRACKER_URL", "http://118.195.159.242")
-    
     repo_id = "hf-internal-testing/tiny-random-GPTJForCausalLM"
-    filename = "config.json"
-    
-    # 1. Download it officially once so the Seeder actually has it in its cache.
-    # IMPORTANT: Do this BEFORE enabling P2P, otherwise the seeder's own P2P patch
-    # would intercept this initial download, causing a 300s timeout waiting for peers
-    # that don't exist yet.
-    print(f"[Seeder] Downloading {repo_id} from HuggingFace to act as the source of truth...", flush=True)
-    local_path = snapshot_download(
-        repo_id=repo_id,
-        local_files_only=False
-    )
-    
-    # Enable P2P logging and logic AFTER the initial HTTP download is done
-    llmpt.enable_p2p(tracker_url=tracker_url)
 
-    
-    assert os.path.exists(local_path)
-    
-    from llmpt.tracker_client import TrackerClient
-    from llmpt.p2p_batch import P2PBatchManager
-    
-    # 2. Start the unified background seeding daemon for this repository
-    print(f"[Seeder] Registering seeding task for {repo_id}...", flush=True)
-    tracker_client = TrackerClient(tracker_url)
-    manager = P2PBatchManager()
-    
-    from llmpt.torrent_creator import create_and_register_torrent
-    
-    # Wait a bit for the mock tracker container to be fully live
+    # ── 1. Populate HF local cache (before enabling P2P) ──
+    print(f"[Seeder] Downloading {repo_id} from HuggingFace (HTTP)...", flush=True)
+    local_path = snapshot_download(repo_id=repo_id, local_files_only=False)
+    assert os.path.exists(local_path), f"snapshot_download returned non-existent path: {local_path}"
+
+    # Wait for tracker to be reachable
     print("[Seeder] Waiting 5s for tracker to come online...", flush=True)
     time.sleep(5)
-    
-    print(f"[Seeder] Creating and registering .torrent metadata on tracker...", flush=True)
-    torrent_info = create_and_register_torrent(
-        repo_id=repo_id,
-        revision="main",
-        repo_type="model",
-        name=repo_id.split("/")[-1],
-        tracker_client=tracker_client,
-    )
-    assert torrent_info is not None, "Failed to create/register BT metadata"
-    
-    success = manager.register_seeding_task(repo_id, "main", tracker_client, torrent_data=torrent_info['torrent_data'])
-    print(f"[Seeder] Seeding registration returned: {success}. P2P background thread handling remaining tracking.", flush=True)
-    
-    # 4. Keep the container alive long enough for the downloader to finish
-    print("[Seeder] Seeder online and seeding. Waiting for peers...", flush=True)
-    for _ in range(36):
-        time.sleep(5)
+
+    # ── 2. Seed via the CLI entry point (cmd_seed) ──
+    # cmd_seed() enters an infinite `while True: sleep(1)` loop at the end,
+    # which is how the real CLI keeps the seeder alive.  We use SIGALRM to
+    # send ourselves a KeyboardInterrupt after 3 minutes — simulating the
+    # user pressing Ctrl+C.
+    from unittest.mock import MagicMock
+    from llmpt.cli import cmd_seed
+
+    args = MagicMock()
+    args.tracker = tracker_url
+    args.repo_id = repo_id
+    args.revision = "main"
+    args.repo_type = "model"
+    args.name = repo_id.split("/")[-1]
+
+    def _alarm_handler(signum, frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGALRM, _alarm_handler)
+    signal.alarm(180)  # 3 minutes
+
+    try:
+        cmd_seed(args)
+    finally:
+        signal.alarm(0)  # Cancel the alarm
+
+    print("[Seeder] ✅ Seeding session completed.", flush=True)
+
 
 if __name__ == "__main__":
     test_seeder_initialization()

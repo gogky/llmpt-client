@@ -37,14 +37,19 @@ def create_torrent(
     try:
         from huggingface_hub import snapshot_download
         
-        # Download or resolve the snapshot path without re-downloading existing blobs
+        # Resolve the snapshot path from the LOCAL HF cache only.
+        # This function must never trigger a network download — the caller is
+        # responsible for ensuring files are already cached (e.g. via a prior
+        # `snapshot_download()` call).  Using local_files_only=True also avoids
+        # the P2P self-interception problem: if enable_p2p() has already been
+        # called, a network snapshot_download here would be intercepted by the
+        # monkey patch, trying to download via P2P with no peers → 300s timeout.
         logger.info(f"Resolving HF snapshot for {repo_id}@{revision}")
         
-        # Since we use this tool mostly for files that exist, this should return instantly
         snapshot_path = snapshot_download(
             repo_id=repo_id, 
             revision=revision, 
-            local_files_only=False  # Allow network check if needed, but caches will be used
+            local_files_only=True,
         )
         file_path = Path(snapshot_path)
         

@@ -17,6 +17,7 @@ def start_seeding(
     repo_id: str,
     revision: str,
     tracker_client: Any,
+    torrent_data: Optional[bytes] = None,
 ) -> bool:
     """
     Start seeding a repository in the background using the unified P2PBatchManager.
@@ -25,6 +26,10 @@ def start_seeding(
         repo_id: The HuggingFace repository ID.
         revision: The HuggingFace revision/branch.
         tracker_client: TrackerClient instance.
+        torrent_data: Raw .torrent file bytes.  When provided, libtorrent can
+                      initialise the torrent immediately without fetching
+                      metadata from peers (avoids timeout when the seeder is
+                      the first/only peer).
 
     Returns:
         True if seeding started successfully, False otherwise.
@@ -37,7 +42,8 @@ def start_seeding(
     success = manager.register_seeding_task(
         repo_id=repo_id,
         revision=revision,
-        tracker_client=tracker_client
+        tracker_client=tracker_client,
+        torrent_data=torrent_data,
     )
 
     if success:

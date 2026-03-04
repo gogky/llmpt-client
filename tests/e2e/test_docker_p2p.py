@@ -87,16 +87,7 @@ def test_true_p2p_download():
 
     print(f"\n{'='*60}\n", flush=True)
 
-    # ── 3. Strict assertions ──
-    from llmpt.p2p_batch import P2PBatchManager
-    manager = P2PBatchManager()
-
-    # The P2P manager must have intercepted the download
-    active_keys = [k for k in manager.sessions.keys() if k[0] == repo_id]
-    assert len(active_keys) > 0, "P2P Manager did not intercept the download!"
-
-    session_key = active_keys[0]
-    session = manager.sessions[session_key]
+    # ── 3. Strict assertions (public API only — no internal state access) ──
 
     # All files in the repo must have been processed by P2P
     assert len(p2p_files) == len(files_in_repo), (

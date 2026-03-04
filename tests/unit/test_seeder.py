@@ -44,6 +44,7 @@ class TestStartSeeding:
             repo_id="test/repo",
             revision="main",
             tracker_client=tracker,
+            torrent_data=None,
         )
 
     @patch('llmpt.seeder.LIBTORRENT_AVAILABLE', True)

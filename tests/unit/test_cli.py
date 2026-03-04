@@ -136,8 +136,8 @@ class TestCmdSeed:
     @patch('llmpt.cli.TrackerClient', create=True)
     @patch('llmpt.utils.resolve_commit_hash', side_effect=lambda repo, rev, repo_type='model': rev)
     def test_seed_creation_failure(self, mock_resolve, MockTracker, mock_create, mock_start):
-        """If create_and_register_torrent fails, should exit(1)."""
-        mock_create.return_value = False
+        """If create_and_register_torrent fails (returns None), should exit(1)."""
+        mock_create.return_value = None
 
         args = MagicMock()
         args.tracker = 'http://tracker.example.com'
@@ -159,8 +159,11 @@ class TestCmdSeed:
     @patch('llmpt.cli.TrackerClient', create=True)
     @patch('llmpt.utils.resolve_commit_hash', side_effect=lambda repo, rev, repo_type='model': rev)
     def test_seed_success_and_ctrl_c(self, mock_resolve, MockTracker, mock_create, mock_start, mock_sleep):
-        """Successful seed should loop until KeyboardInterrupt."""
-        mock_create.return_value = True
+        """Successful seed should pass torrent_data through and loop until KeyboardInterrupt."""
+        mock_create.return_value = {
+            'info_hash': 'abc123',
+            'torrent_data': b'fake_torrent_bytes',
+        }
 
         args = MagicMock()
         args.tracker = 'http://tracker.example.com'
@@ -175,6 +178,8 @@ class TestCmdSeed:
             cmd_seed(args)  # Should not raise, KeyboardInterrupt is caught
 
         mock_start.assert_called_once()
+        # Verify torrent_data is passed through to start_seeding
+        assert mock_start.call_args.kwargs.get('torrent_data') == b'fake_torrent_bytes'
 
 
 # ─── cmd_status ───────────────────────────────────────────────────────────────
