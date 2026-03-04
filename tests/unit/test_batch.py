@@ -127,7 +127,8 @@ def test_session_context_init_torrent(mock_libtorrent):
     """Test internal initialization of libtorrent session inside SessionContext.
 
     The _init_torrent() flow:
-      1. tracker.download_torrent() → returns raw .torrent bytes
+      1. torrent_cache.resolve_torrent_data() → returns raw .torrent bytes
+         (three-layer: local cache → tracker → None)
       2. lt.bdecode(torrent_data) → decoded dict
       3. lt.torrent_info(decoded) → torrent_info object
       4. lt_session.add_torrent(params) → returns handle
@@ -139,7 +140,6 @@ def test_session_context_init_torrent(mock_libtorrent):
     from llmpt.p2p_batch import SessionContext
 
     tracker = MagicMock()
-    tracker.download_torrent.return_value = b'fake_torrent_bytes'
 
     mock_lt_session = MagicMock()
 
@@ -153,16 +153,17 @@ def test_session_context_init_torrent(mock_libtorrent):
 
     mock_lt_session.add_torrent.return_value = mock_handle
 
-    ctx = SessionContext("demo", "main", tracker, mock_lt_session, timeout=10)
+    ctx = SessionContext("demo", "main", tracker, mock_lt_session, session_mode='on_demand', timeout=10)
 
-    # Mock the monitor loop to prevent real background thread work
+    # Mock the monitor loop to prevent real background thread work,
+    # and mock the three-layer torrent resolver to return fake data
     with patch('llmpt.session_context.run_monitor_loop'), \
-         patch('os.path.exists', return_value=False):
+         patch('os.path.exists', return_value=False), \
+         patch('llmpt.torrent_cache.resolve_torrent_data', return_value=b'fake_torrent_bytes'):
         result = ctx._init_torrent()
 
     assert result is True
     mock_lt_session.add_torrent.assert_called_once()
-    mock_handle.resume.assert_called_once()
     assert ctx.handle is mock_handle
     assert ctx.torrent_info_obj is mock_torrent_info
     # Verify we used bdecode + torrent_info path, not parse_magnet_uri

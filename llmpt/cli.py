@@ -5,6 +5,7 @@ CLI tool for llmpt.
 import sys
 import argparse
 import logging
+import signal
 from pathlib import Path
 
 
@@ -112,6 +113,16 @@ Examples:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format='[%(name)s] %(levelname)s: %(message)s'
     )
+
+    # Handle SIGTERM (e.g. `kill <pid>`) gracefully — same as Ctrl+C.
+    # Without this, SIGTERM kills the process without running atexit callbacks,
+    # leaving hardlinks and temp files behind.
+    def _handle_sigterm(signum, frame):
+        from llmpt import shutdown
+        shutdown()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
 
     # Execute command
     if args.command == 'download':

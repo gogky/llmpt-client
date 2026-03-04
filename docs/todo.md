@@ -111,14 +111,20 @@ graph TD
 
 ## P2 — 中优先级（功能增强 & 架构改善）
 
-### 2.1 · 服务端存储 .torrent 文件 / 添加缓存
-- **现状**：tracker 只存储 magnet link 等元数据。客户端拿到 magnet link 后需要先下载 torrent metadata（等待其他 peer 提供），这有 8 秒超时风险。
-- **方案**：
-  1. `create_and_register_torrent()` 在注册时把 `torrent_data`（bencode 后的完整 torrent 文件）一并上传给 tracker
-  2. Tracker 提供 `/api/v1/torrents/<id>/torrent` 端点返回 .torrent 文件
-  3. 客户端优先下载 .torrent 文件直接初始化（跳过 metadata 等待阶段），fallback 到 magnet link
+### ~~2.1 · 服务端存储 .torrent 文件 / 添加缓存~~ ✅
+- **已完成**：实现了三层 .torrent 解析机制：
+  1. **本地磁盘缓存**（`~/.cache/llmpt/torrents/`）— 0 延迟
+  2. **Tracker 服务端下载** — 下载后自动缓存到本地
+  3. **本地生成**（仅 seeder 路径）— 生成后自动缓存
+  - `torrent_cache.py`：新模块，提供 `load_cached_torrent()` / `save_torrent_to_cache()` / `resolve_torrent_data()` 三层解析函数
+  - `session_context._init_torrent()`：下载者路径集成三层缓存，重复下载跳过网络请求
+  - `torrent_creator.create_torrent()`：做种者路径命中缓存时跳过 `set_piece_hashes()`（大模型可节省 30+ 分钟）
+  - 缓存 key = `(repo_id, revision)`，永不失效（commit hash 确定性）
+  - Atomic write（write .tmp → os.replace）防止半写入
+  - `_torrent_data_to_result()`：从缓存字节解析完整结果字典，避免重复 hash 计算
+  - `cli.py`：添加 SIGTERM handler，`kill <pid>` 也能触发优雅清理
 
-### 2.2 · magnet link 携带扩展元数据
+### ~~2.2 · magnet link 携带扩展元数据~~ 去掉
 - **现状**：magnet link 只含 info_hash 和 tracker announce URL。
 - **方案**：在 tracker 返回的 JSON 中增加：
   - `total_size`（已有字段，但客户端未使用）→ 用于磁盘预分配和用户提示

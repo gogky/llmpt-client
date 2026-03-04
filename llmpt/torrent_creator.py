@@ -11,6 +11,47 @@ from .utils import lt, LIBTORRENT_AVAILABLE, get_optimal_piece_length, format_by
 logger = logging.getLogger('llmpt.torrent_creator')
 
 
+def _torrent_data_to_result(torrent_data: bytes, repo_id: str) -> Optional[dict]:
+    """Build a torrent info result dict from raw cached .torrent bytes.
+
+    This mirrors the return value of :func:`create_torrent` but skips the
+    expensive ``set_piece_hashes`` step by parsing the already-generated
+    bencode data.
+    """
+    try:
+        info = lt.torrent_info(lt.bdecode(torrent_data))
+        info_hash = str(info.info_hash())
+        files = info.files()
+
+        file_list = []
+        total_size = 0
+        for i in range(files.num_files()):
+            lt_file_path = files.file_path(i).replace('\\', '/')
+            parts = lt_file_path.split('/', 1)
+            relative_path = parts[1] if len(parts) == 2 else lt_file_path
+            size = files.file_size(i)
+            file_list.append({'path': relative_path, 'size': size})
+            total_size += size
+
+        # Extract the root folder name (= commit hash) from the first file path
+        first_path = files.file_path(0).replace('\\', '/')
+        commit_hash = first_path.split('/')[0] if '/' in first_path else ''
+
+        return {
+            'info_hash': info_hash,
+            'file_size': total_size,
+            'piece_length': info.piece_length(),
+            'num_pieces': info.num_pieces(),
+            'num_files': info.num_files(),
+            'torrent_data': torrent_data,
+            'commit_hash': commit_hash,
+            'files': file_list,
+        }
+    except Exception as e:
+        logger.warning(f"[{repo_id}] Failed to parse cached torrent: {e}")
+        return None
+
+
 def create_torrent(
     repo_id: str,
     revision: str,
@@ -40,7 +81,23 @@ def create_torrent(
 
     try:
         from huggingface_hub import snapshot_download
-        
+        from .torrent_cache import load_cached_torrent, save_torrent_to_cache
+
+        # ── Layer 1: check local .torrent cache ───────────────────────────
+        # If we already generated a torrent for this repo@revision, reuse it.
+        # This skips the expensive set_piece_hashes() call which can take
+        # 30+ minutes for large models on HDD.
+        cached = load_cached_torrent(repo_id, revision)
+        if cached:
+            logger.info(f"Using cached torrent for {repo_id}@{revision}")
+            result = _torrent_data_to_result(cached, repo_id)
+            if result is not None:
+                return result
+            # Corrupt cache entry — fall through to regenerate
+            logger.warning(f"Cached torrent for {repo_id}@{revision} is invalid, regenerating")
+
+        # ── No cache hit — generate from scratch ──────────────────────────
+        #
         # Resolve the snapshot path from the LOCAL HF cache only.
         # This function must never trigger a network download — the caller is
         # responsible for ensuring files are already cached (e.g. via a prior
@@ -114,6 +171,10 @@ def create_torrent(
 
         # Generate torrent
         torrent = t.generate()
+        torrent_data = lt.bencode(torrent)
+
+        # Cache the generated torrent for future use
+        save_torrent_to_cache(repo_id, revision, torrent_data)
 
         # Get info hash
         info = lt.torrent_info(torrent)
@@ -140,7 +201,7 @@ def create_torrent(
             'piece_length': piece_length,
             'num_pieces': info.num_pieces(),
             'num_files': info.num_files(),
-            'torrent_data': lt.bencode(torrent),
+            'torrent_data': torrent_data,
             'commit_hash': file_path.name,
             'files': file_list,
         }

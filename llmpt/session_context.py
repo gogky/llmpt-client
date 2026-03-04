@@ -70,11 +70,14 @@ class SessionContext:
             
         logger.info(f"[{self.repo_id}] Initializing P2P session for revision {self.revision}")
         
-        # 1. Obtain torrent_data: prefer local (seeder path), else download from tracker
+        # 1. Obtain torrent_data: prefer constructor-supplied (seeder path),
+        #    then three-layer lookup: local cache → tracker → None.
+        from .torrent_cache import resolve_torrent_data
+
         torrent_data = self.torrent_data
         if not torrent_data:
-            torrent_data = self.tracker_client.download_torrent(
-                self.repo_id, self.revision
+            torrent_data = resolve_torrent_data(
+                self.repo_id, self.revision, self.tracker_client
             )
         
         if not torrent_data:

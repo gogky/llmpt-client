@@ -77,7 +77,9 @@ class TestCreateTorrent:
         mock_lt.torrent_info.return_value = mock_info
         mock_lt.bencode.return_value = b'bencoded_torrent'
 
-        with patch('huggingface_hub.snapshot_download', return_value=str(snap_dir)):
+        with patch('huggingface_hub.snapshot_download', return_value=str(snap_dir)), \
+             patch('llmpt.torrent_cache.load_cached_torrent', return_value=None), \
+             patch('llmpt.torrent_cache.save_torrent_to_cache'):
             result = create_torrent(
                 "test/repo", "main", "http://tracker.example.com",
             )
@@ -110,7 +112,9 @@ class TestCreateTorrent:
 
         non_existent = str(tmp_path / "does_not_exist")
 
-        with patch('huggingface_hub.snapshot_download', return_value=non_existent):
+        with patch('huggingface_hub.snapshot_download', return_value=non_existent), \
+             patch('llmpt.torrent_cache.load_cached_torrent', return_value=None), \
+             patch('llmpt.torrent_cache.save_torrent_to_cache'):
             result = create_torrent("test/repo", "main", "http://tracker.example.com")
 
         assert result is None
