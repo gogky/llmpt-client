@@ -8,6 +8,8 @@ import pytest
 from unittest.mock import patch, MagicMock
 from pathlib import Path
 
+from llmpt.utils import get_optimal_piece_length
+
 
 # ─── create_torrent ───────────────────────────────────────────────────────────
 
@@ -49,6 +51,11 @@ class TestCreateTorrent:
         (snap_dir / "config.json").write_text('{"key": "value"}')
         (snap_dir / "model.bin").write_bytes(b'\x00' * 1000)
 
+        # Mock file_storage.total_size() so get_optimal_piece_length can run
+        mock_fs = MagicMock()
+        mock_fs.total_size.return_value = 1014  # small → 256KB piece
+        mock_lt.file_storage.return_value = mock_fs
+
         mock_torrent_obj = MagicMock()
         mock_torrent_obj.generate.return_value = {'info': 'data'}
         mock_lt.create_torrent.return_value = mock_torrent_obj
@@ -64,13 +71,14 @@ class TestCreateTorrent:
         with patch('huggingface_hub.snapshot_download', return_value=str(snap_dir)):
             result = create_torrent(
                 "test/repo", "main", "http://tracker.example.com",
-                piece_length=256 * 1024,
             )
 
         assert result is not None
         assert result['info_hash'] == 'abcdef1234567890'
         assert result['magnet_link'] == 'magnet:?xt=urn:btih:abcdef1234567890'
-        assert result['piece_length'] == 256 * 1024
+        # piece_length is auto-computed, just verify it's a positive power of two
+        pl = result['piece_length']
+        assert pl > 0 and (pl & (pl - 1)) == 0, f"piece_length {pl} is not a power of two"
         assert result['num_pieces'] == 1
         assert result['num_files'] == 2
         assert result['torrent_data'] == b'bencoded_torrent'
@@ -121,7 +129,7 @@ class TestCreateAndRegisterTorrent:
             'info_hash': 'abc',
             'magnet_link': 'magnet:?xt=urn:btih:abc',
             'file_size': 1000,
-            'piece_length': 256 * 1024,
+            'piece_length': get_optimal_piece_length(1000),
             'num_files': 1,
         }
         tracker = MagicMock()
@@ -142,7 +150,7 @@ class TestCreateAndRegisterTorrent:
             'info_hash': 'abc',
             'magnet_link': 'magnet:?xt=urn:btih:abc',
             'file_size': 5000,
-            'piece_length': 256 * 1024,
+            'piece_length': get_optimal_piece_length(5000),
             'num_files': 3,
             'num_pieces': 2,
         }
@@ -166,5 +174,5 @@ class TestCreateAndRegisterTorrent:
             total_size=5000,
             file_count=3,
             magnet_link='magnet:?xt=urn:btih:abc',
-            piece_length=256 * 1024,
+            piece_length=get_optimal_piece_length(5000),
         )

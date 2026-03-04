@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import Optional, Any
 
-from .utils import lt, LIBTORRENT_AVAILABLE
+from .utils import lt, LIBTORRENT_AVAILABLE, get_optimal_piece_length, format_bytes
 
 logger = logging.getLogger('llmpt.torrent_creator')
 
@@ -15,16 +15,20 @@ def create_torrent(
     repo_id: str,
     revision: str,
     tracker_url: str,
-    piece_length: int = 16 * 1024 * 1024,  # 16MB
 ) -> Optional[dict]:
     """
     Create a torrent file for an entire HuggingFace repository snapshot.
+
+    The piece_length is automatically determined from the total repository
+    size via ``get_optimal_piece_length()``.  This is intentionally **not**
+    caller-configurable: everyone who creates a torrent for the same
+    ``repo_id@revision`` must get the same ``info_hash``, otherwise users
+    would be split into separate swarms and unable to share data.
 
     Args:
         repo_id: HuggingFace repository ID (e.g., meta-llama/Llama-2-7b).
         revision: Git commit hash or branch name.
         tracker_url: Tracker announce URL.
-        piece_length: Piece length in bytes (default: 16MB for large files).
 
     Returns:
         Dictionary containing torrent info (info_hash, magnet_link, etc.)
@@ -63,6 +67,17 @@ def create_torrent(
         # We must add files relative to the snapshot path, but since libtorrent handles 
         # the wrapping folder automatically, we just point it to the snapshot root directory.
         lt.add_files(fs, str(file_path))
+
+        # ── Deterministic piece_length selection ───────────────────────────
+        # piece_length is derived solely from total_size so that every client
+        # creating a torrent for the same repo@revision produces the same
+        # info_hash → same swarm.  This must NOT be caller-configurable.
+        total_size = fs.total_size()
+        piece_length = get_optimal_piece_length(total_size)
+        logger.info(
+            f"piece_length={format_bytes(piece_length)} "
+            f"for total_size={format_bytes(total_size)}"
+        )
 
         # Create torrent with v1_only flag to eliminate .pad/ padding files.
         #
@@ -131,7 +146,6 @@ def create_and_register_torrent(
     repo_type: str,
     name: str,
     tracker_client: Any,
-    piece_length: int = 16 * 1024 * 1024,
 ) -> bool:
     """
     Create torrent and register it with the tracker.
@@ -142,7 +156,6 @@ def create_and_register_torrent(
         repo_type: The type of repository (e.g., 'model').
         name: The display name of the model.
         tracker_client: TrackerClient instance.
-        piece_length: Piece length in bytes.
 
     Returns:
         The torrent info dictionary if successful, None otherwise.
@@ -152,7 +165,6 @@ def create_and_register_torrent(
         repo_id=repo_id,
         revision=revision,
         tracker_url=tracker_client.tracker_url,
-        piece_length=piece_length,
     )
 
     if not torrent_info:

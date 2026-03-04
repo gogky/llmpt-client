@@ -18,7 +18,7 @@ graph TD
     C --> M["P2: magnet 携带扩展元数据"]
     N["P3: 服务端校验与安全"]
     O["P3: 支持 huggingface_xet"]
-    P["P2: 分片大小自动选择"]
+    P[\"✅ P2: 分片大小自动选择\"]
     Q["✅ P2: fastresume 跳过验证"]
     R["P3: 混合下载 - P2P 中断后 HTTP 续传"]
     S["✅ P1: logging.basicConfig 反模式"]
@@ -135,12 +135,16 @@ graph TD
   - `piece_length` → 客户端可决定是否适合当前网络环境
 - **注意**：这不是修改 magnet link 本身（magnet URI 格式有限），而是丰富 tracker API 返回的元数据
 
-### 2.4 · 分片大小 (piece_length) 自动选择
-- **现状**：`torrent_creator.py` 默认 16MB piece_length。`utils.py` 有 `get_optimal_piece_length()` 函数但未被使用！
-- **问题**：
-  - 16MB 对小文件（<100MB）过大，导致单 piece 包含多个文件，无法精细地按文件优先级下载
-  - 对 100GB+ 的超大模型可能需要更大 piece
-- **方案**：在 `create_torrent()` 中调用 `get_optimal_piece_length(total_size)` 而非硬编码
+### ~~2.4 · 分片大小 (piece_length) 自动选择~~ ✅
+- **已完成**：
+  - `torrent_creator.py`：`create_torrent()` 和 `create_and_register_torrent()` 不再接受 `piece_length` 参数
+  - piece_length 由 `get_optimal_piece_length(total_size)` 确定性计算，**不允许调用方自定义**——否则同一 repo@revision 会因 piece_length 不同产生不同 info_hash，导致用户被分散到不同 swarm
+  - `utils.py`：`get_optimal_piece_length()` 参数名从 `file_size` 改为 `total_size`，明确语义为 torrent 所有文件总大小
+  - 分档策略：<100MB → 256KB, 100MB-1GB → 1MB, 1-10GB → 4MB, 10-100GB → 16MB, 100GB-1TB → 32MB, ≥1TB → 64MB
+- ~~**现状**~~：~~`torrent_creator.py` 默认 16MB piece_length。`utils.py` 有 `get_optimal_piece_length()` 函数但未被使用！~~
+- ~~**问题**~~：
+  - ~~16MB 对小文件（<100MB）过大，导致单 piece 包含多个文件，无法精细地按文件优先级下载~~
+  - ~~对 100GB+ 的超大模型可能需要更大 piece~~
 
 ### 2.5 · seeder.py 重构
 - **现状**：`seeder.py` 直接操作 `P2PBatchManager` 的内部状态（`manager.sessions`、`manager._lock`、`manager.lt_session`），严重违反封装。
@@ -159,7 +163,7 @@ graph TD
   3. 支持 session 动态注册/注销
 - **依赖**：端口动态分配 (1.2)
 
-### 2.7 · fastresume 兼容旧版 libtorrent
+### 2.7 · fastresume 兼容旧版 libtorrent --skip
 - **现状**：`session_context.py` L111 有版本判断 `hasattr(lt.add_torrent_params, "parse_resume_data")`，但实现不完整——旧版 API 分支没有实际加载 resume data 的代码。
 - **方案**：
   1. 对 lt < 1.2：使用 `params.resume_data = resume_data` 的旧接口

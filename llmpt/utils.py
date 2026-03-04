@@ -120,27 +120,38 @@ def format_bytes(bytes_value: int) -> str:
     return f"{bytes_value:.1f} PB"
 
 
-def get_optimal_piece_length(file_size: int) -> int:
+def get_optimal_piece_length(total_size: int) -> int:
     """
-    Calculate optimal piece length for a torrent based on file size.
+    Calculate optimal piece length for a torrent based on total content size.
+
+    The goal is to keep the number of pieces between ~1,000 and ~10,000,
+    balancing .torrent metadata overhead against piece granularity.
 
     Args:
-        file_size: File size in bytes.
+        total_size: Total size of all files in the torrent, in bytes.
 
     Returns:
-        Optimal piece length in bytes.
+        Optimal piece length in bytes (always a power of two).
 
     Note:
-        - Small files (<100MB): 256KB
-        - Medium files (100MB-1GB): 1MB
-        - Large files (1GB-10GB): 4MB
-        - Very large files (>10GB): 16MB
+        - < 100 MB   → 256 KB  (small repos: configs, tokenizers)
+        - 100 MB – 1 GB  → 1 MB
+        - 1 GB – 10 GB   → 4 MB
+        - 10 GB – 100 GB  → 16 MB  (e.g. Llama-2-70B ~140GB)
+        - 100 GB – 1 TB  → 32 MB  (e.g. Llama-3.1-405B ~800GB)
+        - ≥ 1 TB         → 64 MB  (e.g. massive MoE models)
     """
-    if file_size < 100 * 1024 * 1024:  # <100MB
+    GB = 1024 * 1024 * 1024
+
+    if total_size < 100 * 1024 * 1024:  # <100MB
         return 256 * 1024  # 256KB
-    elif file_size < 1024 * 1024 * 1024:  # <1GB
+    elif total_size < 1 * GB:  # <1GB
         return 1024 * 1024  # 1MB
-    elif file_size < 10 * 1024 * 1024 * 1024:  # <10GB
+    elif total_size < 10 * GB:  # <10GB
         return 4 * 1024 * 1024  # 4MB
-    else:  # >10GB
+    elif total_size < 100 * GB:  # <100GB
         return 16 * 1024 * 1024  # 16MB
+    elif total_size < 1024 * GB:  # <1TB
+        return 32 * 1024 * 1024  # 32MB
+    else:  # ≥1TB
+        return 64 * 1024 * 1024  # 64MB

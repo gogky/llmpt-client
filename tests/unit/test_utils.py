@@ -106,6 +106,16 @@ class TestGetOptimalPieceLength:
         assert get_optimal_piece_length(5 * 1024 ** 3) == 4 * 1024 * 1024
 
     def test_very_large_file(self):
-        """> 10GB → 16MB."""
+        """10GB–100GB → 16MB."""
         assert get_optimal_piece_length(20 * 1024 ** 3) == 16 * 1024 * 1024
         assert get_optimal_piece_length(10 * 1024 ** 3) == 16 * 1024 * 1024
+
+    def test_huge_file(self):
+        """100GB–1TB → 32MB (e.g. Llama-3.1-405B ~800GB)."""
+        assert get_optimal_piece_length(100 * 1024 ** 3) == 32 * 1024 * 1024
+        assert get_optimal_piece_length(500 * 1024 ** 3) == 32 * 1024 * 1024
+
+    def test_massive_file(self):
+        """≥1TB → 64MB (e.g. massive MoE models)."""
+        assert get_optimal_piece_length(1024 * 1024 ** 3) == 64 * 1024 * 1024
+        assert get_optimal_piece_length(2048 * 1024 ** 3) == 64 * 1024 * 1024
