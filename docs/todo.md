@@ -163,7 +163,7 @@ graph TD
 - **依赖**：测试重构 (1.4) 作为安全网
 
 ### 2.6 · monitor 守护进程与 session 解耦
-- **现状**：每个 `SessionContext` 启动一个独立的 monitor 线程（`session_context.py` L138）。如果同时下载 N 个仓库就有 N 个 monitor 线程。
+- **现状**：每个 `SessionContext` 启动一个独立的 monitor 线程（`session_context.py`）。如果同时下载 N 个仓库就有 N 个 monitor 线程。
 - **问题**：线程数量不可控，且所有 monitor 都独立调用 `lt_session.pop_alerts()`，可能导致 alert 被错误消费（一个 session 的 monitor 拿到了另一个 session 的 alert，处理后丢弃，导致目标 session 永远收不到该 alert）
 - **方案**：
   1. 单个全局 monitor 线程，由 `P2PBatchManager` 管理
@@ -171,7 +171,7 @@ graph TD
   3. 支持 session 动态注册/注销
 - **依赖**：端口动态分配 (1.2)
 
-### 2.7 · fastresume 兼容旧版 libtorrent --skip
+### 2.7 · ~~fastresume 兼容旧版 libtorrent~~ --跳过此需求
 - **现状**：`session_context.py` L111 有版本判断 `hasattr(lt.add_torrent_params, "parse_resume_data")`，但实现不完整——旧版 API 分支没有实际加载 resume data 的代码。
 - **方案**：
   1. 对 lt < 1.2：使用 `params.resume_data = resume_data` 的旧接口

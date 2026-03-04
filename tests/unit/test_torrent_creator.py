@@ -125,8 +125,8 @@ class TestCreateTorrent:
 class TestCreateAndRegisterTorrent:
 
     @patch('llmpt.torrent_creator.create_torrent')
-    def test_creation_fails_returns_false(self, mock_create):
-        """If create_torrent returns None, should return False."""
+    def test_creation_fails_returns_none(self, mock_create):
+        """If create_torrent returns None, should return None."""
         from llmpt.torrent_creator import create_and_register_torrent
 
         mock_create.return_value = None
@@ -136,7 +136,7 @@ class TestCreateAndRegisterTorrent:
         result = create_and_register_torrent(
             "test/repo", "main", "model", "Test Model", tracker
         )
-        assert result is False
+        assert result is None
 
     @patch('llmpt.torrent_creator.create_torrent')
     def test_registration_fails_returns_none(self, mock_create):

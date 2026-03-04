@@ -14,12 +14,49 @@ import llmpt
 import shutil
 
 
+def _wait_for_seeder_ready(tracker_url: str, repo_id: str, timeout: int = 180) -> bool:
+    """Poll the tracker until the seeder has registered a torrent for repo_id.
+
+    This replaces the old fixed time.sleep(30): instead of guessing how long
+    seeder setup takes, we poll the tracker API and return as soon as the
+    seeder is confirmed registered.  This makes the test deterministic and
+    independent of machine/network speed.
+
+    Returns True if the torrent appears within *timeout* seconds, False otherwise.
+    """
+    api_url = f"{tracker_url.rstrip('/')}/api/v1/torrents"
+    deadline = time.time() + timeout
+    attempt = 0
+    while time.time() < deadline:
+        attempt += 1
+        try:
+            resp = requests.get(api_url, timeout=5)
+            if resp.status_code == 200:
+                body = resp.json()
+                # Tracker returns {"data": [...], "total": N}
+                torrents = body.get("data", body) if isinstance(body, dict) else body
+                for t in torrents:
+                    if t.get("repo_id") == repo_id:
+                        print(
+                            f"[Downloader] Seeder registered torrent after {attempt} poll(s). "
+                            f"info_hash={t.get('info_hash', '?')[:16]}...",
+                            flush=True,
+                        )
+                        return True
+        except Exception as e:
+            print(f"[Downloader] Tracker poll #{attempt} failed: {e}", flush=True)
+        time.sleep(5)
+
+    print(f"[Downloader] Seeder did NOT register within {timeout}s.", flush=True)
+    return False
+
+
 def test_true_p2p_download():
     """
     Downloads the model that the Seeder container is currently hosting.
     Asserts that every single file goes through P2P — no HTTP fallbacks.
     """
-    # Wait for the seeder to be fully ready and published to the live tracker
+    # Give containers a moment to fully start up before polling
     time.sleep(15)
 
     tracker_url = os.environ.get("TRACKER_URL", "http://118.195.159.242")
@@ -31,9 +68,15 @@ def test_true_p2p_download():
 
     repo_id = "hf-internal-testing/tiny-random-GPTJForCausalLM"
 
-    # Wait for seeder to: (1) complete HTTP download, (2) register torrent, (3) finish piece hash check
-    print("[Downloader] Waiting 30s for seeder to complete HTTP download and start seeding...", flush=True)
-    time.sleep(30)
+    # Deterministically wait until the seeder has registered the torrent.
+    # This replaces: time.sleep(30)  — which was a fragile guess.
+    print("[Downloader] Polling tracker until seeder is registered...", flush=True)
+    seeder_ready = _wait_for_seeder_ready(tracker_url, repo_id, timeout=180)
+    assert seeder_ready, (
+        f"Seeder never registered torrent for {repo_id} within 180s. "
+        "Check seeder container logs for errors."
+    )
+
     print("[Downloader] Requesting snapshot_download...", flush=True)
     local_path = snapshot_download(
         repo_id=repo_id,

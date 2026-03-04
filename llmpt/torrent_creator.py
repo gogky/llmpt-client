@@ -217,7 +217,7 @@ def create_and_register_torrent(
     repo_type: str,
     name: str,
     tracker_client: Any,
-) -> bool:
+) -> Optional[dict]:
     """
     Create torrent and register it with the tracker.
 
@@ -239,7 +239,7 @@ def create_and_register_torrent(
     )
 
     if not torrent_info:
-        return False
+        return None
 
     # Always register with the resolved commit hash from the snapshot path.
     # This provides defense-in-depth: even if the caller passed a branch name
