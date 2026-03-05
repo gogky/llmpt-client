@@ -60,10 +60,10 @@ def mock_lt_basic():
 
 @pytest.fixture
 def mock_lt_all_modules():
-    """Patch libtorrent into utils, p2p_batch, and session_context.
+    """Patch libtorrent into utils, p2p_batch, session_context, and torrent_init.
 
     Use this when the test exercises code paths that cross module
-    boundaries (e.g. P2PBatchManager → SessionContext).
+    boundaries (e.g. P2PBatchManager → SessionContext → torrent_init).
     """
     m = make_mock_lt(include_alerts=True)
     with patch('llmpt.utils.lt', m), \
@@ -71,7 +71,8 @@ def mock_lt_all_modules():
          patch('llmpt.p2p_batch.lt', m), \
          patch('llmpt.p2p_batch.LIBTORRENT_AVAILABLE', True), \
          patch('llmpt.session_context.lt', m), \
-         patch('llmpt.session_context.LIBTORRENT_AVAILABLE', True):
+         patch('llmpt.session_context.LIBTORRENT_AVAILABLE', True), \
+         patch('llmpt.torrent_init.lt', m):
         yield m
 
 

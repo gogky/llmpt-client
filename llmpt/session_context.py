@@ -88,101 +88,55 @@ class SessionContext:
         """Initialize the libtorrent handle if not already done."""
         if self.handle is not None:
             return True
-            
-        logger.info(f"[{self.repo_id}] Initializing P2P session for revision {self.revision}")
-        
-        # 1. Obtain torrent_data: prefer constructor-supplied (seeder path),
-        #    then three-layer lookup: local cache → tracker → None.
-        from .torrent_cache import resolve_torrent_data
 
-        torrent_data = self.torrent_data
-        if not torrent_data:
-            torrent_data = resolve_torrent_data(
-                self.repo_id, self.revision, self.tracker_client
-            )
-        
+        from .torrent_init import acquire_torrent_data, build_add_torrent_params, resolve_test_peer
+
+        logger.info(f"[{self.repo_id}] Initializing P2P session for revision {self.revision}")
+
+        # 1. Obtain torrent data
+        torrent_data = acquire_torrent_data(
+            self.repo_id, self.revision, self.tracker_client, self.torrent_data
+        )
         if not torrent_data:
             logger.warning(f"[{self.repo_id}] No torrent data available from tracker.")
             self.is_valid = False
             return False
-        
-        # 2. Initialize directly from torrent_data (0 delay, no metadata wait)
-        try:
-            info = lt.torrent_info(lt.bdecode(torrent_data))
-            params = lt.add_torrent_params()
-            params.ti = info
 
+        # 2. Build params and add torrent
+        try:
             self.temp_dir = os.path.expanduser("~/.cache/huggingface/hub/p2p_root")
             os.makedirs(self.temp_dir, exist_ok=True)
-            params.save_path = self.temp_dir
-            
-            # Start paused to set priorities before downloading anything
-            params.flags |= lt.torrent_flags.paused
-            
-            # If it's a dedicated full_seed session, start in seed mode and avoid stale fastresume data
-            if self.session_mode == 'full_seed':
-                params.flags |= lt.torrent_flags.seed_mode
-            else:
-                # Load fastresume data if it exists for downloaders
-                if os.path.exists(self.fastresume_path):
-                    try:
-                        with open(self.fastresume_path, "rb") as f:
-                            resume_data = f.read()
-                        try:
-                            decoded = lt.bdecode(resume_data)
-                            if isinstance(decoded, dict):
-                                params.renamed_files = decoded.get(b'mapped_files', {})
-                        except Exception:
-                            pass
-                        
-                        if hasattr(lt.add_torrent_params, "parse_resume_data"):
-                             params = lt.read_resume_data(resume_data)
-                             params.save_path = self.temp_dir
-                             params.ti = info
-                             params.flags |= lt.torrent_flags.paused
-                    except Exception as e:
-                        logger.warning(f"[{self.repo_id}] Failed to load resume data: {e}")
-                    
+
+            params, info = build_add_torrent_params(
+                torrent_data=torrent_data,
+                save_path=self.temp_dir,
+                session_mode=self.session_mode,
+                fastresume_path=self.fastresume_path,
+                repo_id=self.repo_id,
+            )
             self.handle = self.lt_session.add_torrent(params)
-            
-            test_peer = os.environ.get('TEST_SEEDER_PEER')
-            if test_peer:
-                import socket
-                try:
-                    if test_peer.startswith('['):
-                        bracket_end = test_peer.index(']')
-                        host = test_peer[1:bracket_end]
-                        port = int(test_peer[bracket_end + 2:]) if len(test_peer) > bracket_end + 2 else 6881
-                    elif ':' in test_peer:
-                        host, port_str = test_peer.rsplit(':', 1)
-                        port = int(port_str)
-                    else:
-                        host = test_peer
-                        port = 6881
-                    
-                    ip = socket.gethostbyname(host)
-                    self.test_peer_addr = (ip, port)
-                    logger.info(f"[{self.repo_id}] Test environment detected. Explicitly connecting to peer {host} ({ip}):{port}")
-                    self.handle.connect_peer(self.test_peer_addr, 0)
-                except Exception as e:
-                    logger.warning(f"Failed to resolve test peer {test_peer}: {e}")
-            
+
+            # 3. Connect to test peer if configured
+            peer_addr = resolve_test_peer()
+            if peer_addr:
+                self.test_peer_addr = peer_addr
+                logger.info(f"[{self.repo_id}] Test peer: connecting to {peer_addr[0]}:{peer_addr[1]}")
+                self.handle.connect_peer(self.test_peer_addr, 0)
+
             # torrent_info is immediately available — no metadata wait needed
             self.torrent_info_obj = self.handle.torrent_file()
-            
+
             # Start background monitoring thread
             self.worker_thread = threading.Thread(target=run_monitor_loop, args=(self,), daemon=True)
             self.worker_thread.start()
-            
-            # Initialize all file priorities to 0 (don't download) for on-demand downloading sessions.
-            # Pure full_seed sessions should keep default priority so seed_mode works.
+
+            # Initialize all file priorities to 0 (don't download) for on-demand sessions.
+            # Pure full_seed sessions keep default priority so seed_mode works.
             num_files = self.torrent_info_obj.num_files()
             if self.session_mode == 'on_demand':
                 self.handle.prioritize_files([0] * num_files)
-            
-            # Do not unpause here; let the caller unpause after explicit config (e.g. priorities or seed mode)
+
             logger.info(f"[{self.repo_id}] P2P session initialized. {num_files} files available.")
-            
             return True
         except Exception as e:
             logger.error(f"[{self.repo_id}] Error initializing torrent: {e}")

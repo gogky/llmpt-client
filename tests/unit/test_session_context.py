@@ -22,10 +22,11 @@ def _make_mock_lt():
 
 @pytest.fixture
 def mock_lt():
-    """Patch libtorrent in session_context module."""
+    """Patch libtorrent in session_context and torrent_init modules."""
     m = _make_mock_lt()
     with patch('llmpt.session_context.lt', m), \
-         patch('llmpt.session_context.LIBTORRENT_AVAILABLE', True):
+         patch('llmpt.session_context.LIBTORRENT_AVAILABLE', True), \
+         patch('llmpt.torrent_init.lt', m):
         yield m
 
 
@@ -348,7 +349,7 @@ class TestInitTorrent:
              patch('os.path.exists', return_value=False), \
              patch('os.makedirs'), \
              patch.dict(os.environ, {'TEST_SEEDER_PEER': 'seeder-host:6881'}), \
-             patch('socket.gethostbyname', return_value='10.0.0.5') as mock_dns, \
+             patch('llmpt.torrent_init.socket.gethostbyname', return_value='10.0.0.5') as mock_dns, \
              patch('llmpt.torrent_cache.resolve_torrent_data', return_value=b'fake_torrent_bytes'):
             result = ctx._init_torrent()
 
@@ -365,7 +366,7 @@ class TestInitTorrent:
              patch('os.path.exists', return_value=False), \
              patch('os.makedirs'), \
              patch.dict(os.environ, {'TEST_SEEDER_PEER': 'seeder-host'}), \
-             patch('socket.gethostbyname', return_value='10.0.0.5') as mock_dns, \
+             patch('llmpt.torrent_init.socket.gethostbyname', return_value='10.0.0.5') as mock_dns, \
              patch('llmpt.torrent_cache.resolve_torrent_data', return_value=b'fake_torrent_bytes'):
             result = ctx._init_torrent()
 
@@ -382,7 +383,7 @@ class TestInitTorrent:
              patch('os.path.exists', return_value=False), \
              patch('os.makedirs'), \
              patch.dict(os.environ, {'TEST_SEEDER_PEER': '[::1]:7000'}), \
-             patch('socket.gethostbyname', return_value='::1') as mock_dns, \
+             patch('llmpt.torrent_init.socket.gethostbyname', return_value='::1') as mock_dns, \
              patch('llmpt.torrent_cache.resolve_torrent_data', return_value=b'fake_torrent_bytes'):
             result = ctx._init_torrent()
 
