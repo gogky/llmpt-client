@@ -7,7 +7,7 @@ import requests
 from typing import Optional, Dict, Any
 from urllib.parse import urljoin
 
-logger = logging.getLogger('llmpt.tracker')
+logger = logging.getLogger(__name__)
 
 
 class TrackerClient:
@@ -177,59 +177,3 @@ class TrackerClient:
         except requests.RequestException as e:
             logger.error(f"Failed to register torrent: {e}")
             return False
-
-    # NOTE: This method is currently unused. libtorrent handles announce internally
-    # once a torrent is added to the session. Manual announce is not needed.
-    def announce(
-        self,
-        info_hash: str,
-        peer_id: str,
-        port: int,
-        uploaded: int = 0,
-        downloaded: int = 0,
-        left: int = 0,
-        event: str = 'started',
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Send announce request to tracker (BitTorrent protocol).
-
-        Args:
-            info_hash: Torrent info hash.
-            peer_id: Client peer ID.
-            port: Listening port.
-            uploaded: Bytes uploaded.
-            downloaded: Bytes downloaded.
-            left: Bytes left to download.
-            event: Event type ('started', 'completed', 'stopped').
-
-        Returns:
-            Dictionary containing peer list and interval, or None if failed.
-        """
-        try:
-            url = urljoin(self.tracker_url, '/announce')
-            params = {
-                'info_hash': info_hash,
-                'peer_id': peer_id,
-                'port': port,
-                'uploaded': uploaded,
-                'downloaded': downloaded,
-                'left': left,
-                'event': event,
-                'compact': 1,
-            }
-
-            response = self.session.get(
-                url,
-                params=params,
-                timeout=self.timeout
-            )
-
-            response.raise_for_status()
-
-            # Parse bencoded response (simplified - libtorrent handles this)
-            # For now, just return success
-            return {'interval': 1800}
-
-        except requests.RequestException as e:
-            logger.warning(f"Announce failed: {e}")
-            return None

@@ -53,6 +53,41 @@ __all__ = [
 ]
 
 
+def _disable_xet_storage(config: dict) -> None:
+    """Disable HuggingFace's Xet Storage engine so ALL files go through http_get.
+
+    Without this, huggingface_hub routes LFS files via xet_get() which
+    completely bypasses our http_get monkey patch, making P2P ineffective
+    for large model files.
+
+    NOTE: Setting the env var alone is NOT enough — huggingface_hub
+    evaluates HF_HUB_DISABLE_XET at import time and caches the result
+    as a module constant.  We must also mutate the cached constant.
+    """
+    config['_original_xet_env'] = os.environ.get('HF_HUB_DISABLE_XET')
+    os.environ['HF_HUB_DISABLE_XET'] = '1'
+    try:
+        from huggingface_hub import constants as hf_constants
+        config['_original_xet_const'] = getattr(hf_constants, 'HF_HUB_DISABLE_XET', False)
+        hf_constants.HF_HUB_DISABLE_XET = True
+    except ImportError:
+        pass
+
+
+def _restore_xet_storage(config: dict) -> None:
+    """Restore the original Xet Storage setting."""
+    original_xet = config.get('_original_xet_env')
+    if original_xet is None:
+        os.environ.pop('HF_HUB_DISABLE_XET', None)
+    else:
+        os.environ['HF_HUB_DISABLE_XET'] = original_xet
+    try:
+        from huggingface_hub import constants as hf_constants
+        hf_constants.HF_HUB_DISABLE_XET = config.get('_original_xet_const', False)
+    except ImportError:
+        pass
+
+
 def enable_p2p(
     tracker_url: Optional[str] = None,
     auto_seed: bool = True,
@@ -105,21 +140,7 @@ def enable_p2p(
     elif os.getenv('HF_P2P_PORT'):
         _config['port'] = int(os.getenv('HF_P2P_PORT'))
 
-    # Disable Xet Storage engine so ALL files (including LFS) go through http_get.
-    # Without this, huggingface_hub routes LFS files via xet_get() which completely
-    # bypasses our http_get monkey patch, making P2P ineffective for large model files.
-    #
-    # NOTE: Setting the env var alone is NOT enough — huggingface_hub evaluates
-    # HF_HUB_DISABLE_XET at import time and caches the result as a module constant.
-    # We must also mutate the cached constant directly.
-    _config['_original_xet_env'] = os.environ.get('HF_HUB_DISABLE_XET')
-    os.environ['HF_HUB_DISABLE_XET'] = '1'
-    try:
-        from huggingface_hub import constants as hf_constants
-        _config['_original_xet_const'] = getattr(hf_constants, 'HF_HUB_DISABLE_XET', False)
-        hf_constants.HF_HUB_DISABLE_XET = True
-    except ImportError:
-        pass
+    _disable_xet_storage(_config)
 
     # Apply monkey patch
     from .patch import apply_patch
@@ -152,17 +173,7 @@ def disable_p2p() -> None:
     from .patch import remove_patch
     remove_patch()
 
-    # Restore original HF_HUB_DISABLE_XET value
-    original_xet = _config.get('_original_xet_env')
-    if original_xet is None:
-        os.environ.pop('HF_HUB_DISABLE_XET', None)
-    else:
-        os.environ['HF_HUB_DISABLE_XET'] = original_xet
-    try:
-        from huggingface_hub import constants as hf_constants
-        hf_constants.HF_HUB_DISABLE_XET = _config.get('_original_xet_const', False)
-    except ImportError:
-        pass
+    _restore_xet_storage(_config)
 
     _patched = False
     logger.info("✓ P2P disabled")

@@ -16,9 +16,9 @@ from typing import Dict, Any, Optional
 
 from .monitor import run_monitor_loop
 
-from .utils import lt, LIBTORRENT_AVAILABLE
+from .utils import lt, LIBTORRENT_AVAILABLE, strip_torrent_root
 
-logger = logging.getLogger('llmpt.p2p_batch')
+logger = logging.getLogger(__name__)
 
 
 class SessionContext:
@@ -279,17 +279,15 @@ class SessionContext:
         target_norm = target_filename.replace('\\', '/')
         
         for i in range(files.num_files()):
-            # libtorrent path inside the torrent
-            # e.g., "meta_llama_Llama_2_7b_main/onnx/model.onnx" or "config.json"
-            lt_path = files.file_path(i).replace('\\', '/')
+            lt_path = files.file_path(i)
+            lt_norm = lt_path.replace('\\', '/')
             
             # Case 1: Exact match (fallback for third-party single-file torrents)
-            if lt_path == target_norm:
+            if lt_norm == target_norm:
                 return i
                 
             # Case 2: Multi-file torrent (standard for our client, strips root folder)
-            parts = lt_path.split('/', 1)
-            if len(parts) == 2 and parts[1] == target_norm:
+            if strip_torrent_root(lt_path) == target_norm:
                 return i
                 
         return None
@@ -322,8 +320,7 @@ class SessionContext:
             lt_path = files.file_path(file_index).replace('\\', '/')
             file_size = files.file_size(file_index)
 
-            parts = lt_path.split('/', 1)
-            target_norm = parts[1] if len(parts) == 2 else lt_path
+            target_norm = strip_torrent_root(lt_path)
 
             # Handle libtorrent padding files (.pad/XXXXXX) — zero-filled virtual
             # files that align file boundaries to piece boundaries.
@@ -402,8 +399,7 @@ class SessionContext:
             lt_path = files.file_path(file_index).replace('\\', '/')
             file_size = files.file_size(file_index)
 
-            parts = lt_path.split('/', 1)
-            target_norm = parts[1] if len(parts) == 2 else lt_path
+            target_norm = strip_torrent_root(lt_path)
 
             if target_norm.startswith('.pad/') or '/.pad/' in target_norm:
                 pad_dir = os.path.join(self.temp_dir, ".pad_files")

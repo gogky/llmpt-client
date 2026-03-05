@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import Optional, Any
 
-from .utils import lt, LIBTORRENT_AVAILABLE, get_optimal_piece_length, format_bytes
+from .utils import lt, LIBTORRENT_AVAILABLE, get_optimal_piece_length, format_bytes, strip_torrent_root
 
 logger = logging.getLogger('llmpt.torrent_creator')
 
@@ -26,9 +26,8 @@ def _torrent_data_to_result(torrent_data: bytes, repo_id: str) -> Optional[dict]
         file_list = []
         total_size = 0
         for i in range(files.num_files()):
-            lt_file_path = files.file_path(i).replace('\\', '/')
-            parts = lt_file_path.split('/', 1)
-            relative_path = parts[1] if len(parts) == 2 else lt_file_path
+            lt_file_path = files.file_path(i)
+            relative_path = strip_torrent_root(lt_file_path)
             size = files.file_size(i)
             file_list.append({'path': relative_path, 'size': size})
             total_size += size
@@ -184,10 +183,8 @@ def create_torrent(
         files = info.files()
         file_list = []
         for i in range(files.num_files()):
-            lt_file_path = files.file_path(i).replace('\\', '/')
-            # Strip the root folder (torrent wrapping dir)
-            parts = lt_file_path.split('/', 1)
-            relative_path = parts[1] if len(parts) == 2 else lt_file_path
+            lt_file_path = files.file_path(i)
+            relative_path = strip_torrent_root(lt_file_path)
             file_list.append({
                 'path': relative_path,
                 'size': files.file_size(i),
@@ -197,7 +194,7 @@ def create_torrent(
 
         return {
             'info_hash': info_hash,
-            'file_size': sum(f.stat().st_size for f in file_path.rglob('*') if f.is_file()) if file_path.is_dir() else file_path.stat().st_size,
+            'file_size': total_size,
             'piece_length': piece_length,
             'num_pieces': info.num_pieces(),
             'num_files': info.num_files(),

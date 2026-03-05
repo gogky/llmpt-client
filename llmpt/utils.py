@@ -120,6 +120,21 @@ def format_bytes(bytes_value: int) -> str:
     return f"{bytes_value:.1f} PB"
 
 
+def strip_torrent_root(lt_file_path: str) -> str:
+    """Strip the root wrapping directory from a libtorrent file path.
+
+    libtorrent multi-file torrents nest files under a root folder, e.g.
+    ``"repo_main/config.json"``.  This helper normalises backslashes and
+    strips the root component, returning ``"config.json"``.
+
+    For single-file torrents with no ``/`` separator the path is returned
+    as-is after backslash normalisation.
+    """
+    normalized = lt_file_path.replace('\\', '/')
+    parts = normalized.split('/', 1)
+    return parts[1] if len(parts) == 2 else normalized
+
+
 def get_optimal_piece_length(total_size: int) -> int:
     """
     Calculate optimal piece length for a torrent based on total content size.

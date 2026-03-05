@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 from .utils import lt
 
-logger = logging.getLogger('llmpt.p2p_batch')
+logger = logging.getLogger(__name__)
 
 # Human-readable names for libtorrent torrent states
 _STATE_NAMES = [

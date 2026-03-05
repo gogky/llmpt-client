@@ -7,7 +7,7 @@ import hashlib
 import tempfile
 import pytest
 
-from llmpt.utils import calculate_file_hash, format_bytes, get_optimal_piece_length
+from llmpt.utils import calculate_file_hash, format_bytes, get_optimal_piece_length, strip_torrent_root
 
 
 # ─── calculate_file_hash ─────────────────────────────────────────────────────
@@ -119,3 +119,24 @@ class TestGetOptimalPieceLength:
         """≥1TB → 64MB (e.g. massive MoE models)."""
         assert get_optimal_piece_length(1024 * 1024 ** 3) == 64 * 1024 * 1024
         assert get_optimal_piece_length(2048 * 1024 ** 3) == 64 * 1024 * 1024
+
+
+# ─── strip_torrent_root ──────────────────────────────────────────────────────
+
+class TestStripTorrentRoot:
+
+    def test_multi_file_strips_root(self):
+        """Standard multi-file torrent: root_folder/filename → strips root."""
+        assert strip_torrent_root("repo_main/config.json") == "config.json"
+        assert strip_torrent_root("repo_main/subdir/model.bin") == "subdir/model.bin"
+
+    def test_single_file_passthrough(self):
+        """Single-file torrent with no slash → returns as-is."""
+        assert strip_torrent_root("model.bin") == "model.bin"
+
+    def test_backslash_normalization(self):
+        """Windows-style backslashes should be normalised to forward slashes."""
+        assert strip_torrent_root("root\\subdir\\model.bin") == "subdir/model.bin"
+
+    def test_empty_string(self):
+        assert strip_torrent_root("") == ""
