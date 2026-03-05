@@ -37,59 +37,70 @@ def run_monitor_loop(ctx: "SessionContext") -> None:
     last_diag_time = 0  # Force first diagnostic log immediately
     last_peer_retry_time = 0  # Track last connect_peer retry
 
-    while True:
-        time.sleep(1)
+    try:
+        while True:
+            time.sleep(1)
 
-        # Snapshot shared state under lock to avoid TOCTOU races with
-        # stop_seeding() / shutdown() which set handle=None / is_valid=False.
-        with ctx.lock:
-            if not ctx.is_valid or not ctx.handle:
-                break
+            # Snapshot shared state under lock to avoid TOCTOU races with
+            # stop_seeding() / shutdown() which set handle=None / is_valid=False.
+            with ctx.lock:
+                if not ctx.is_valid or not ctx.handle:
+                    break
 
-        now = time.time()
+            try:
+                now = time.time()
 
-        # --- Periodic diagnostic logging (every 5 s) ---
-        if now - last_diag_time > 5:
-            last_diag_time = now
-            _log_diagnostics(ctx)
+                # --- Periodic diagnostic logging (every 5 s) ---
+                if now - last_diag_time > 5:
+                    last_diag_time = now
+                    _log_diagnostics(ctx)
 
-        # --- Periodic peer reconnection for test environments (every 10 s) ---
-        if now - last_peer_retry_time > 10:
-            last_peer_retry_time = now
-            _retry_test_peer_connection(ctx)
+                # --- Periodic peer reconnection for test environments (every 10 s) ---
+                if now - last_peer_retry_time > 10:
+                    last_peer_retry_time = now
+                    _retry_test_peer_connection(ctx)
 
-        # --- Periodic fastresume save (every 5 s) ---
-        if now - last_save_time > 5:
-            _save_resume_data(ctx)
-            last_save_time = now
+                # --- Periodic fastresume save (every 5 s) ---
+                if now - last_save_time > 5:
+                    _save_resume_data(ctx)
+                    last_save_time = now
 
-        # --- Check seed_duration timeout (outside lock) ---
-        if ctx.seed_start_time is not None and ctx.seed_duration > 0:
-            elapsed = now - ctx.seed_start_time
-            if elapsed >= ctx.seed_duration:
-                logger.info(
-                    f"[{ctx.repo_id}] Seed duration {ctx.seed_duration}s elapsed. "
-                    f"Stopping auto-seed."
-                )
-                ctx._cleanup_download_sources()
-                ctx.is_valid = False
-                break
+                # --- Check seed_duration timeout ---
+                if ctx.seed_start_time is not None and ctx.seed_duration > 0:
+                    elapsed = now - ctx.seed_start_time
+                    if elapsed >= ctx.seed_duration:
+                        logger.info(
+                            f"[{ctx.repo_id}] Seed duration {ctx.seed_duration}s elapsed. "
+                            f"Stopping auto-seed."
+                        )
+                        ctx._cleanup_download_sources()
+                        ctx.is_valid = False
+                        break
 
-        try:
-            # --- Dispatch alerts from the global lt_session to per-session inboxes ---
-            from .p2p_batch import P2PBatchManager
-            P2PBatchManager().dispatch_alerts()
+                # --- Dispatch alerts from the global lt_session to per-session inboxes ---
+                from .p2p_batch import P2PBatchManager
+                P2PBatchManager().dispatch_alerts()
 
-            # --- Process this session's alerts from its inbox ---
-            _process_alerts(ctx)
+                # --- Process this session's alerts from its inbox ---
+                _process_alerts(ctx)
 
-            # --- Check pending file completions ---
-            should_break = _check_pending_files(ctx)
-            if should_break:
-                break
+                # --- Check pending file completions ---
+                should_break = _check_pending_files(ctx)
+                if should_break:
+                    break
 
-        except Exception as e:
-            logger.error(f"[{ctx.repo_id}] Monitor loop exception: {e}")
+            except Exception as e:
+                logger.error(f"[{ctx.repo_id}] Monitor loop exception: {e}")
+
+    except Exception as e:
+        logger.error(f"[{ctx.repo_id}] Monitor thread crashed: {e}")
+
+    finally:
+        # Ensure is_valid is False so that download_file() callers waiting on
+        # events can detect that the monitor is no longer running and fail fast
+        # instead of blocking until timeout.
+        ctx.is_valid = False
+        logger.info(f"[{ctx.repo_id}] Monitor thread exited.")
 
 
 def _log_diagnostics(ctx: "SessionContext") -> None:

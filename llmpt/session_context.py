@@ -244,11 +244,21 @@ class SessionContext:
             if self.handle:
                 self.handle.resume()
         
-        # Block until the background thread signals completion
+        # Block until the background thread signals completion, but also check
+        # if the monitor thread has exited (is_valid becomes False) so we can
+        # fail fast instead of waiting the full timeout.
         logger.debug(f"[{self.repo_id}] Blocking waiting for P2P download of {filename}...")
-        success = event.wait(timeout=self.timeout)
+        deadline = time.time() + self.timeout
+        while not event.is_set():
+            if not self.is_valid:
+                logger.warning(f"[{self.repo_id}] P2P download of {filename} ABORTED (monitor stopped).")
+                return False
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            event.wait(timeout=min(1.0, remaining))
         
-        if success:
+        if event.is_set():
             logger.info(f"[{self.repo_id}] P2P download of {filename} SUCCESS.")
             return True
         else:
