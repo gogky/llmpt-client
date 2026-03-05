@@ -42,10 +42,13 @@ def run_monitor_loop(ctx: "SessionContext") -> None:
             time.sleep(1)
 
             # Snapshot shared state under lock to avoid TOCTOU races with
-            # stop_seeding() / shutdown() which set handle=None / is_valid=False.
+            # stop_seeding() / shutdown() which set handle=None / is_valid=False,
+            # and download_file() which resets seed_start_time=None.
             with ctx.lock:
                 if not ctx.is_valid or not ctx.handle:
                     break
+                seed_start = ctx.seed_start_time
+                seed_dur = ctx.seed_duration
 
             try:
                 now = time.time()
@@ -65,12 +68,12 @@ def run_monitor_loop(ctx: "SessionContext") -> None:
                     _save_resume_data(ctx)
                     last_save_time = now
 
-                # --- Check seed_duration timeout ---
-                if ctx.seed_start_time is not None and ctx.seed_duration > 0:
-                    elapsed = now - ctx.seed_start_time
-                    if elapsed >= ctx.seed_duration:
+                # --- Check seed_duration timeout (using snapshot taken under lock) ---
+                if seed_start is not None and seed_dur > 0:
+                    elapsed = now - seed_start
+                    if elapsed >= seed_dur:
                         logger.info(
-                            f"[{ctx.repo_id}] Seed duration {ctx.seed_duration}s elapsed. "
+                            f"[{ctx.repo_id}] Seed duration {seed_dur}s elapsed. "
                             f"Stopping auto-seed."
                         )
                         ctx._cleanup_download_sources()
