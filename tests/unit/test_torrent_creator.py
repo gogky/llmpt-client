@@ -19,7 +19,9 @@ class TestCreateTorrent:
     def test_no_libtorrent_returns_none(self):
         """Should return None when libtorrent is not installed."""
         from llmpt.torrent_creator import create_torrent
-        result = create_torrent("test/repo", "main", "http://tracker.example.com")
+        tracker = MagicMock()
+        tracker.tracker_url = "http://tracker.example.com"
+        result = create_torrent("test/repo", "main", tracker)
         assert result is None
 
     @patch('llmpt.torrent_creator.lt')
@@ -35,7 +37,9 @@ class TestCreateTorrent:
             import llmpt.torrent_creator as tc
             # Override the import inside the function
             with patch.object(tc, '__name__', 'llmpt.torrent_creator'):
-                result = create_torrent("nonexistent/repo", "main", "http://tracker.example.com")
+                tracker = MagicMock()
+                tracker.tracker_url = "http://tracker.example.com"
+                result = create_torrent("nonexistent/repo", "main", tracker)
 
         assert result is None
 
@@ -78,10 +82,12 @@ class TestCreateTorrent:
         mock_lt.bencode.return_value = b'bencoded_torrent'
 
         with patch('huggingface_hub.snapshot_download', return_value=str(snap_dir)), \
-             patch('llmpt.torrent_cache.load_cached_torrent', return_value=None), \
+             patch('llmpt.torrent_cache.resolve_torrent_data', return_value=None), \
              patch('llmpt.torrent_cache.save_torrent_to_cache'):
+            tracker = MagicMock()
+            tracker.tracker_url = "http://tracker.example.com"
             result = create_torrent(
-                "test/repo", "main", "http://tracker.example.com",
+                "test/repo", "main", tracker,
             )
 
         assert result is not None
@@ -100,7 +106,7 @@ class TestCreateTorrent:
             {'path': 'model.bin', 'size': 1000},
         ]
 
-        # Verify tracker URL was formatted correctly
+        # Verify tracker URL was formatted correctly (tracker object .tracker_url property)
         mock_torrent_obj.add_tracker.assert_called_once_with("http://tracker.example.com/announce")
         mock_torrent_obj.set_creator.assert_called_once_with("llmpt-client")
 
@@ -113,9 +119,11 @@ class TestCreateTorrent:
         non_existent = str(tmp_path / "does_not_exist")
 
         with patch('huggingface_hub.snapshot_download', return_value=non_existent), \
-             patch('llmpt.torrent_cache.load_cached_torrent', return_value=None), \
+             patch('llmpt.torrent_cache.resolve_torrent_data', return_value=None), \
              patch('llmpt.torrent_cache.save_torrent_to_cache'):
-            result = create_torrent("test/repo", "main", "http://tracker.example.com")
+            tracker = MagicMock()
+            tracker.tracker_url = "http://tracker.example.com"
+            result = create_torrent("test/repo", "main", tracker)
 
         assert result is None
 

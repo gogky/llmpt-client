@@ -54,7 +54,7 @@ def _torrent_data_to_result(torrent_data: bytes, repo_id: str) -> Optional[dict]
 def create_torrent(
     repo_id: str,
     revision: str,
-    tracker_url: str,
+    tracker_client: Any,
 ) -> Optional[dict]:
     """
     Create a torrent file for an entire HuggingFace repository snapshot.
@@ -68,7 +68,7 @@ def create_torrent(
     Args:
         repo_id: HuggingFace repository ID (e.g., meta-llama/Llama-2-7b).
         revision: Git commit hash or branch name.
-        tracker_url: Tracker announce URL.
+        tracker_client: TrackerClient instance to check for existing torrents and get tracker URL.
 
     Returns:
         Dictionary containing torrent info (info_hash, torrent_data, files, etc.)
@@ -80,22 +80,22 @@ def create_torrent(
 
     try:
         from huggingface_hub import snapshot_download
-        from .torrent_cache import load_cached_torrent, save_torrent_to_cache
+        from .torrent_cache import resolve_torrent_data, save_torrent_to_cache
 
-        # ── Layer 1: check local .torrent cache ───────────────────────────
-        # If we already generated a torrent for this repo@revision, reuse it.
-        # This skips the expensive set_piece_hashes() call which can take
+        # ── Layer 1 & 2: check local .torrent cache AND tracker ───────────
+        # If we or another seeder already generated a torrent for this repo@revision,
+        # reuse it. This skips the expensive set_piece_hashes() call which can take
         # 30+ minutes for large models on HDD.
-        cached = load_cached_torrent(repo_id, revision)
-        if cached:
-            logger.info(f"Using cached torrent for {repo_id}@{revision}")
-            result = _torrent_data_to_result(cached, repo_id)
+        cached_or_downloaded = resolve_torrent_data(repo_id, revision, tracker_client)
+        if cached_or_downloaded:
+            logger.info(f"Using existing torrent for {repo_id}@{revision} (from cache or tracker)")
+            result = _torrent_data_to_result(cached_or_downloaded, repo_id)
             if result is not None:
                 return result
-            # Corrupt cache entry — fall through to regenerate
-            logger.warning(f"Cached torrent for {repo_id}@{revision} is invalid, regenerating")
+            # Corrupt cache/downloaded entry — fall through to regenerate
+            logger.warning(f"Existing torrent for {repo_id}@{revision} is invalid, regenerating")
 
-        # ── No cache hit — generate from scratch ──────────────────────────
+        # ── Layer 3: No cache/tracker hit — generate from scratch ─────────
         #
         # Resolve the snapshot path from the LOCAL HF cache only.
         # This function must never trigger a network download — the caller is
@@ -157,7 +157,7 @@ def create_torrent(
 
 
         # Add tracker
-        announce_url = f"{tracker_url.rstrip('/')}/announce"
+        announce_url = f"{tracker_client.tracker_url.rstrip('/')}/announce"
         t.add_tracker(announce_url)
 
         # Set creator and comment
@@ -228,11 +228,11 @@ def create_and_register_torrent(
     Returns:
         The torrent info dictionary if successful, None otherwise.
     """
-    # Create torrent natively from the Hugging Face cache
+    # Create torrent natively from the Hugging Face cache (or reuse existing)
     torrent_info = create_torrent(
         repo_id=repo_id,
         revision=revision,
-        tracker_url=tracker_client.tracker_url,
+        tracker_client=tracker_client,
     )
 
     if not torrent_info:
