@@ -224,11 +224,14 @@ class P2PBatchManager:
             for repo_key, ctx in list(self.sessions.items()):
                 ctx._cleanup_seeding_hardlinks()
                 ctx._cleanup_download_sources()
-                if ctx.handle:
+                with ctx.lock:
+                    handle = ctx.handle
+                    ctx.handle = None
+                    ctx.is_valid = False
+                if handle:
                     try:
-                        self.lt_session.remove_torrent(ctx.handle)
+                        self.lt_session.remove_torrent(handle)
                     except Exception:
                         pass
-                ctx.is_valid = False
             self.sessions.clear()
         logger.info("P2PBatchManager shutdown complete.")

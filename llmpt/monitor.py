@@ -37,8 +37,14 @@ def run_monitor_loop(ctx: "SessionContext") -> None:
     last_diag_time = 0  # Force first diagnostic log immediately
     last_peer_retry_time = 0  # Track last connect_peer retry
 
-    while ctx.is_valid and ctx.handle:
+    while True:
         time.sleep(1)
+
+        # Snapshot shared state under lock to avoid TOCTOU races with
+        # stop_seeding() / shutdown() which set handle=None / is_valid=False.
+        with ctx.lock:
+            if not ctx.is_valid or not ctx.handle:
+                break
 
         now = time.time()
 
@@ -88,13 +94,16 @@ def run_monitor_loop(ctx: "SessionContext") -> None:
 
 def _log_diagnostics(ctx: "SessionContext") -> None:
     """Emit periodic status diagnostics for the torrent session."""
+    with ctx.lock:
+        handle = ctx.handle
+        ti = ctx.torrent_info_obj
+    if not handle:
+        return
     try:
-        if ctx.handle and ctx.handle.is_valid():
-            s = ctx.handle.status()
+        if handle.is_valid():
+            s = handle.status()
             state_str = _STATE_NAMES[s.state] if s.state < len(_STATE_NAMES) else str(s.state)
-            total_pieces = (
-                ctx.torrent_info_obj.num_pieces() if ctx.torrent_info_obj else s.num_pieces
-            )
+            total_pieces = ti.num_pieces() if ti else s.num_pieces
             logger.info(
                 f"[{ctx.repo_id}] STATUS: state={state_str} "
                 f"progress={s.progress * 100:.1f}% "
@@ -116,11 +125,16 @@ def _retry_test_peer_connection(ctx: "SessionContext") -> None:
     if not ctx.test_peer_addr:
         return
 
+    with ctx.lock:
+        handle = ctx.handle
+    if not handle:
+        return
+
     try:
-        if ctx.handle and ctx.handle.is_valid():
-            s = ctx.handle.status()
+        if handle.is_valid():
+            s = handle.status()
             if s.num_peers == 0:
-                ctx.handle.connect_peer(ctx.test_peer_addr, 0)
+                handle.connect_peer(ctx.test_peer_addr, 0)
                 logger.info(
                     f"[{ctx.repo_id}] Retrying connect_peer to "
                     f"{ctx.test_peer_addr[0]}:{ctx.test_peer_addr[1]} (peers=0)"
@@ -131,8 +145,15 @@ def _retry_test_peer_connection(ctx: "SessionContext") -> None:
 
 def _save_resume_data(ctx: "SessionContext") -> None:
     """Request a fastresume data save from libtorrent."""
-    if ctx.handle and ctx.handle.is_valid():
-        ctx.handle.save_resume_data(lt.save_resume_flags_t.flush_disk_cache)
+    with ctx.lock:
+        handle = ctx.handle
+    if not handle:
+        return
+    try:
+        if handle.is_valid():
+            handle.save_resume_data(lt.save_resume_flags_t.flush_disk_cache)
+    except Exception as e:
+        logger.debug(f"[{ctx.repo_id}] save_resume_data error: {e}")
 
 
 def _process_alerts(ctx: "SessionContext") -> None:
