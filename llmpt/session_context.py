@@ -11,6 +11,7 @@ import shutil
 import threading
 import time
 import logging
+from collections import deque
 from typing import Dict, Any, Optional
 
 from .monitor import run_monitor_loop
@@ -49,6 +50,11 @@ class SessionContext:
         # Maps filename -> threading.Event (to notify completion)
         self.file_events: Dict[str, threading.Event] = {}
         self.file_destinations: Dict[str, str] = {}
+        
+        # Thread-safe alert inbox: populated by P2PBatchManager.dispatch_alerts(),
+        # consumed by the monitor thread via _process_alerts().
+        self.alert_lock = threading.Lock()
+        self.pending_alerts: deque = deque()
         
         # Track source files kept for auto-seeding (cleaned up when seeding stops)
         self.download_source_files = []

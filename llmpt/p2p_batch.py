@@ -95,6 +95,43 @@ class P2PBatchManager:
             else:
                 self.lt_session = None
 
+    def dispatch_alerts(self) -> None:
+        """Pop alerts from the global lt_session and route each to the correct SessionContext.
+
+        Each libtorrent session has a single alert queue shared by all torrent
+        handles.  Previously, individual monitor threads called pop_alerts()
+        independently, causing alerts belonging to *other* handles to be
+        silently discarded (the "alert race" bug).
+
+        This method should be called by each monitor thread before processing
+        its own alerts.  It is safe to call concurrently — the _lock ensures
+        only one thread pops at a time, and alerts are deposited into each
+        SessionContext's thread-safe ``pending_alerts`` inbox.
+        """
+        if not self.lt_session:
+            return
+
+        with self._lock:
+            alerts = self.lt_session.pop_alerts()
+            if not alerts:
+                return
+
+            # Build a handle → SessionContext lookup (only active sessions)
+            handle_to_ctx = {}
+            for ctx in self.sessions.values():
+                if ctx.handle is not None:
+                    handle_to_ctx[ctx.handle] = ctx
+
+            for alert in alerts:
+                target_handle = getattr(alert, 'handle', None)
+                target_ctx = handle_to_ctx.get(target_handle)
+                if target_ctx is not None:
+                    with target_ctx.alert_lock:
+                        target_ctx.pending_alerts.append(alert)
+                # Alerts without a matching handle (e.g. session-level alerts
+                # like listen_succeeded_alert) are intentionally dropped here;
+                # they are informational and not required for correctness.
+
     def register_seeding_task(self, repo_id: str, revision: str, tracker_client: Any, torrent_data: Optional[bytes] = None) -> bool:
         """
         Register a repository to be tracked for background seeding.

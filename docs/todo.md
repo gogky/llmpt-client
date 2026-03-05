@@ -199,7 +199,7 @@ graph TD
   - 捕获 SIGTERM/SIGINT 信号做同样的清理（atexit 在某些信号场景下不会触发）
   - 保存最终 fastresume 数据（当前 monitor 线程周期性保存，但退出时可能遗漏最新状态）
 
-### 2.10 - create_and_register_torrent 返回值类型不一致
+### ~~2.10 - create_and_register_torrent 返回值类型不一致~~
 - **现状**：类型标注为 `-> bool`，但实际返回 torrent_info (dict) 或 None。`run_seeder.py` 依赖它返回 dict（`torrent_info['torrent_data']`）。
 - **方案**：修正类型标注为 `-> Optional[dict]`，或统一返回值语义
 

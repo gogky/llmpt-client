@@ -70,7 +70,11 @@ def run_monitor_loop(ctx: "SessionContext") -> None:
                 break
 
         try:
-            # --- Process libtorrent alerts ---
+            # --- Dispatch alerts from the global lt_session to per-session inboxes ---
+            from .p2p_batch import P2PBatchManager
+            P2PBatchManager().dispatch_alerts()
+
+            # --- Process this session's alerts from its inbox ---
             _process_alerts(ctx)
 
             # --- Check pending file completions ---
@@ -132,10 +136,13 @@ def _save_resume_data(ctx: "SessionContext") -> None:
 
 
 def _process_alerts(ctx: "SessionContext") -> None:
-    """Pop and handle libtorrent alerts (fastresume save results)."""
-    alerts = ctx.lt_session.pop_alerts()
+    """Process alerts from this session's inbox (populated by dispatch_alerts)."""
+    with ctx.alert_lock:
+        alerts = list(ctx.pending_alerts)
+        ctx.pending_alerts.clear()
+
     for alert in alerts:
-        if isinstance(alert, lt.save_resume_data_alert) and alert.handle == ctx.handle:
+        if isinstance(alert, lt.save_resume_data_alert):
             try:
                 resume_data = lt.bencode(alert.params)
                 with open(ctx.fastresume_path, "wb") as f:
@@ -144,7 +151,7 @@ def _process_alerts(ctx: "SessionContext") -> None:
             except Exception as e:
                 logger.warning(f"[{ctx.repo_id}] Failed to write resume data: {e}")
 
-        elif isinstance(alert, lt.save_resume_data_failed_alert) and alert.handle == ctx.handle:
+        elif isinstance(alert, lt.save_resume_data_failed_alert):
             logger.debug(f"[{ctx.repo_id}] Save resume data failed: {alert.message()}")
 
 

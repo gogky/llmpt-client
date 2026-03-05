@@ -6,6 +6,7 @@ so no real I/O or network activity occurs.
 """
 
 import threading
+from collections import deque
 import pytest
 from unittest.mock import patch, MagicMock, mock_open
 
@@ -35,6 +36,8 @@ def _make_ctx(**overrides):
     ctx.repo_id = "test/repo"
     ctx.is_valid = True
     ctx.lock = threading.Lock()
+    ctx.alert_lock = threading.Lock()
+    ctx.pending_alerts = deque()
     ctx.file_events = {}
     ctx.file_destinations = {}
     ctx.torrent_info_obj = None
@@ -177,7 +180,8 @@ class TestProcessAlerts:
         mock_lt.save_resume_data_failed_alert = type('Other', (), {})
         mock_lt.bencode.return_value = b'encoded_data'
 
-        ctx.lt_session.pop_alerts.return_value = [alert]
+        # Populate the inbox (as dispatch_alerts would do)
+        ctx.pending_alerts.append(alert)
 
         with patch('builtins.open', mock_open()) as m:
             _process_alerts(ctx)
@@ -187,7 +191,7 @@ class TestProcessAlerts:
     @patch('llmpt.monitor.lt')
     def test_no_alerts(self, mock_lt):
         ctx = _make_ctx()
-        ctx.lt_session.pop_alerts.return_value = []
+        # Empty inbox
         _process_alerts(ctx)  # No crash
 
 
