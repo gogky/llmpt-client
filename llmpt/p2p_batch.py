@@ -218,8 +218,10 @@ class P2PBatchManager:
 
         Called by atexit handler or directly by user code.  Cleans up
         seeding hardlinks, download source files, removes all torrent
-        handles, and clears session state.
+        handles, and clears session state.  Waits for all monitor threads
+        to exit before returning.
         """
+        threads_to_join = []
         with self._lock:
             for repo_key, ctx in list(self.sessions.items()):
                 ctx._cleanup_seeding_hardlinks()
@@ -233,5 +235,13 @@ class P2PBatchManager:
                         self.lt_session.remove_torrent(handle)
                     except Exception:
                         pass
+                if ctx.worker_thread is not None:
+                    threads_to_join.append(ctx.worker_thread)
             self.sessions.clear()
+
+        # Wait for monitor threads outside the lock to avoid deadlock
+        # (monitor threads may try to acquire manager._lock via dispatch_alerts).
+        for t in threads_to_join:
+            t.join(timeout=3)
+
         logger.info("P2PBatchManager shutdown complete.")

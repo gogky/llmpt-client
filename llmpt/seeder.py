@@ -60,7 +60,8 @@ def stop_seeding(repo_id: str, revision: str) -> bool:
     """
     manager = P2PBatchManager()
     repo_key = (repo_id, revision)
-    
+    worker = None
+
     with manager._lock:
         if repo_key not in manager.sessions:
             logger.warning(f"Not seeding: {repo_id}@{revision}")
@@ -74,10 +75,14 @@ def stop_seeding(repo_id: str, revision: str) -> bool:
             session_info.is_valid = False
         if handle:
             manager.lt_session.remove_torrent(handle)
-            
+        worker = session_info.worker_thread
+
         del manager.sessions[repo_key]
 
-    logger.info(f"Stopping seeding for: {repo_id}@{revision}")
+    if worker is not None:
+        worker.join(timeout=3)
+
+    logger.info(f"Stopped seeding for: {repo_id}@{revision}")
     return True
 
 
@@ -87,6 +92,7 @@ def stop_all_seeding() -> int:
     """
     manager = P2PBatchManager()
     count = 0
+    threads_to_join = []
     with manager._lock:
         for repo_key, session_info in list(manager.sessions.items()):
             session_info._cleanup_seeding_hardlinks()
@@ -96,8 +102,13 @@ def stop_all_seeding() -> int:
                 session_info.is_valid = False
             if handle:
                 manager.lt_session.remove_torrent(handle)
+            if session_info.worker_thread is not None:
+                threads_to_join.append(session_info.worker_thread)
             del manager.sessions[repo_key]
             count += 1
+
+    for t in threads_to_join:
+        t.join(timeout=3)
 
     logger.info(f"Stopped all seeding ({count} tasks)")
     return count
