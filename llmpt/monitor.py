@@ -188,83 +188,151 @@ def _process_alerts(ctx: "SessionContext") -> None:
 
 
 def _check_pending_files(ctx: "SessionContext") -> bool:
-    """Check for completed files and deliver them. Returns True if the loop should break."""
+    """Check for completed files and deliver them. Returns True if the loop should break.
+
+    Three-phase pipeline to minimize lock contention:
+      Phase 1 (lock): health check, metadata resolution, snapshot ready files
+      Phase 2 (no lock): file delivery I/O
+      Phase 3 (lock): event notification, seed timer update
+    """
+    # ── Phase 1: read-only snapshot under lock ─────────────────────────
     with ctx.lock:
-        if not ctx.handle:
-            return True
+        health = _check_session_health(ctx)
+        if health is not None:
+            return health
+
+        _resolve_pending_metadata(ctx)
 
         status = ctx.handle.status()
-
-        # Check for torrent-level errors
-        if _has_torrent_error(status):
-            err_msg = _get_error_message(status)
-            logger.error(f"[{ctx.repo_id}] Torrent error: {err_msg}")
-            ctx.is_valid = False
-            return True
-
-        # Identify files still waiting for completion
-        pending_files = [f for f, e in ctx.file_events.items() if not e.is_set()]
-        if not pending_files:
-            # Start seed timer when all registered downloads are delivered
-            if ctx.file_events and ctx.auto_seed and ctx.seed_start_time is None:
-                ctx.seed_start_time = time.time()
-                if ctx.seed_duration > 0:
-                    logger.info(
-                        f"[{ctx.repo_id}] All files delivered. "
-                        f"Auto-seeding for {ctx.seed_duration}s."
-                    )
-                else:
-                    logger.info(
-                        f"[{ctx.repo_id}] All files delivered. "
-                        f"Auto-seeding indefinitely."
-                    )
+        if status.state in (1, 7):  # checking_files / checking_resume_data
             return False
 
-        # If metadata finally arrived, belatedly map requested files
-        if not ctx.torrent_info_obj and ctx.handle.status().has_metadata:
-            ctx.torrent_info_obj = ctx.handle.torrent_file()
-            num_files = ctx.torrent_info_obj.num_files()
-            ctx.handle.prioritize_files([0] * num_files)
-            logger.info(f"[{ctx.repo_id}] Background metadata resolved! {num_files} files.")
+        ready_files = _collect_ready_files(ctx)
 
-        if not ctx.torrent_info_obj:
-            return False  # Still downloading metadata
+    # ── Phase 2: file delivery I/O (no lock) ──────────────────────────
+    delivered = []
+    for src, dst, filename in ready_files:
+        try:
+            ctx._deliver_file(src, dst)
+            logger.info(f"[{ctx.repo_id}] File {filename} complete. Delivered {src} -> {dst}")
+            delivered.append(filename)
+        except Exception as deliver_err:
+            logger.error(f"[{ctx.repo_id}] Failed to deliver {filename}: {deliver_err}")
+            # Don't add to delivered — let it timeout and fallback to HTTP
 
-        # Skip progress checking while a recheck is in progress
-        # (state 1=checking_files, 7=checking_resume_data)
-        if status.state in (1, 7):
-            return False
+    # ── Phase 3: notify waiters and update state (lock) ───────────────
+    if delivered:
+        with ctx.lock:
+            for filename in delivered:
+                if filename in ctx.file_events:
+                    ctx.file_events[filename].set()
 
-        file_progress = ctx.handle.file_progress()
-        files = ctx.torrent_info_obj.files()
+            handle = ctx.handle
+        if handle:
+            try:
+                handle.save_resume_data(lt.save_resume_flags_t.flush_disk_cache)
+            except Exception:
+                pass
 
-        for filename in list(pending_files):
-            file_index = ctx._find_file_index(filename)
-            if file_index is not None:
-                destination = ctx.file_destinations[filename]
-
-                # Belatedly set priority for files queued before metadata arrived
-                if ctx.handle.file_priorities()[file_index] == 0:
-                    ctx.handle.file_priority(file_index, 1)
-                    logger.info(f"[{ctx.repo_id}] Belatedly prioritized {filename} (Index {file_index})")
-
-                file_size = files.file_size(file_index)
-                progress_bytes = file_progress[file_index]
-
-                if progress_bytes == file_size and file_size > 0:
-                    # File is fully downloaded — deliver it to the HF destination
-                    src = ctx._get_lt_disk_path(file_index)
-                    try:
-                        ctx._deliver_file(src, destination)
-                        logger.info(f"[{ctx.repo_id}] File {filename} complete. Delivered {src} -> {destination}")
-                        ctx.file_events[filename].set()
-                    except Exception as deliver_err:
-                        logger.error(f"[{ctx.repo_id}] Failed to deliver {filename}: {deliver_err}")
-                        # Don't set event — let it timeout and fallback to HTTP
-
-                    ctx.handle.save_resume_data(lt.save_resume_flags_t.flush_disk_cache)
+    # Check if all files are now delivered → start seed timer
+    with ctx.lock:
+        _update_seed_timer(ctx)
 
     return False
+
+
+def _check_session_health(ctx: "SessionContext"):
+    """Check handle and torrent-level errors. Must be called under ctx.lock.
+
+    Returns:
+        True  - loop should break (error or no handle)
+        False - no pending files, nothing to do
+        None  - continue to next phase
+    """
+    if not ctx.handle:
+        return True
+
+    status = ctx.handle.status()
+    if _has_torrent_error(status):
+        err_msg = _get_error_message(status)
+        logger.error(f"[{ctx.repo_id}] Torrent error: {err_msg}")
+        ctx.is_valid = False
+        return True
+
+    pending_files = [f for f, e in ctx.file_events.items() if not e.is_set()]
+    if not pending_files:
+        _update_seed_timer(ctx)
+        return False
+
+    return None
+
+
+def _resolve_pending_metadata(ctx: "SessionContext") -> None:
+    """If metadata just arrived, initialize torrent_info and file priorities.
+    Must be called under ctx.lock.
+    """
+    if not ctx.torrent_info_obj and ctx.handle.status().has_metadata:
+        ctx.torrent_info_obj = ctx.handle.torrent_file()
+        num_files = ctx.torrent_info_obj.num_files()
+        ctx.handle.prioritize_files([0] * num_files)
+        logger.info(f"[{ctx.repo_id}] Background metadata resolved! {num_files} files.")
+
+
+def _collect_ready_files(ctx: "SessionContext") -> list:
+    """Scan pending files and return those that are fully downloaded.
+    Must be called under ctx.lock.
+
+    Returns:
+        List of (src_path, dst_path, filename) tuples ready for delivery.
+    """
+    if not ctx.torrent_info_obj:
+        return []
+
+    file_progress = ctx.handle.file_progress()
+    files = ctx.torrent_info_obj.files()
+    ready = []
+
+    pending_files = [f for f, e in ctx.file_events.items() if not e.is_set()]
+    for filename in pending_files:
+        file_index = ctx._find_file_index(filename)
+        if file_index is None:
+            continue
+
+        # Belatedly set priority for files queued before metadata arrived
+        if ctx.handle.file_priorities()[file_index] == 0:
+            ctx.handle.file_priority(file_index, 1)
+            logger.info(f"[{ctx.repo_id}] Belatedly prioritized {filename} (Index {file_index})")
+
+        file_size = files.file_size(file_index)
+        progress_bytes = file_progress[file_index]
+
+        if progress_bytes == file_size and file_size > 0:
+            src = ctx._get_lt_disk_path(file_index)
+            destination = ctx.file_destinations[filename]
+            ready.append((src, destination, filename))
+
+    return ready
+
+
+def _update_seed_timer(ctx: "SessionContext") -> None:
+    """Start the seed timer if all registered downloads are delivered.
+    Must be called under ctx.lock.
+    """
+    pending = [f for f, e in ctx.file_events.items() if not e.is_set()]
+    if pending:
+        return
+    if ctx.file_events and ctx.auto_seed and ctx.seed_start_time is None:
+        ctx.seed_start_time = time.time()
+        if ctx.seed_duration > 0:
+            logger.info(
+                f"[{ctx.repo_id}] All files delivered. "
+                f"Auto-seeding for {ctx.seed_duration}s."
+            )
+        else:
+            logger.info(
+                f"[{ctx.repo_id}] All files delivered. "
+                f"Auto-seeding indefinitely."
+            )
 
 
 def _has_torrent_error(status) -> bool:

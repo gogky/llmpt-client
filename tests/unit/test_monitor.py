@@ -15,6 +15,10 @@ from llmpt.monitor import (
     _save_resume_data,
     _process_alerts,
     _check_pending_files,
+    _check_session_health,
+    _resolve_pending_metadata,
+    _collect_ready_files,
+    _update_seed_timer,
     _has_torrent_error,
     _get_error_message,
 )
@@ -349,3 +353,232 @@ class TestCheckPendingFiles:
         # torrent_info_obj should now be set
         assert ctx.torrent_info_obj is mock_ti
         ctx.handle.prioritize_files.assert_called_once_with([0, 0])
+
+
+# ─── _check_session_health ───────────────────────────────────────────────────
+
+class TestCheckSessionHealth:
+
+    def test_no_handle_returns_true(self):
+        ctx = _make_ctx()
+        ctx.handle = None
+        assert _check_session_health(ctx) is True
+
+    def test_torrent_error_returns_true(self):
+        ctx = _make_ctx()
+        status = ctx.handle.status.return_value
+        status.errc.value.return_value = 42
+        status.errc.message.return_value = "disk error"
+
+        result = _check_session_health(ctx)
+        assert result is True
+        assert ctx.is_valid is False
+
+    def test_no_pending_files_returns_false(self):
+        ctx = _make_ctx()
+        status = MagicMock(spec=['state'])
+        status.state = 3
+        ctx.handle.status.return_value = status
+        ctx.file_events = {}
+
+        assert _check_session_health(ctx) is False
+
+    def test_has_pending_files_returns_none(self):
+        ctx = _make_ctx()
+        status = MagicMock(spec=['state'])
+        status.state = 3
+        ctx.handle.status.return_value = status
+
+        event = threading.Event()
+        ctx.file_events = {"model.bin": event}
+
+        assert _check_session_health(ctx) is None
+
+
+# ─── _resolve_pending_metadata ───────────────────────────────────────────────
+
+class TestResolvePendingMetadata:
+
+    def test_resolves_when_metadata_arrives(self):
+        ctx = _make_ctx()
+        ctx.torrent_info_obj = None
+
+        status = MagicMock()
+        status.has_metadata = True
+        ctx.handle.status.return_value = status
+
+        mock_ti = MagicMock()
+        mock_ti.num_files.return_value = 3
+        ctx.handle.torrent_file.return_value = mock_ti
+
+        _resolve_pending_metadata(ctx)
+
+        assert ctx.torrent_info_obj is mock_ti
+        ctx.handle.prioritize_files.assert_called_once_with([0, 0, 0])
+
+    def test_skips_when_already_resolved(self):
+        ctx = _make_ctx()
+        existing_ti = MagicMock()
+        ctx.torrent_info_obj = existing_ti
+
+        _resolve_pending_metadata(ctx)
+
+        # Should not call torrent_file() again
+        ctx.handle.torrent_file.assert_not_called()
+        assert ctx.torrent_info_obj is existing_ti
+
+
+# ─── _collect_ready_files ────────────────────────────────────────────────────
+
+class TestCollectReadyFiles:
+
+    def test_returns_empty_without_torrent_info(self):
+        ctx = _make_ctx()
+        ctx.torrent_info_obj = None
+        assert _collect_ready_files(ctx) == []
+
+    def test_collects_completed_files(self):
+        ctx = _make_ctx()
+
+        event = threading.Event()
+        ctx.file_events = {"model.bin": event}
+        ctx.file_destinations = {"model.bin": "/dest/model.bin"}
+
+        mock_files = MagicMock()
+        mock_files.file_size.return_value = 1000
+
+        mock_ti = MagicMock()
+        mock_ti.files.return_value = mock_files
+        ctx.torrent_info_obj = mock_ti
+
+        ctx._find_file_index.return_value = 0
+        ctx.handle.file_progress.return_value = [1000]
+        ctx.handle.file_priorities.return_value = [1]
+        ctx._get_lt_disk_path.return_value = "/tmp/p2p/model.bin"
+
+        result = _collect_ready_files(ctx)
+
+        assert len(result) == 1
+        assert result[0] == ("/tmp/p2p/model.bin", "/dest/model.bin", "model.bin")
+
+    def test_skips_incomplete_files(self):
+        ctx = _make_ctx()
+
+        event = threading.Event()
+        ctx.file_events = {"model.bin": event}
+        ctx.file_destinations = {"model.bin": "/dest/model.bin"}
+
+        mock_files = MagicMock()
+        mock_files.file_size.return_value = 1000
+
+        mock_ti = MagicMock()
+        mock_ti.files.return_value = mock_files
+        ctx.torrent_info_obj = mock_ti
+
+        ctx._find_file_index.return_value = 0
+        ctx.handle.file_progress.return_value = [500]  # 50%
+        ctx.handle.file_priorities.return_value = [1]
+
+        result = _collect_ready_files(ctx)
+        assert result == []
+
+
+# ─── _update_seed_timer ──────────────────────────────────────────────────────
+
+class TestUpdateSeedTimer:
+
+    def test_starts_timer_when_all_delivered(self):
+        ctx = _make_ctx()
+        event = threading.Event()
+        event.set()  # delivered
+        ctx.file_events = {"model.bin": event}
+        ctx.auto_seed = True
+        ctx.seed_start_time = None
+        ctx.seed_duration = 3600
+
+        _update_seed_timer(ctx)
+
+        assert ctx.seed_start_time is not None
+
+    def test_does_not_start_if_pending(self):
+        ctx = _make_ctx()
+        event = threading.Event()  # not set → still pending
+        ctx.file_events = {"model.bin": event}
+        ctx.auto_seed = True
+        ctx.seed_start_time = None
+
+        _update_seed_timer(ctx)
+
+        assert ctx.seed_start_time is None
+
+    def test_does_not_start_if_auto_seed_disabled(self):
+        ctx = _make_ctx()
+        event = threading.Event()
+        event.set()
+        ctx.file_events = {"model.bin": event}
+        ctx.auto_seed = False
+        ctx.seed_start_time = None
+
+        _update_seed_timer(ctx)
+
+        assert ctx.seed_start_time is None
+
+
+# ─── Integration: deliver outside lock ───────────────────────────────────────
+
+class TestDeliverOutsideLock:
+
+    @patch('llmpt.monitor.lt')
+    def test_deliver_file_runs_without_holding_lock(self, mock_lt):
+        """Critical test: _deliver_file must NOT be called while ctx.lock is held.
+        This prevents large file copies from blocking download_file() callers."""
+        ctx = _make_ctx()
+
+        event = threading.Event()
+        ctx.file_events = {"model.bin": event}
+        ctx.file_destinations = {"model.bin": "/dest/model.bin"}
+        ctx.auto_seed = False
+        ctx.seed_start_time = None
+        ctx.seed_duration = 0
+
+        # No error
+        status = MagicMock(spec=['state'])
+        status.state = 3
+        ctx.handle.status.return_value = status
+
+        mock_files = MagicMock()
+        mock_files.file_size.return_value = 1000
+        mock_ti = MagicMock()
+        mock_ti.files.return_value = mock_files
+        ctx.torrent_info_obj = mock_ti
+
+        ctx._find_file_index.return_value = 0
+        ctx.handle.file_progress.return_value = [1000]
+        ctx.handle.file_priorities.return_value = [1]
+        ctx._get_lt_disk_path.return_value = "/tmp/p2p/model.bin"
+
+        # Track whether the lock is held when _deliver_file is called
+        lock_was_held_during_deliver = []
+
+        original_deliver = ctx._deliver_file
+        def tracking_deliver(src, dst):
+            # Try to acquire the lock without blocking.
+            # If the lock is already held by our thread, acquire() would
+            # return True (reentrant for the same thread on non-reentrant Lock).
+            # We use a separate flag instead.
+            acquired = ctx.lock.acquire(blocking=False)
+            if acquired:
+                ctx.lock.release()
+                lock_was_held_during_deliver.append(False)
+            else:
+                lock_was_held_during_deliver.append(True)
+
+        ctx._deliver_file.side_effect = tracking_deliver
+
+        _check_pending_files(ctx)
+
+        assert len(lock_was_held_during_deliver) == 1, \
+            "_deliver_file should have been called exactly once"
+        assert lock_was_held_during_deliver[0] is False, \
+            "_deliver_file was called while ctx.lock was held! This blocks download_file() callers."
+        assert event.is_set()
