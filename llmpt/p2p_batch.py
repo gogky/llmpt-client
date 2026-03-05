@@ -8,7 +8,10 @@ dynamic file prioritization.
 
 import threading
 import logging
-from typing import Dict, Any, Optional
+from typing import TYPE_CHECKING, Dict, Any, Optional
+
+if TYPE_CHECKING:
+    from .tracker_client import TrackerClient
 
 from .utils import lt, LIBTORRENT_AVAILABLE
 
@@ -16,7 +19,7 @@ from .utils import lt, LIBTORRENT_AVAILABLE
 # All existing imports like ``from llmpt.p2p_batch import SessionContext`` continue to work.
 from .session_context import SessionContext  # noqa: F401
 
-logger = logging.getLogger('llmpt.p2p_batch')
+logger = logging.getLogger(__name__)
 
 # Default port range for libtorrent listen interface.
 _DEFAULT_PORT = 6881
@@ -132,7 +135,7 @@ class P2PBatchManager:
                 # like listen_succeeded_alert) are intentionally dropped here;
                 # they are informational and not required for correctness.
 
-    def register_seeding_task(self, repo_id: str, revision: str, tracker_client: Any, torrent_data: Optional[bytes] = None) -> bool:
+    def register_seeding_task(self, repo_id: str, revision: str, tracker_client: 'TrackerClient', torrent_data: Optional[bytes] = None) -> bool:
         """
         Register a repository to be tracked for background seeding.
         This behaves like a download but without any specific HTTP interception blocks.
@@ -172,7 +175,7 @@ class P2PBatchManager:
         revision: str,
         filename: str,
         temp_file_path: str,
-        tracker_client: Any,
+        tracker_client: 'TrackerClient',
         timeout: int = 300
     ) -> bool:
         """
@@ -213,6 +216,109 @@ class P2PBatchManager:
         # Register the file with the session context and wait for it
         return session_ctx.download_file(filename, temp_file_path)
 
+    # ── Session lifecycle management ──────────────────────────────────────
+
+    def _teardown_session(self, ctx: 'SessionContext', cleanup_downloads: bool = False) -> Optional[Any]:
+        """Teardown a single session (called while self._lock is held).
+
+        Cleans up hardlinks, optionally cleans download sources, invalidates
+        the handle, removes the torrent from libtorrent, and returns the
+        worker thread (if any) for the caller to join *outside* the lock.
+
+        Args:
+            ctx: The SessionContext to tear down.
+            cleanup_downloads: If True, also clean up download source files
+                               (used by shutdown, not by stop_seeding which
+                               only tears down seeding sessions).
+
+        Returns:
+            The worker thread to join, or None.
+        """
+        ctx._cleanup_seeding_hardlinks()
+        if cleanup_downloads:
+            ctx._cleanup_download_sources()
+        with ctx.lock:
+            handle = ctx.handle
+            ctx.handle = None
+            ctx.is_valid = False
+        if handle:
+            try:
+                self.lt_session.remove_torrent(handle)
+            except Exception:
+                pass
+        return ctx.worker_thread
+
+    def remove_session(self, repo_id: str, revision: str) -> bool:
+        """Remove a single session (stop seeding a specific repo).
+
+        Args:
+            repo_id: HuggingFace repository ID.
+            revision: Revision string.
+
+        Returns:
+            True if the session was found and removed, False otherwise.
+        """
+        repo_key = (repo_id, revision)
+        worker = None
+
+        with self._lock:
+            if repo_key not in self.sessions:
+                return False
+            ctx = self.sessions.pop(repo_key)
+            worker = self._teardown_session(ctx)
+
+        if worker is not None:
+            worker.join(timeout=3)
+        return True
+
+    def remove_all_sessions(self, cleanup_downloads: bool = False) -> int:
+        """Remove all sessions.
+
+        Args:
+            cleanup_downloads: If True, also clean up download source files.
+
+        Returns:
+            Number of sessions removed.
+        """
+        threads_to_join = []
+        with self._lock:
+            count = len(self.sessions)
+            for ctx in self.sessions.values():
+                worker = self._teardown_session(ctx, cleanup_downloads=cleanup_downloads)
+                if worker is not None:
+                    threads_to_join.append(worker)
+            self.sessions.clear()
+
+        # Wait for monitor threads outside the lock to avoid deadlock
+        # (monitor threads may try to acquire manager._lock via dispatch_alerts).
+        for t in threads_to_join:
+            t.join(timeout=3)
+
+        return count
+
+    def get_all_session_status(self) -> Dict[str, Dict[str, Any]]:
+        """Get status of all active sessions with valid handles.
+
+        Returns:
+            Dictionary keyed by ``"repo_id@revision"`` with status info.
+        """
+        status = {}
+        with self._lock:
+            for (repo_id, revision), ctx in self.sessions.items():
+                if not ctx.handle or not ctx.handle.is_valid():
+                    continue
+                s = ctx.handle.status()
+                status[f"{repo_id}@{revision}"] = {
+                    'repo_id': repo_id,
+                    'revision': revision,
+                    'uploaded': s.total_upload,
+                    'peers': s.num_peers,
+                    'upload_rate': s.upload_rate,
+                    'progress': s.progress,
+                    'state': str(s.state),
+                }
+        return status
+
     def shutdown(self) -> None:
         """Gracefully shut down all sessions and release resources.
 
@@ -221,27 +327,6 @@ class P2PBatchManager:
         handles, and clears session state.  Waits for all monitor threads
         to exit before returning.
         """
-        threads_to_join = []
-        with self._lock:
-            for repo_key, ctx in list(self.sessions.items()):
-                ctx._cleanup_seeding_hardlinks()
-                ctx._cleanup_download_sources()
-                with ctx.lock:
-                    handle = ctx.handle
-                    ctx.handle = None
-                    ctx.is_valid = False
-                if handle:
-                    try:
-                        self.lt_session.remove_torrent(handle)
-                    except Exception:
-                        pass
-                if ctx.worker_thread is not None:
-                    threads_to_join.append(ctx.worker_thread)
-            self.sessions.clear()
+        count = self.remove_all_sessions(cleanup_downloads=True)
+        logger.info(f"P2PBatchManager shutdown complete ({count} sessions removed).")
 
-        # Wait for monitor threads outside the lock to avoid deadlock
-        # (monitor threads may try to acquire manager._lock via dispatch_alerts).
-        for t in threads_to_join:
-            t.join(timeout=3)
-
-        logger.info("P2PBatchManager shutdown complete.")

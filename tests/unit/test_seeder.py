@@ -1,7 +1,10 @@
 """
 Tests for the seeder module (llmpt.seeder).
 
-All P2PBatchManager interactions are mocked.
+Now that seeder.py is a thin façade over P2PBatchManager's public API,
+these tests verify that each function correctly delegates to the
+corresponding manager method.
+
 Singleton reset is handled by conftest autouse fixture.
 """
 
@@ -60,36 +63,27 @@ class TestStopSeeding:
     def test_not_seeding(self, MockManager):
         """Stopping a non-existent seeding task should return False."""
         from llmpt.seeder import stop_seeding
-        import threading
 
         mock_instance = MagicMock()
-        mock_instance._lock = threading.Lock()
-        mock_instance.sessions = {}
+        mock_instance.remove_session.return_value = False
         MockManager.return_value = mock_instance
 
         result = stop_seeding("no/repo", "main")
         assert result is False
+        mock_instance.remove_session.assert_called_once_with("no/repo", "main")
 
     @patch('llmpt.seeder.P2PBatchManager')
     def test_stop_existing(self, MockManager):
-        """Stopping an existing task should remove it and return True."""
+        """Stopping an existing task should delegate to manager and return True."""
         from llmpt.seeder import stop_seeding
-        import threading
-
-        mock_handle = MagicMock()
-        mock_session_info = MagicMock()
-        mock_session_info.handle = mock_handle
 
         mock_instance = MagicMock()
-        mock_instance._lock = threading.Lock()
-        mock_instance.sessions = {("test/repo", "main"): mock_session_info}
+        mock_instance.remove_session.return_value = True
         MockManager.return_value = mock_instance
 
         result = stop_seeding("test/repo", "main")
-
         assert result is True
-        mock_instance.lt_session.remove_torrent.assert_called_once_with(mock_handle)
-        assert ("test/repo", "main") not in mock_instance.sessions
+        mock_instance.remove_session.assert_called_once_with("test/repo", "main")
 
 
 # ─── stop_all_seeding ─────────────────────────────────────────────────────────
@@ -99,42 +93,25 @@ class TestStopAllSeeding:
     @patch('llmpt.seeder.P2PBatchManager')
     def test_empty(self, MockManager):
         from llmpt.seeder import stop_all_seeding
-        import threading
 
         mock_instance = MagicMock()
-        mock_instance._lock = threading.Lock()
-        mock_instance.sessions = {}
+        mock_instance.remove_all_sessions.return_value = 0
         MockManager.return_value = mock_instance
 
         count = stop_all_seeding()
         assert count == 0
+        mock_instance.remove_all_sessions.assert_called_once()
 
     @patch('llmpt.seeder.P2PBatchManager')
     def test_multiple_tasks(self, MockManager):
         from llmpt.seeder import stop_all_seeding
-        import threading
-
-        s1 = MagicMock()
-        s1.handle = MagicMock()
-        s2 = MagicMock()
-        s2.handle = MagicMock()
-        s3 = MagicMock()
-        s3.handle = None  # No handle
 
         mock_instance = MagicMock()
-        mock_instance._lock = threading.Lock()
-        mock_instance.sessions = {
-            ("a", "main"): s1,
-            ("b", "main"): s2,
-            ("c", "dev"): s3,
-        }
+        mock_instance.remove_all_sessions.return_value = 3
         MockManager.return_value = mock_instance
 
         count = stop_all_seeding()
-
         assert count == 3
-        assert mock_instance.lt_session.remove_torrent.call_count == 2  # Only s1, s2 had handles
-        assert len(mock_instance.sessions) == 0
 
 
 # ─── get_seeding_status ───────────────────────────────────────────────────────
@@ -144,11 +121,9 @@ class TestGetSeedingStatus:
     @patch('llmpt.seeder.P2PBatchManager')
     def test_no_sessions(self, MockManager):
         from llmpt.seeder import get_seeding_status
-        import threading
 
         mock_instance = MagicMock()
-        mock_instance._lock = threading.Lock()
-        mock_instance.sessions = {}
+        mock_instance.get_all_session_status.return_value = {}
         MockManager.return_value = mock_instance
 
         status = get_seeding_status()
@@ -157,25 +132,19 @@ class TestGetSeedingStatus:
     @patch('llmpt.seeder.P2PBatchManager')
     def test_active_sessions(self, MockManager):
         from llmpt.seeder import get_seeding_status
-        import threading
-
-        mock_status = MagicMock()
-        mock_status.total_upload = 1024
-        mock_status.num_peers = 3
-        mock_status.upload_rate = 512
-        mock_status.progress = 1.0
-        mock_status.state = 5
-
-        mock_handle = MagicMock()
-        mock_handle.is_valid.return_value = True
-        mock_handle.status.return_value = mock_status
-
-        session_info = MagicMock()
-        session_info.handle = mock_handle
 
         mock_instance = MagicMock()
-        mock_instance._lock = threading.Lock()
-        mock_instance.sessions = {("test/repo", "main"): session_info}
+        mock_instance.get_all_session_status.return_value = {
+            "test/repo@main": {
+                'repo_id': "test/repo",
+                'revision': "main",
+                'uploaded': 1024,
+                'peers': 3,
+                'upload_rate': 512,
+                'progress': 1.0,
+                'state': '5',
+            }
+        }
         MockManager.return_value = mock_instance
 
         status = get_seeding_status()
@@ -189,21 +158,13 @@ class TestGetSeedingStatus:
         assert info['progress'] == 1.0
 
     @patch('llmpt.seeder.P2PBatchManager')
-    def test_invalid_handle_skipped(self, MockManager):
-        """Sessions with invalid handles should be excluded from status."""
+    def test_delegates_to_manager(self, MockManager):
+        """get_seeding_status should call get_all_session_status exactly once."""
         from llmpt.seeder import get_seeding_status
-        import threading
-
-        mock_handle = MagicMock()
-        mock_handle.is_valid.return_value = False
-
-        session_info = MagicMock()
-        session_info.handle = mock_handle
 
         mock_instance = MagicMock()
-        mock_instance._lock = threading.Lock()
-        mock_instance.sessions = {("test/repo", "main"): session_info}
+        mock_instance.get_all_session_status.return_value = {}
         MockManager.return_value = mock_instance
 
-        status = get_seeding_status()
-        assert status == {}
+        get_seeding_status()
+        mock_instance.get_all_session_status.assert_called_once()

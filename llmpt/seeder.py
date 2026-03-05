@@ -1,22 +1,27 @@
 """
 Seeding manager for background seeding tasks.
-We now unify all seeding directly into the P2PBatchManager.
+
+This is a thin façade around P2PBatchManager's public session lifecycle
+methods.  All state management and cleanup is handled internally by the
+manager — this module simply provides convenient module-level functions.
 """
 
 import logging
-from typing import Dict, Any, Optional
+from typing import TYPE_CHECKING, Dict, Any, Optional
 
-from .utils import lt, LIBTORRENT_AVAILABLE
+if TYPE_CHECKING:
+    from .tracker_client import TrackerClient
 
-from llmpt.p2p_batch import P2PBatchManager
+from .utils import LIBTORRENT_AVAILABLE
+from .p2p_batch import P2PBatchManager
 
-logger = logging.getLogger('llmpt.seeder')
+logger = logging.getLogger(__name__)
 
 
 def start_seeding(
     repo_id: str,
     revision: str,
-    tracker_client: Any,
+    tracker_client: 'TrackerClient',
     torrent_data: Optional[bytes] = None,
 ) -> bool:
     """
@@ -55,85 +60,26 @@ def start_seeding(
 
 
 def stop_seeding(repo_id: str, revision: str) -> bool:
-    """
-    Stop seeding a specific repository.
-    """
+    """Stop seeding a specific repository."""
     manager = P2PBatchManager()
-    repo_key = (repo_id, revision)
-    worker = None
+    removed = manager.remove_session(repo_id, revision)
 
-    with manager._lock:
-        if repo_key not in manager.sessions:
-            logger.warning(f"Not seeding: {repo_id}@{revision}")
-            return False
-            
-        session_info = manager.sessions[repo_key]
-        session_info._cleanup_seeding_hardlinks()
-        with session_info.lock:
-            handle = session_info.handle
-            session_info.handle = None
-            session_info.is_valid = False
-        if handle:
-            manager.lt_session.remove_torrent(handle)
-        worker = session_info.worker_thread
-
-        del manager.sessions[repo_key]
-
-    if worker is not None:
-        worker.join(timeout=3)
-
-    logger.info(f"Stopped seeding for: {repo_id}@{revision}")
-    return True
+    if removed:
+        logger.info(f"Stopped seeding for: {repo_id}@{revision}")
+    else:
+        logger.warning(f"Not seeding: {repo_id}@{revision}")
+    return removed
 
 
 def stop_all_seeding() -> int:
-    """
-    Stop all active seeding tasks.
-    """
+    """Stop all active seeding tasks."""
     manager = P2PBatchManager()
-    count = 0
-    threads_to_join = []
-    with manager._lock:
-        for repo_key, session_info in list(manager.sessions.items()):
-            session_info._cleanup_seeding_hardlinks()
-            with session_info.lock:
-                handle = session_info.handle
-                session_info.handle = None
-                session_info.is_valid = False
-            if handle:
-                manager.lt_session.remove_torrent(handle)
-            if session_info.worker_thread is not None:
-                threads_to_join.append(session_info.worker_thread)
-            del manager.sessions[repo_key]
-            count += 1
-
-    for t in threads_to_join:
-        t.join(timeout=3)
-
+    count = manager.remove_all_sessions()
     logger.info(f"Stopped all seeding ({count} tasks)")
     return count
 
 
 def get_seeding_status() -> Dict[str, Dict[str, Any]]:
-    """
-    Get status of all active seeding tasks.
-    """
+    """Get status of all active seeding tasks."""
     manager = P2PBatchManager()
-    status = {}
-    with manager._lock:
-        for repo_key, session_info in manager.sessions.items():
-            if not session_info.handle or not session_info.handle.is_valid():
-                continue
-            
-            s = session_info.handle.status()
-            repo_id, revision = repo_key
-            status[f"{repo_id}@{revision}"] = {
-                'repo_id': repo_id,
-                'revision': revision,
-                'uploaded': s.total_upload,
-                'peers': s.num_peers,
-                'upload_rate': s.upload_rate,
-                'progress': s.progress,
-                'state': str(s.state)
-            }
-    return status
+    return manager.get_all_session_status()

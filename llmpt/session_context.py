@@ -12,7 +12,10 @@ import threading
 import time
 import logging
 from collections import deque
-from typing import Dict, Any, Optional
+from typing import TYPE_CHECKING, Dict, Optional
+
+if TYPE_CHECKING:
+    from .tracker_client import TrackerClient
 
 from .monitor import run_monitor_loop
 
@@ -25,7 +28,19 @@ class SessionContext:
     """
     Manages a single libtorrent torrent_handle for a specific repo/revision.
     """
-    def __init__(self, repo_id: str, revision: str, tracker_client: Any, lt_session: Any, session_mode: str, timeout: int, torrent_data: Optional[bytes] = None, *, auto_seed: bool = True, seed_duration: int = 3600):
+    def __init__(
+        self,
+        repo_id: str,
+        revision: str,
+        tracker_client: 'TrackerClient',
+        lt_session: Optional[object],
+        session_mode: str,
+        timeout: int,
+        torrent_data: Optional[bytes] = None,
+        *,
+        auto_seed: bool = True,
+        seed_duration: int = 3600,
+    ) -> None:
         if session_mode not in ('on_demand', 'full_seed'):
             raise ValueError("session_mode must be 'on_demand' or 'full_seed'")
         self.session_mode = session_mode
