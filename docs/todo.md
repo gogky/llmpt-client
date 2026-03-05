@@ -10,7 +10,7 @@ graph TD
     A --> C["P2: 服务端存储 .torrent"]
     C --> D["P2: 服务端自动做种"]
     E["P2: WebSeed - HF HTTP 作为虚拟 seed"]
-    F["✅ P1: 端口动态分配"] --> G["P2: monitor 守护进程解耦"]
+    F["✅ P1: 端口动态分配"] --> G["✅ P2: monitor 守护进程解耦"]
     G --> H["P3: 进度条"]
     I["✅ P1: timeout/metadata 等待可配置"] --> J["P2: seeder.py 重构"]
     K["✅ P1: E2E 测试覆盖真实路径"] --> J
@@ -162,14 +162,17 @@ graph TD
   3. 或者直接取消 `seeder.py`，将其功能合并到 `P2PBatchManager`
 - **依赖**：测试重构 (1.4) 作为安全网
 
-### 2.6 · monitor 守护进程与 session 解耦
-- **现状**：每个 `SessionContext` 启动一个独立的 monitor 线程（`session_context.py`）。如果同时下载 N 个仓库就有 N 个 monitor 线程。
-- **问题**：线程数量不可控，且所有 monitor 都独立调用 `lt_session.pop_alerts()`，可能导致 alert 被错误消费（一个 session 的 monitor 拿到了另一个 session 的 alert，处理后丢弃，导致目标 session 永远收不到该 alert）
-- **方案**：
-  1. 单个全局 monitor 线程，由 `P2PBatchManager` 管理
-  2. Monitor 遍历所有活跃 session，统一 pop alert 后分发到对应 session
-  3. 支持 session 动态注册/注销
-- **依赖**：端口动态分配 (1.2)
+### ~~2.6 · monitor 守护进程与 session 解耦~~ ✅（核心问题已修复）
+- **已完成**：
+  - **P0 — 全局 Alert 竞态**：`P2PBatchManager.dispatch_alerts()` 集中弹出 alert 并按 handle 路由到各 `SessionContext.pending_alerts` 收件箱，`_process_alerts()` 从收件箱消费。彻底消除跨 session alert 丢失。
+  - **P1 — 无锁 handle 访问**：monitor 所有函数（`_log_diagnostics`、`_save_resume_data`、`_retry_test_peer_connection`、主循环条件）均在 `ctx.lock` 下快照 handle 引用；`stop_seeding()` / `shutdown()` 也在 `ctx.lock` 下置 `handle=None`，消除 TOCTOU 竞态。
+  - **P1 — Monitor 退出无通知**：`run_monitor_loop` 添加 `finally: ctx.is_valid = False`，`download_file()` 改为轮询式等待（每秒检查 `is_valid`），monitor 死亡时 ≤1s 内感知并 fallback HTTP。
+  - **P2 — shutdown 不等待线程退出**：`shutdown()` / `stop_seeding()` / `stop_all_seeding()` 均在锁外 `join(timeout=3)` worker 线程，防止 atexit 期间 GC 竞态。
+  - **P2 — `_check_pending_files` 职责过多**：拆分为 `_check_session_health` / `_resolve_pending_metadata` / `_collect_ready_files` / `_update_seed_timer` 四个子函数，`_deliver_file()` I/O 移到锁外执行。
+  - **P2 — `seed_start_time` 无锁读**：`seed_start_time` / `seed_duration` 的读取合并到 `ctx.lock` 快照块中。
+- **未完成（可选优化）**：
+  - 当前仍为每个 SessionContext 一个 monitor 线程。可考虑合并为单个全局 monitor 线程（由 `P2PBatchManager` 管理），减少线程数。但当前架构在线程安全性上已无问题，此优化为**性能向**而非**正确性向**，优先级降低。
+- **新增测试**：`test_alert_race.py`（5 个）、`test_monitor.py` 新增 13 个子函数测试（含 `_deliver_file` 锁外执行验证）
 
 ### 2.7 · ~~fastresume 兼容旧版 libtorrent~~ --跳过此需求
 - **现状**：`session_context.py` L111 有版本判断 `hasattr(lt.add_torrent_params, "parse_resume_data")`，但实现不完整——旧版 API 分支没有实际加载 resume data 的代码。

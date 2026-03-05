@@ -1,71 +1,16 @@
 """
 Tests for P2PBatchManager.
+
+Uses shared fixtures from conftest.py:
+- ``mock_lt_all_modules``: patches libtorrent across all llmpt modules
+- ``reset_batch_manager_singleton`` (autouse): isolates the singleton
 """
 
-import os
-import sys
-import threading
 import pytest
 from unittest.mock import patch, MagicMock
 
 
-def _make_mock_lt():
-    """Create a comprehensive mock for libtorrent."""
-    mock_lt = MagicMock()
-    mock_lt.session = MagicMock()
-    mock_lt.session_settings = MagicMock()
-    mock_lt.add_torrent_params = MagicMock()
-    mock_lt.torrent_info = MagicMock()
-    mock_lt.create_torrent = MagicMock()
-    mock_lt.set_piece_hashes = MagicMock()
-
-    # Mock some enums and constants
-    mock_lt.torrent_status.checking_files = 1
-    mock_lt.torrent_status.downloading_metadata = 2
-    mock_lt.torrent_status.downloading = 3
-    mock_lt.torrent_status.finished = 4
-    mock_lt.torrent_status.seeding = 5
-    mock_lt.torrent_status.allocating = 6
-    mock_lt.torrent_status.checking_resume_data = 7
-
-    # Add flag
-    mock_lt.torrent_flags.paused = 0
-
-    mock_lt.alert.category_t.error_notification = 1
-    mock_lt.torrent_error_alert = MagicMock()
-
-    return mock_lt
-
-
-@pytest.fixture
-def mock_libtorrent():
-    """Patch libtorrent in all modules that use it.
-    
-    session_context.py and p2p_batch.py import `lt` from `.utils` at module
-    load time, so `sys.modules` injection alone won't work.  We must patch
-    the module-level `lt` variable in every module that references it.
-    """
-    mock_lt = _make_mock_lt()
-
-    with patch('llmpt.utils.lt', mock_lt), \
-         patch('llmpt.utils.LIBTORRENT_AVAILABLE', True), \
-         patch('llmpt.p2p_batch.lt', mock_lt), \
-         patch('llmpt.p2p_batch.LIBTORRENT_AVAILABLE', True), \
-         patch('llmpt.session_context.lt', mock_lt), \
-         patch('llmpt.session_context.LIBTORRENT_AVAILABLE', True):
-        yield mock_lt
-
-
-@pytest.fixture(autouse=True)
-def reset_batch_manager_singleton():
-    """Reset P2PBatchManager singleton between tests."""
-    from llmpt.p2p_batch import P2PBatchManager
-    P2PBatchManager._instance = None
-    yield
-    P2PBatchManager._instance = None
-
-
-def test_batch_manager_init(mock_libtorrent):
+def test_batch_manager_init(mock_lt_all_modules):
     """Test initialization of P2PBatchManager."""
     from llmpt.p2p_batch import P2PBatchManager
 
@@ -77,7 +22,7 @@ def test_batch_manager_init(mock_libtorrent):
     assert getattr(manager1, 'sessions') is not None
 
 
-def test_register_request_no_torrent(mock_libtorrent):
+def test_register_request_no_torrent(mock_lt_all_modules):
     """Test registering a request when tracker has no torrent."""
     from llmpt.p2p_batch import P2PBatchManager
     tracker = MagicMock()
@@ -97,7 +42,7 @@ def test_register_request_no_torrent(mock_libtorrent):
     assert success is False
 
 
-def test_register_request_success(mock_libtorrent):
+def test_register_request_success(mock_lt_all_modules):
     """Test successfully registering a request and creating a session context."""
     from llmpt.p2p_batch import P2PBatchManager
     from llmpt.p2p_batch import SessionContext
@@ -123,7 +68,7 @@ def test_register_request_success(mock_libtorrent):
         assert ("demo", "main") in manager.sessions
 
 
-def test_session_context_init_torrent(mock_libtorrent):
+def test_session_context_init_torrent(mock_lt_all_modules):
     """Test internal initialization of libtorrent session inside SessionContext.
 
     The _init_torrent() flow:
@@ -167,7 +112,7 @@ def test_session_context_init_torrent(mock_libtorrent):
     assert ctx.handle is mock_handle
     assert ctx.torrent_info_obj is mock_torrent_info
     # Verify we used bdecode + torrent_info path, not parse_magnet_uri
-    mock_libtorrent.bdecode.assert_called_once_with(b'fake_torrent_bytes')
-    mock_libtorrent.torrent_info.assert_called_once()
-    mock_libtorrent.parse_magnet_uri.assert_not_called()
+    mock_lt_all_modules.bdecode.assert_called_once_with(b'fake_torrent_bytes')
+    mock_lt_all_modules.torrent_info.assert_called_once()
+    mock_lt_all_modules.parse_magnet_uri.assert_not_called()
 

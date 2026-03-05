@@ -3,6 +3,8 @@ Tests for _resolve_listen_interfaces in p2p_batch module.
 
 Covers: explicit port, default port availability, fallback scanning, and
 full-range-occupied OS-assigned fallback.
+
+Uses ``mock_lt_all_modules`` from conftest (autouse via wrapper).
 """
 
 import socket
@@ -11,17 +13,9 @@ from unittest.mock import patch, MagicMock
 
 
 @pytest.fixture(autouse=True)
-def patch_lt():
-    """Patch libtorrent so importing p2p_batch doesn't fail."""
-    mock_lt = MagicMock()
-    mock_lt.torrent_flags.paused = 0
-    with patch('llmpt.utils.lt', mock_lt), \
-         patch('llmpt.utils.LIBTORRENT_AVAILABLE', True), \
-         patch('llmpt.p2p_batch.lt', mock_lt), \
-         patch('llmpt.p2p_batch.LIBTORRENT_AVAILABLE', True), \
-         patch('llmpt.session_context.lt', mock_lt), \
-         patch('llmpt.session_context.LIBTORRENT_AVAILABLE', True):
-        yield mock_lt
+def patch_lt(mock_lt_all_modules):
+    """Auto-use the shared multi-module libtorrent mock."""
+    yield mock_lt_all_modules
 
 
 class TestResolveListenInterfaces:

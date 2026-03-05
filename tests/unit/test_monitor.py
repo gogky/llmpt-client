@@ -22,32 +22,7 @@ from llmpt.monitor import (
     _has_torrent_error,
     _get_error_message,
 )
-
-
-def _make_mock_lt():
-    """Shared mock for libtorrent."""
-    mock_lt = MagicMock()
-    mock_lt.save_resume_flags_t.flush_disk_cache = 0
-    mock_lt.save_resume_data_alert = type('save_resume_data_alert', (), {})
-    mock_lt.save_resume_data_failed_alert = type('save_resume_data_failed_alert', (), {})
-    mock_lt.bencode = MagicMock(return_value=b'\x00')
-    return mock_lt
-
-
-def _make_ctx(**overrides):
-    """Build a minimal mock SessionContext."""
-    ctx = MagicMock()
-    ctx.repo_id = "test/repo"
-    ctx.is_valid = True
-    ctx.lock = threading.Lock()
-    ctx.alert_lock = threading.Lock()
-    ctx.pending_alerts = deque()
-    ctx.file_events = {}
-    ctx.file_destinations = {}
-    ctx.torrent_info_obj = None
-    ctx.fastresume_path = "/tmp/fake.fastresume"
-    ctx.__dict__.update(overrides)
-    return ctx
+from tests.unit.conftest import make_mock_ctx
 
 
 # ─── _has_torrent_error ──────────────────────────────────────────────────────
@@ -114,7 +89,7 @@ class TestLogDiagnostics:
 
     def test_valid_handle(self):
         """Should not raise when handle is valid."""
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
         ctx.handle.is_valid.return_value = True
         status = ctx.handle.status.return_value
         status.state = 3  # downloading
@@ -132,13 +107,13 @@ class TestLogDiagnostics:
 
     def test_invalid_handle(self):
         """Should not crash when handle is invalid."""
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
         ctx.handle.is_valid.return_value = False
         _log_diagnostics(ctx)  # No exception
 
     def test_no_handle(self):
         """Should not crash when handle is None."""
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
         ctx.handle = None
         _log_diagnostics(ctx)
 
@@ -149,21 +124,21 @@ class TestSaveResumeData:
 
     @patch('llmpt.monitor.lt')
     def test_calls_save_on_valid_handle(self, mock_lt):
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
         ctx.handle.is_valid.return_value = True
         _save_resume_data(ctx)
         ctx.handle.save_resume_data.assert_called_once()
 
     @patch('llmpt.monitor.lt')
     def test_skips_invalid_handle(self, mock_lt):
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
         ctx.handle.is_valid.return_value = False
         _save_resume_data(ctx)
         ctx.handle.save_resume_data.assert_not_called()
 
     @patch('llmpt.monitor.lt')
     def test_no_handle(self, mock_lt):
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
         ctx.handle = None
         _save_resume_data(ctx)  # Should not raise
 
@@ -175,7 +150,7 @@ class TestProcessAlerts:
     @patch('llmpt.monitor.lt')
     def test_save_resume_data_alert(self, mock_lt):
         """Successful resume data save should write to disk."""
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
 
         alert = MagicMock()
         alert.handle = ctx.handle
@@ -194,7 +169,7 @@ class TestProcessAlerts:
 
     @patch('llmpt.monitor.lt')
     def test_no_alerts(self, mock_lt):
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
         # Empty inbox
         _process_alerts(ctx)  # No crash
 
@@ -206,14 +181,14 @@ class TestCheckPendingFiles:
     @patch('llmpt.monitor.lt')
     def test_no_handle_returns_true(self, mock_lt):
         """Should break the loop if handle is None."""
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
         ctx.handle = None
         assert _check_pending_files(ctx) is True
 
     @patch('llmpt.monitor.lt')
     def test_torrent_error_sets_invalid(self, mock_lt):
         """Torrent-level error should mark ctx as invalid and return True."""
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
         status = ctx.handle.status.return_value
         status.errc.value.return_value = 42
         status.errc.message.return_value = "disk error"
@@ -226,7 +201,7 @@ class TestCheckPendingFiles:
     @patch('llmpt.monitor.lt')
     def test_no_pending_files_returns_false(self, mock_lt):
         """No pending events → nothing to do, don't break."""
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
         # No error
         status = MagicMock(spec=['state'])
         status.state = 3
@@ -238,7 +213,7 @@ class TestCheckPendingFiles:
     @patch('llmpt.monitor.lt')
     def test_file_completed_and_delivered(self, mock_lt):
         """When file progress == file_size, deliver and set event."""
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
 
         event = threading.Event()
         ctx.file_events = {"model.bin": event}
@@ -280,7 +255,7 @@ class TestCheckPendingFiles:
     @patch('llmpt.monitor.lt')
     def test_file_not_yet_complete(self, mock_lt):
         """File with partial progress should not trigger delivery."""
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
 
         event = threading.Event()
         ctx.file_events = {"model.bin": event}
@@ -311,7 +286,7 @@ class TestCheckPendingFiles:
     @patch('llmpt.monitor.lt')
     def test_checking_state_skips_progress_check(self, mock_lt):
         """During recheck (state 1 or 7), progress checks should be skipped."""
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
 
         event = threading.Event()
         ctx.file_events = {"model.bin": event}
@@ -327,7 +302,7 @@ class TestCheckPendingFiles:
     @patch('llmpt.monitor.lt')
     def test_metadata_arrival_triggers_mapping(self, mock_lt):
         """When torrent_info_obj is None but metadata becomes available, it should be populated."""
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
 
         event = threading.Event()
         ctx.file_events = {"model.bin": event}
@@ -360,12 +335,12 @@ class TestCheckPendingFiles:
 class TestCheckSessionHealth:
 
     def test_no_handle_returns_true(self):
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
         ctx.handle = None
         assert _check_session_health(ctx) is True
 
     def test_torrent_error_returns_true(self):
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
         status = ctx.handle.status.return_value
         status.errc.value.return_value = 42
         status.errc.message.return_value = "disk error"
@@ -375,7 +350,7 @@ class TestCheckSessionHealth:
         assert ctx.is_valid is False
 
     def test_no_pending_files_returns_false(self):
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
         status = MagicMock(spec=['state'])
         status.state = 3
         ctx.handle.status.return_value = status
@@ -384,7 +359,7 @@ class TestCheckSessionHealth:
         assert _check_session_health(ctx) is False
 
     def test_has_pending_files_returns_none(self):
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
         status = MagicMock(spec=['state'])
         status.state = 3
         ctx.handle.status.return_value = status
@@ -400,7 +375,7 @@ class TestCheckSessionHealth:
 class TestResolvePendingMetadata:
 
     def test_resolves_when_metadata_arrives(self):
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
         ctx.torrent_info_obj = None
 
         status = MagicMock()
@@ -417,7 +392,7 @@ class TestResolvePendingMetadata:
         ctx.handle.prioritize_files.assert_called_once_with([0, 0, 0])
 
     def test_skips_when_already_resolved(self):
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
         existing_ti = MagicMock()
         ctx.torrent_info_obj = existing_ti
 
@@ -433,12 +408,12 @@ class TestResolvePendingMetadata:
 class TestCollectReadyFiles:
 
     def test_returns_empty_without_torrent_info(self):
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
         ctx.torrent_info_obj = None
         assert _collect_ready_files(ctx) == []
 
     def test_collects_completed_files(self):
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
 
         event = threading.Event()
         ctx.file_events = {"model.bin": event}
@@ -462,7 +437,7 @@ class TestCollectReadyFiles:
         assert result[0] == ("/tmp/p2p/model.bin", "/dest/model.bin", "model.bin")
 
     def test_skips_incomplete_files(self):
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
 
         event = threading.Event()
         ctx.file_events = {"model.bin": event}
@@ -488,7 +463,7 @@ class TestCollectReadyFiles:
 class TestUpdateSeedTimer:
 
     def test_starts_timer_when_all_delivered(self):
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
         event = threading.Event()
         event.set()  # delivered
         ctx.file_events = {"model.bin": event}
@@ -501,7 +476,7 @@ class TestUpdateSeedTimer:
         assert ctx.seed_start_time is not None
 
     def test_does_not_start_if_pending(self):
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
         event = threading.Event()  # not set → still pending
         ctx.file_events = {"model.bin": event}
         ctx.auto_seed = True
@@ -512,7 +487,7 @@ class TestUpdateSeedTimer:
         assert ctx.seed_start_time is None
 
     def test_does_not_start_if_auto_seed_disabled(self):
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
         event = threading.Event()
         event.set()
         ctx.file_events = {"model.bin": event}
@@ -532,7 +507,7 @@ class TestDeliverOutsideLock:
     def test_deliver_file_runs_without_holding_lock(self, mock_lt):
         """Critical test: _deliver_file must NOT be called while ctx.lock is held.
         This prevents large file copies from blocking download_file() callers."""
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
 
         event = threading.Event()
         ctx.file_events = {"model.bin": event}

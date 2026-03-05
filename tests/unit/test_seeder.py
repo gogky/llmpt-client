@@ -2,19 +2,11 @@
 Tests for the seeder module (llmpt.seeder).
 
 All P2PBatchManager interactions are mocked.
+Singleton reset is handled by conftest autouse fixture.
 """
 
 import pytest
 from unittest.mock import patch, MagicMock
-
-
-@pytest.fixture(autouse=True)
-def reset_singleton():
-    """Reset P2PBatchManager singleton for isolation."""
-    from llmpt.p2p_batch import P2PBatchManager
-    P2PBatchManager._instance = None
-    yield
-    P2PBatchManager._instance = None
 
 
 # ─── start_seeding ────────────────────────────────────────────────────────────

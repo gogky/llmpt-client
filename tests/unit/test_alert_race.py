@@ -16,32 +16,7 @@ from collections import deque
 from unittest.mock import patch, MagicMock, mock_open
 
 from llmpt.monitor import _process_alerts
-
-
-def _make_mock_lt():
-    """Shared mock for libtorrent."""
-    mock_lt = MagicMock()
-    mock_lt.save_resume_flags_t.flush_disk_cache = 0
-    mock_lt.save_resume_data_alert = type('save_resume_data_alert', (), {})
-    mock_lt.save_resume_data_failed_alert = type('save_resume_data_failed_alert', (), {})
-    mock_lt.bencode = MagicMock(return_value=b'\x00')
-    return mock_lt
-
-
-def _make_ctx(repo_id="test/repo", **overrides):
-    """Build a minimal mock SessionContext."""
-    ctx = MagicMock()
-    ctx.repo_id = repo_id
-    ctx.is_valid = True
-    ctx.lock = threading.Lock()
-    ctx.alert_lock = threading.Lock()
-    ctx.pending_alerts = deque()
-    ctx.file_events = {}
-    ctx.file_destinations = {}
-    ctx.torrent_info_obj = None
-    ctx.fastresume_path = f"/tmp/{repo_id.replace('/', '_')}.fastresume"
-    ctx.__dict__.update(overrides)
-    return ctx
+from tests.unit.conftest import make_mock_lt, make_mock_ctx
 
 
 class TestDispatchAlerts:
@@ -57,10 +32,10 @@ class TestDispatchAlerts:
         handle_a = MagicMock(name="handle_A")
         handle_b = MagicMock(name="handle_B")
 
-        ctx_a = _make_ctx(repo_id="owner/repo_a")
+        ctx_a = make_mock_ctx(repo_id="owner/repo_a")
         ctx_a.handle = handle_a
 
-        ctx_b = _make_ctx(repo_id="owner/repo_b")
+        ctx_b = make_mock_ctx(repo_id="owner/repo_b")
         ctx_b.handle = handle_b
 
         alert_for_a = MagicMock()
@@ -98,10 +73,10 @@ class TestDispatchAlerts:
         handle_a = MagicMock(name="handle_A")
         handle_b = MagicMock(name="handle_B")
 
-        ctx_a = _make_ctx(repo_id="owner/repo_a")
+        ctx_a = make_mock_ctx(repo_id="owner/repo_a")
         ctx_a.handle = handle_a
 
-        ctx_b = _make_ctx(repo_id="owner/repo_b")
+        ctx_b = make_mock_ctx(repo_id="owner/repo_b")
         ctx_b.handle = handle_b
 
         SaveResumeAlert = type('save_resume_data_alert', (), {})
@@ -153,10 +128,10 @@ class TestDispatchAlerts:
         handle_a = MagicMock(name="handle_A")
         handle_b = MagicMock(name="handle_B")
 
-        ctx_a = _make_ctx(repo_id="owner/repo_a")
+        ctx_a = make_mock_ctx(repo_id="owner/repo_a")
         ctx_a.handle = handle_a
 
-        ctx_b = _make_ctx(repo_id="owner/repo_b")
+        ctx_b = make_mock_ctx(repo_id="owner/repo_b")
         ctx_b.handle = handle_b
 
         SaveResumeAlert = type('save_resume_data_alert', (), {})
@@ -215,7 +190,7 @@ class TestDispatchAlerts:
 
     def test_process_alerts_reads_from_inbox(self):
         """_process_alerts() should consume from pending_alerts, not lt_session."""
-        ctx = _make_ctx()
+        ctx = make_mock_ctx()
 
         SaveResumeAlert = type('save_resume_data_alert', (), {})
         alert = MagicMock()
