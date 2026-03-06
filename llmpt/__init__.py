@@ -182,6 +182,7 @@ def enable_p2p(
             if not is_daemon_running():
                 daemon_pid = start_daemon(
                     tracker_url=_config['tracker_url'],
+                    port=_config.get('port'),
                 )
                 if daemon_pid:
                     logger.info(f"Seeding daemon auto-started (PID: {daemon_pid})")

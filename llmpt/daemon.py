@@ -95,12 +95,14 @@ def is_daemon_running() -> Optional[int]:
 
 def start_daemon(
     tracker_url: str = "http://localhost:8080",
+    port: Optional[int] = None,
     foreground: bool = False,
 ) -> Optional[int]:
     """Start the seeding daemon.
 
     Args:
         tracker_url: URL of the tracker server.
+        port: libtorrent listen port (None = auto-select).
         foreground: If True, run in the foreground (for debugging).
 
     Returns:
@@ -114,11 +116,11 @@ def start_daemon(
     if foreground:
         # Run directly in the current process (useful for debugging)
         _write_pid(os.getpid())
-        _daemon_main(tracker_url)
+        _daemon_main(tracker_url, port=port)
         return os.getpid()
 
     # Fork to background
-    pid = _daemonize(tracker_url)
+    pid = _daemonize(tracker_url, port=port)
     return pid
 
 
@@ -154,77 +156,46 @@ def stop_daemon() -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _daemonize(tracker_url: str) -> int:
-    """Classic Unix double-fork to become a daemon.
+def _daemonize(tracker_url: str, port: Optional[int] = None) -> int:
+    """Start the daemon as a subprocess.
 
-    Returns the child PID to the parent process.
+    Uses subprocess.Popen to launch a clean, detached Python process via
+    the CLI's hidden `_internal_daemon_start` command to avoid deadlocks.
+
+    Returns the daemon PID.
     """
-    # First fork
-    try:
-        pid = os.fork()
-    except OSError as e:
-        logger.error(f"First fork failed: {e}")
-        raise
+    import subprocess
 
-    if pid > 0:
-        # Parent: wait briefly for the daemon to start, then return child PID
-        # The actual daemon PID will be the grandchild, written to PID_FILE
-        # We wait a moment for the PID file to be written
-        for _ in range(20):
-            time.sleep(0.1)
-            daemon_pid = _read_pid()
-            if daemon_pid and _is_process_running(daemon_pid):
-                return daemon_pid
-        # Fallback: return the first child's PID
-        return pid
-
-    # First child: create new session
-    os.setsid()
-
-    # Second fork (prevents the daemon from acquiring a controlling terminal)
-    try:
-        pid = os.fork()
-    except OSError as e:
-        logger.error(f"Second fork failed: {e}")
-        os._exit(1)
-
-    if pid > 0:
-        # First child exits
-        os._exit(0)
-
-    # Grandchild: this is the daemon process
     os.makedirs(LLMPT_DIR, exist_ok=True)
+    
+    cmd = [
+        sys.executable, "-m", "llmpt.cli", 
+        "_internal_daemon_start", 
+        "--tracker", tracker_url
+    ]
+    if port is not None:
+        cmd.extend(["--port", str(port)])
 
-    # Write PID
-    _write_pid(os.getpid())
-
-    # Redirect stdio to /dev/null
-    devnull = os.open(os.devnull, os.O_RDWR)
-    os.dup2(devnull, sys.stdin.fileno())
-    os.dup2(devnull, sys.stdout.fileno())
-    os.dup2(devnull, sys.stderr.fileno())
-    os.close(devnull)
-
-    # Setup file logging for the daemon
-    file_handler = logging.FileHandler(LOG_FILE)
-    file_handler.setFormatter(
-        logging.Formatter(
-            "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
+    # Start a detached subprocess
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=open(os.path.join(LLMPT_DIR, "daemon_stderr.log"), "w"),
+        start_new_session=True,  # Detach from parent's session
     )
-    root_logger = logging.getLogger("llmpt")
-    root_logger.addHandler(file_handler)
-    root_logger.setLevel(logging.INFO)
 
-    # Run the daemon main loop
-    try:
-        _daemon_main(tracker_url)
-    except Exception as e:
-        logger.error(f"Daemon crashed: {e}", exc_info=True)
-    finally:
-        _remove_pid()
-        os._exit(0)
+    # Wait for PID file to be written
+    for _ in range(50):
+        time.sleep(0.1)
+        daemon_pid = _read_pid()
+        if daemon_pid and _is_process_running(daemon_pid):
+            return daemon_pid
+
+    # Fallback: use subprocess PID
+    logger.warning(f"Daemon PID file not written in time, using subprocess PID {proc.pid}")
+    return proc.pid
+
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +203,7 @@ def _daemonize(tracker_url: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _daemon_main(tracker_url: str) -> None:
+def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
     """Main loop of the seeding daemon."""
     if not LIBTORRENT_AVAILABLE:
         logger.error("libtorrent not available, daemon cannot start")
@@ -243,7 +214,17 @@ def _daemon_main(tracker_url: str) -> None:
     from .p2p_batch import P2PBatchManager
     from .tracker_client import TrackerClient
 
-    logger.info(f"Daemon starting (PID: {os.getpid()}, tracker: {tracker_url})")
+    # Set the global config so P2PBatchManager can read port and other settings.
+    # In a forked daemon process, the parent's _config is not inherited.
+    from . import _config as parent_config
+    import llmpt
+    llmpt._config['tracker_url'] = tracker_url
+    if port is not None:
+        llmpt._config['port'] = port
+    elif os.getenv('HF_P2P_PORT'):
+        llmpt._config['port'] = int(os.getenv('HF_P2P_PORT'))
+
+    logger.info(f"Daemon starting (PID: {os.getpid()}, tracker: {tracker_url}, port: {llmpt._config.get('port', 'auto')})")
 
     tracker_client = TrackerClient(tracker_url)
     manager = P2PBatchManager()
@@ -285,6 +266,7 @@ def _daemon_main(tracker_url: str) -> None:
             return {
                 "status": "ok",
                 "pid": os.getpid(),
+                "port": getattr(manager, 'listen_port', None),
                 "seeding_count": len(seeding_set),
                 "sessions": {
                     k: {
@@ -388,11 +370,14 @@ def _process_seedable(
     key = (repo_id, revision)
     attempted_set.add(key)
 
+    logger.info(f"[{repo_id}@{revision[:8]}] Processing seedable model...")
+
     try:
         from .torrent_cache import resolve_torrent_data
         from .torrent_creator import create_and_register_torrent
 
         # Try to get existing torrent (local cache or tracker)
+        logger.info(f"[{repo_id}] Checking for existing torrent...")
         torrent_data = resolve_torrent_data(repo_id, revision, tracker_client)
 
         if not torrent_data:
@@ -416,8 +401,11 @@ def _process_seedable(
             else:
                 logger.warning(f"[{repo_id}] Failed to create torrent")
                 return
+        else:
+            logger.info(f"[{repo_id}] Found existing torrent ({len(torrent_data)} bytes)")
 
         # Start seeding
+        logger.info(f"[{repo_id}] Starting seeding task...")
         success = manager.register_seeding_task(
             repo_id=repo_id,
             revision=revision,
@@ -427,9 +415,10 @@ def _process_seedable(
 
         if success:
             seeding_set.add(key)
-            logger.info(f"[{repo_id}] Seeding started")
+            logger.info(f"[{repo_id}] ✓ Seeding started successfully")
         else:
-            logger.warning(f"[{repo_id}] Failed to start seeding")
+            logger.warning(f"[{repo_id}] ✗ Failed to start seeding (register_seeding_task returned False)")
 
     except Exception as e:
-        logger.error(f"[{repo_id}] Error processing seedable: {e}")
+        logger.error(f"[{repo_id}] Error processing seedable: {e}", exc_info=True)
+

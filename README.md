@@ -4,13 +4,13 @@ HuggingFace Hub 模型的 P2P 加速下载客户端
 
 ## 特性
 
-- 🚀 **无缝集成**：无需修改代码，直接替换 `huggingface_hub` 下载
-- 🌐 **P2P 加速**：通过 BitTorrent 从其他用户处下载模型
-- 🌍 **WebSeed 加速**：无 P2P peer 时自动从 HuggingFace CDN 获取数据，实现冷启动
-- 📦 **自动降级**：P2P 失败时自动降级到 HTTP
--  **断点续传**：支持 fastresume，恢复中断的下载
-- 🎯 **最小代码修改**：只需添加一行 `import llmpt` 即可启用 P2P
-- 🖥️ **CLI 工具**：提供 `llmpt-cli` 命令行工具，支持下载、做种、状态查看
+- 🚀 **无缝集成**：只需一行 `import llmpt` 即可为 HuggingFace 下载启用 P2P 加速
+- 🌐 **P2P 加速**：通过 BitTorrent 从其他用户处高速下载模型
+- 🌍 **WebSeed**：无 P2P peer 时自动从 HuggingFace CDN 获取数据，实现冷启动
+- 📦 **自动降级**：P2P 失败时自动回退到标准 HTTP 下载
+- 🔄 **自动做种**：下载完成后自动创建 torrent 并持续做种，回馈社区
+- 🖥️ **后台守护进程**：做种运行在独立的后台进程中，不影响正常使用
+- � **全缓存做种**：守护进程会扫描 HF 缓存中的所有模型并自动做种
 
 ## 安装
 
@@ -21,27 +21,24 @@ pip install llmpt-client
 ### 依赖要求
 
 - Python >= 3.8
-- libtorrent >= 2.0.0（自动安装）
+- libtorrent >= 2.0.0
 
 ## 快速开始
 
-### 方式一：环境变量（推荐）
+### 方式一：环境变量（最简单）
 
 ```bash
-# 全局启用 P2P
+# 设置环境变量
 export HF_USE_P2P=1
-export HF_P2P_TRACKER=http://your-tracker.com  # 可选，不设置则使用默认值
+export HF_P2P_TRACKER=http://118.195.159.242
 ```
 
 ```python
-# 只需添加一行 import（会自动检测环境变量并启用 P2P）
+# 只需添加一行 import，其余代码无需修改
 import llmpt
-
-# 其余代码无需修改
 from huggingface_hub import snapshot_download
 
-# 自动使用 P2P 下载
-snapshot_download("meta-llama/Llama-2-7b")
+snapshot_download("meta-llama/Llama-2-7b")  # 自动使用 P2P
 ```
 
 ### 方式二：显式启用
@@ -50,65 +47,94 @@ snapshot_download("meta-llama/Llama-2-7b")
 from llmpt import enable_p2p
 from huggingface_hub import snapshot_download
 
-# 显式启用 P2P
-enable_p2p(tracker_url="http://your-tracker.com")
-
-# 后续所有下载都使用 P2P
+enable_p2p(tracker_url="http://118.195.159.242")
 snapshot_download("meta-llama/Llama-2-7b")
 ```
 
-## 工作原理
-
-llmpt 通过 Monkey Patch 拦截 `huggingface_hub` 的下载流程，将文件请求路由到 BitTorrent 网络：
-
-1. **Monkey Patch 拦截**：`enable_p2p()` 对 `hf_hub_download` 和 `http_get` 进行 Monkey Patch
-2. **上下文注入**：当 `hf_hub_download` 被调用时，注入 P2P 上下文（repo_id、filename、tracker 信息）
-3. **HTTP 请求拦截**：每个文件的 `http_get` 调用被拦截，转交给 `P2PBatchManager`
-4. **BitTorrent 下载**：`P2PBatchManager` 为每个仓库维护一个 `SessionContext`，通过 magnet link 加入 BitTorrent swarm 下载文件
-5. **WebSeed 辅助**：当启用 WebSeed 时，libtorrent 可从本地反向代理获取 piece，代理自动转换 URL 并注入认证 token，将 HuggingFace CDN 作为额外的下载源
-6. **自动降级**：如果 P2P 下载超时或失败，自动回退到原始 HTTP 下载
-
+当调用 `enable_p2p()` 时，系统会自动：
+1. Monkey Patch HuggingFace 的下载函数，拦截文件请求到 P2P 网络
+2. 在后台启动**做种守护进程**，扫描本地 HF 缓存，为所有已有的模型做种
+3. 下载完成后通知守护进程，自动为新下载的模型创建 torrent 并注册到 tracker
 
 ## CLI 工具
 
 安装后可使用 `llmpt-cli` 命令行工具：
 
 ```bash
-# 通过 P2P 下载模型
+# ─── 下载 ───
 llmpt-cli download meta-llama/Llama-2-7b
+llmpt-cli download gpt2 --tracker http://118.195.159.242
 
-# 指定 Tracker 下载
-llmpt-cli download gpt2 --tracker http://tracker.example.com
+# ─── 守护进程管理 ───
+llmpt-cli daemon start                           # 启动后台做种守护进程
+llmpt-cli daemon start --tracker http://118.195.159.242     # 指定 tracker
+llmpt-cli daemon status                           # 查看做种状态
+llmpt-cli daemon stop                             # 停止守护进程
+llmpt-cli daemon restart                          # 重启
 
-# 为已缓存的仓库创建种子并做种
-llmpt-cli seed --repo-id gpt2 --revision main
+# ─── 手动做种（高级用法）───
+llmpt-cli seed --repo-id gpt2 --revision main    # 为指定模型创建种子并做种
 
-# 查看做种状态
-llmpt-cli status
+# ─── 状态管理 ───
+llmpt-cli status                                  # 查看做种状态
+llmpt-cli stop                                    # 停止所有做种
+llmpt-cli stop gpt2@main                          # 停止指定做种
+```
 
-# 停止指定仓库的做种
-llmpt-cli stop gpt2@main
+### 守护进程
 
-# 停止所有做种
-llmpt-cli stop
+做种运行在独立的后台守护进程中，**不需要保持终端打开**：
+
+```bash
+$ llmpt-cli daemon start
+✓ Daemon started (PID: 12345)
+  Tracker: http://118.195.159.242
+  Logs: ~/.cache/llmpt/daemon.log
+$  # ← 立刻返回，terminal 可以关掉
+```
+
+守护进程的核心功能：
+- **自动扫描** `~/.cache/huggingface/hub/` 中所有完整的模型快照
+- **自动创建 torrent**：如果 tracker 上没有某模型的 torrent，自动创建并注册
+- **持续做种**：为所有已发现的模型提供 P2P 上传
+- **接收通知**：下载端下载完成后会通过 IPC 立即通知守护进程
+
+当使用 `enable_p2p()` 时，守护进程会 **自动启动**，用户无需手动操作。如果不想做种，可以：
+
+```python
+enable_p2p(auto_seed=False)  # 只下载，不做种
+```
+
+## 工作原理
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  下载端（随 HuggingFace 进程运行）                                │
+│                                                                 │
+│  enable_p2p() → Monkey Patch hf_hub_download + http_get         │
+│       ↓                      + snapshot_download                │
+│  snapshot_download("gpt2")                                      │
+│       ↓                                                         │
+│  _patched_http_get → 尝试 P2P                                   │
+│       ├─ 成功 → 跳过 HTTP ✓                                     │
+│       └─ 失败 → 回退到标准 HTTP                                  │
+│       ↓                                                         │
+│  下载完成 → 通知守护进程（IPC）                                    │
+└─────────────────────────────────────────────────────────────────┘
+                              ↕ Unix Socket IPC
+┌─────────────────────────────────────────────────────────────────┐
+│  守护进程 llmptd（独立后台进程，长期运行）                          │
+│                                                                 │
+│  ┌─ 定时扫描 HF cache → 发现新模型                               │
+│  ├─ 接收 IPC 通知    → 新下载完成                                │
+│  ↓                                                              │
+│  create_and_register_torrent() → 注册到 Tracker                  │
+│  ↓                                                              │
+│  P2PBatchManager → libtorrent → 持续做种 📡                     │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ## 配置
-
-### 快速开始
-
-如果无法直接访问 `huggingface.co`，需要设置 HuggingFace 镜像。llmpt 完全兼容 `HF_ENDPOINT` 环境变量：
-
-```bash
-# 设置 HuggingFace 镜像（如果无法访问 huggingface.co）
-export HF_ENDPOINT=https://hf-mirror.com
-
-# 启用 P2P 加速
-export HF_USE_P2P=1
-export HF_P2P_TRACKER=http://your-tracker.com
-```
-
-> **注意**：llmpt 在做种和下载时需要调用 HuggingFace API 解析仓库版本信息。如果未设置镜像且无法访问 `huggingface.co`，版本解析将超时失败。
 
 ### 环境变量
 
@@ -119,31 +145,29 @@ HF_USE_P2P=1
 # HuggingFace 镜像（如果无法访问 huggingface.co）
 HF_ENDPOINT=https://hf-mirror.com
 
-# Tracker 服务器地址（可选）
-HF_P2P_TRACKER=http://your-tracker.com
+# Tracker 服务器地址
+HF_P2P_TRACKER=http://118.195.159.242
 
-# libtorrent 监听端口（可选）
-# 不设置时自动从 6881-6999 中选择可用端口
+# libtorrent 监听端口（可选，默认自动选择 6881-6999）
 HF_P2P_PORT=6881
 
 # 下载后自动做种（默认：1）
 HF_P2P_AUTO_SEED=1
 
-# 做种时长（秒，0 表示永久，默认：3600）
+# 做种时长（秒，0 = 永久，默认：3600）
 HF_P2P_SEED_TIME=3600
 
 # P2P 下载超时时间（秒，默认：300）
 HF_P2P_TIMEOUT=300
 
 # 启用/禁用 WebSeed（默认：1）
-# 设置为 0 可禁用 WebSeed，用于调试 P2P 链路
 HF_P2P_WEBSEED=1
 
 # HuggingFace 认证 Token（用于 WebSeed 访问私有仓库）
 HF_TOKEN=hf_xxxxx
 ```
 
-**端口选择策略**：不设置 `HF_P2P_PORT` 时，llmpt 会自动从 6881 开始探测可用端口（6881 → 6882 → … → 6999）。若该范围全部被占用，则由操作系统随机分配。显式设置 `HF_P2P_PORT` 可固定端口，适用于需要配置防火墙规则的场景。
+> **注意**：llmpt 在做种和下载时需要调用 HuggingFace API 解析仓库版本信息。如果未设置镜像且无法访问 `huggingface.co`，版本解析将超时失败。
 
 ### Python API
 
@@ -152,20 +176,20 @@ from llmpt import enable_p2p, disable_p2p, is_enabled, stop_seeding, get_config
 
 # 使用自定义设置启用
 enable_p2p(
-    tracker_url="http://your-tracker.com",
-    auto_seed=True,
-    seed_duration=3600,  # 做种 1 小时
+    tracker_url="http://118.195.159.242",
+    auto_seed=True,       # 自动启动守护进程做种（默认 True）
+    seed_duration=3600,
     timeout=300,
-    port=6881,           # 可选，指定监听端口
-    webseed=True,        # 启用 WebSeed（默认 True）
-    hf_token="hf_xxx",   # 可选，用于私有仓库的 WebSeed 认证
+    port=6881,
+    webseed=True,
+    hf_token="hf_xxx",
 )
 
 # 检查 P2P 是否启用
 is_enabled()  # -> True
 
 # 获取当前配置
-get_config()  # -> {'tracker_url': '...', 'auto_seed': True, 'webseed': True, ...}
+get_config()
 
 # 禁用 P2P
 disable_p2p()
@@ -174,45 +198,17 @@ disable_p2p()
 stop_seeding()
 ```
 
-## 架构
-
-```
-用户代码
-    ↓
-huggingface_hub.snapshot_download()
-    ↓
-llmpt Monkey Patch (hf_hub_download + http_get)
-    ↓
-    ├─→ _patched_hf_hub_download: 注入 P2P 上下文
-    │     ↓
-    │   _patched_http_get: 拦截 HTTP 请求
-    │     ↓
-    │   P2PBatchManager.register_request()
-    │     ↓
-    │   SessionContext.download_file()
-    │     ├─→ 查询 Tracker (magnet link)
-    │     ├─→ 加入 BitTorrent swarm (libtorrent)
-    │     ├─→ WebSeedProxy → HuggingFace CDN (可选辅助源)
-    │     ├─→ monitor 后台监控 & 交付文件
-    │     ├─→ 成功 → 跳过 HTTP ✓
-    │     └─→ 超时/失败 → Fallback 到原始 HTTP
-    ↓
-返回文件路径
-```
-
 ## 开发
 
 ### 搭建开发环境
 
 ```bash
-git clone https://github.com/yourusername/llmpt-client.git
+git clone https://github.com/gogky/llmpt-client.git
 cd llmpt-client
 
-# 创建虚拟环境
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
+python -m venv .venv
+source .venv/bin/activate
 
-# 安装依赖
 pip install -e ".[dev]"
 ```
 
@@ -222,21 +218,19 @@ pip install -e ".[dev]"
 # 单元测试
 pytest tests/unit/
 
-# 集成测试（宿主机直接运行，需要网络连接）
-pytest tests/integration/ --run-integration
-
 # E2E 测试（Docker 多容器）
-# 场景 1：纯 P2P 下载（WebSeed 禁用，验证 P2P 链路）
-docker compose -f docker-compose.test.yml down
+
+# 场景 1：纯 P2P 下载（WebSeed 禁用）
 docker compose -f docker-compose.test.yml up --build
 
-# 场景 2：纯 WebSeed 下载（无 P2P peer，验证 WebSeed 冷启动）
-docker compose -f docker-compose.test-webseed.yml down
+# 场景 2：纯 WebSeed 下载（无 P2P peer，冷启动）
 docker compose -f docker-compose.test-webseed.yml up --build
 
-# 场景 3：混合模式（P2P + WebSeed 同时启用）
-docker compose -f docker-compose.test-hybrid.yml down
+# 场景 3：P2P + WebSeed 混合模式
 docker compose -f docker-compose.test-hybrid.yml up --build
+
+# 场景 4：守护进程自动做种（冷启动 → 自动创建 torrent → P2P 下载）
+docker compose -f docker-compose.test-daemon.yml up --build
 ```
 
 ### 项目结构
@@ -244,35 +238,30 @@ docker compose -f docker-compose.test-hybrid.yml up --build
 ```
 llmpt-client/
 ├── llmpt/                            # 主包
-│   ├── __init__.py                   # 入口点，自动启用逻辑
-│   ├── patch.py                      # Monkey Patch 实现（hf_hub_download + http_get）
+│   ├── __init__.py                   # 入口点，enable_p2p() API
+│   ├── patch.py                      # Monkey Patch（hf_hub_download + http_get + snapshot_download）
 │   ├── p2p_batch.py                  # P2P 批量管理器（单例，调度核心）
-│   ├── session_context.py            # 会话上下文（管理单个 torrent 生命周期）
+│   ├── session_context.py            # 会话上下文（单个 torrent 生命周期管理）
 │   ├── monitor.py                    # 后台监控循环（进度跟踪 & 文件交付）
-│   ├── webseed_proxy.py              # WebSeed 本地反向代理（URL 转换 + Token 注入）
+│   ├── daemon.py                     # 做种守护进程（后台运行，自动做种）
+│   ├── cache_scanner.py              # HF 缓存扫描器（发现可做种模型）
+│   ├── ipc.py                        # 进程间通信（Unix Socket）
+│   ├── webseed_proxy.py              # WebSeed 本地反向代理
 │   ├── tracker_client.py             # Tracker API 客户端
 │   ├── seeder.py                     # 做种管理器
 │   ├── torrent_creator.py            # 种子创建（v1_only 模式）
+│   ├── torrent_cache.py              # 本地 .torrent 缓存
+│   ├── seeding_mapper.py             # 做种文件映射（hardlink）
 │   ├── cli.py                        # CLI 工具 (llmpt-cli)
 │   └── utils.py                      # 工具函数
-├── tests/                            # 测试
+├── tests/
 │   ├── unit/                         # 单元测试
-│   │   ├── test_webseed_proxy.py     # WebSeed 代理测试（28 tests）
-│   │   └── ...                       # 其他单元测试
-│   ├── integration/                  # 集成测试（宿主机运行）
 │   └── e2e/                          # E2E 测试（Docker 容器运行）
-│       ├── test_docker_p2p.py        # 4 个 E2E 测试场景
-│       ├── run_seeder.py             # Seeder 容器入口
-│       ├── conftest.py               # pytest 配置
-│       └── Dockerfile.test           # 测试容器镜像
-├── docs/                             # 文档
-├── docker-compose.test.yml           # E2E：纯 P2P 测试
-├── docker-compose.test-webseed.yml   # E2E：纯 WebSeed 冷启动测试
-├── docker-compose.test-hybrid.yml    # E2E：P2P + WebSeed 混合测试
-├── setup.py                          # 安装配置
-├── setup.cfg                         # pytest / flake8 / mypy 配置
-├── requirements.txt                  # 运行依赖
-└── requirements-dev.txt              # 开发依赖
+├── docker-compose.test.yml           # E2E：纯 P2P
+├── docker-compose.test-webseed.yml   # E2E：纯 WebSeed
+├── docker-compose.test-hybrid.yml    # E2E：P2P + WebSeed 混合
+├── docker-compose.test-daemon.yml    # E2E：守护进程自动做种
+└── setup.py
 ```
 
 ## 兼容性

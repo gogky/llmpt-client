@@ -1,25 +1,31 @@
 """
-Run the background seeder for the true P2P test.
+Seeder entry point using the daemon architecture.
 
-Drives seeding through the public CLI entry point `cmd_seed`, verifying the
-exact same code path that `llmpt-cli seed` uses (see todo 1.4).
+Instead of the old `cmd_seed()` approach (which blocked the terminal),
+this uses the daemon to:
+  1. Download the repo via HuggingFace HTTP (populates local cache)
+  2. Start the daemon, which scans the cache and creates torrents
+  3. Wait until the torrent is registered on the tracker
+
+This mirrors the real user experience where the daemon runs in the
+background and automatically seeds all cached models.
 """
 
 import os
 import time
 import signal
-import threading
 import pytest
 from huggingface_hub import snapshot_download
 
 
 def test_seeder_initialization():
     """
-    Real-user seeding flow via CLI:
+    Real-user seeding flow via daemon:
       1. Download the repo via HuggingFace HTTP (populates local cache).
-      2. Invoke `cmd_seed()` — the same function behind `llmpt-cli seed`.
-         A background timer sends KeyboardInterrupt after 3 minutes to break
-         out of the infinite seeding loop, just like a real user pressing Ctrl+C.
+      2. Start the daemon which auto-discovers cached models.
+      3. Daemon creates torrent, registers with tracker, and starts seeding.
+      4. Wait for the torrent to appear on the tracker.
+      5. Keep seeding for 3 minutes (simulating a user leaving the daemon running).
     """
     tracker_url = os.environ.get("TRACKER_URL", "http://118.195.159.242")
     repo_id = "hf-internal-testing/tiny-random-GPTJForCausalLM"
@@ -33,32 +39,56 @@ def test_seeder_initialization():
     print("[Seeder] Waiting 5s for tracker to come online...", flush=True)
     time.sleep(5)
 
-    # ── 2. Seed via the CLI entry point (cmd_seed) ──
-    # cmd_seed() enters an infinite `while True: sleep(1)` loop at the end,
-    # which is how the real CLI keeps the seeder alive.  We use SIGALRM to
-    # send ourselves a KeyboardInterrupt after 3 minutes — simulating the
-    # user pressing Ctrl+C.
-    from unittest.mock import MagicMock
-    from llmpt.cli import cmd_seed
+    # ── 2. Start the daemon (it will scan cache and create torrents) ──
+    from llmpt.daemon import start_daemon, stop_daemon, is_daemon_running
 
-    args = MagicMock()
-    args.tracker = tracker_url
-    args.repo_id = repo_id
-    args.revision = "main"
-    args.repo_type = "model"
-    args.name = repo_id.split("/")[-1]
+    port = int(os.environ.get("HF_P2P_PORT", 0)) or None
+    print(f"[Seeder] Starting daemon (tracker: {tracker_url}, port: {port})...", flush=True)
+    pid = start_daemon(tracker_url=tracker_url, port=port, foreground=False)
+    assert pid is not None, "Failed to start daemon"
+    print(f"[Seeder] Daemon started (PID: {pid})", flush=True)
 
-    def _alarm_handler(signum, frame):
-        raise KeyboardInterrupt
+    # ── 3. Wait for the torrent to appear on the tracker ──
+    import requests
+    api_url = f"{tracker_url.rstrip('/')}/api/v1/torrents"
+    deadline = time.time() + 180  # 3 minutes max wait
+    registered = False
 
-    signal.signal(signal.SIGALRM, _alarm_handler)
-    signal.alarm(180)  # 3 minutes
+    print("[Seeder] Waiting for daemon to create and register torrent...", flush=True)
+    while time.time() < deadline:
+        try:
+            resp = requests.get(api_url, timeout=5)
+            if resp.status_code == 200:
+                body = resp.json()
+                torrents = body.get("data", body) if isinstance(body, dict) else body
+                for t in torrents:
+                    if t.get("repo_id") == repo_id:
+                        print(
+                            f"[Seeder] ✅ Torrent registered! "
+                            f"info_hash={t.get('info_hash', '?')[:16]}...",
+                            flush=True,
+                        )
+                        registered = True
+                        break
+        except Exception as e:
+            print(f"[Seeder] Tracker poll failed: {e}", flush=True)
 
-    try:
-        cmd_seed(args)
-    finally:
-        signal.alarm(0)  # Cancel the alarm
+        if registered:
+            break
+        time.sleep(5)
 
+    assert registered, (
+        f"Daemon did not register torrent for {repo_id} within 180s. "
+        "Check daemon logs at ~/.cache/llmpt/daemon.log"
+    )
+
+    # ── 4. Keep seeding for 3 minutes ──
+    print("[Seeder] Seeding for 180s...", flush=True)
+    time.sleep(180)
+
+    # ── 5. Clean up ──
+    print("[Seeder] Stopping daemon...", flush=True)
+    stop_daemon()
     print("[Seeder] ✅ Seeding session completed.", flush=True)
 
 

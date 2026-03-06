@@ -93,10 +93,11 @@ class P2PBatchManager:
                 settings = self.lt_session.get_settings()
                 settings['listen_interfaces'] = listen_ifaces
                 self.lt_session.apply_settings(settings)
-                actual_port = self.lt_session.listen_port()
-                logger.info(f"libtorrent listening on port {actual_port}")
+                self.listen_port = self.lt_session.listen_port()
+                logger.info(f"libtorrent listening on port {self.listen_port}")
             else:
                 self.lt_session = None
+                self.listen_port = None
 
     def dispatch_alerts(self) -> None:
         """Pop alerts from the global lt_session and route each to the correct SessionContext.

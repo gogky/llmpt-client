@@ -122,6 +122,14 @@ Examples:
         help='Run daemon in the foreground (for debugging)'
     )
 
+    # Internal hidden command for daemon subprocess
+    internal_daemon_parser = subparsers.add_parser(
+        '_internal_daemon_start',
+        help=argparse.SUPPRESS
+    )
+    internal_daemon_parser.add_argument('--tracker', required=True)
+    internal_daemon_parser.add_argument('--port', type=int, default=None)
+
     args = parser.parse_args()
 
     # Setup logging
@@ -151,6 +159,8 @@ Examples:
         cmd_stop(args)
     elif args.command == 'daemon':
         cmd_daemon(args)
+    elif args.command == '_internal_daemon_start':
+        _cmd_internal_daemon_start(args)
     else:
         parser.print_help()
         sys.exit(1)
@@ -367,6 +377,11 @@ def cmd_daemon(args):
             return
 
         print(f"llmptd (PID: {pid}) — running")
+        
+        listen_port = response.get('port')
+        if listen_port:
+            print(f"  Port: {listen_port}")
+            
         sessions = response.get('sessions', {})
         if not sessions:
             print("  No active seeding tasks")
@@ -385,6 +400,33 @@ def cmd_daemon(args):
                 f"{peers} peers │ "
                 f"{format_bytes(rate)}/s"
             )
+
+
+def _cmd_internal_daemon_start(args):
+    """Internal entrypoint for the daemon subprocess."""
+    import os
+    import logging
+    from llmpt.daemon import _daemon_main, _write_pid, _remove_pid, LLMPT_DIR, LOG_FILE
+    
+    os.makedirs(LLMPT_DIR, exist_ok=True)
+    fh = logging.FileHandler(LOG_FILE)
+    fh.setFormatter(logging.Formatter(
+        "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    root_log = logging.getLogger("llmpt")
+    root_log.addHandler(fh)
+    root_log.setLevel(logging.INFO)
+
+    _write_pid(os.getpid())
+
+    try:
+        _daemon_main(args.tracker, port=args.port)
+    except Exception as e:
+        logger = logging.getLogger("llmpt.daemon")
+        logger.error(f"Daemon crashed: {e}", exc_info=True)
+    finally:
+        _remove_pid()
 
 
 if __name__ == '__main__':

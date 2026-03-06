@@ -1,0 +1,64 @@
+# Docker Compose for Daemon Bootstrap E2E test.
+#
+# This test verifies the full cold-start bootstrap scenario:
+#   1. Node A ("first-user") downloads model via HTTP (no torrent exists)
+#   2. Node A's daemon auto-creates the torrent and registers it on the tracker
+#   3. Node B ("second-user") downloads the same model via P2P from Node A
+#
+# This is the most important E2E test: it proves that the P2P network
+# can bootstrap without any manual `llmpt-cli seed` intervention.
+#
+# Usage:
+#   docker compose -f docker-compose.test-daemon.yml up --build
+#
+version: '3.8'
+
+networks:
+  llmpt_test:
+    driver: bridge
+
+services:
+  # ── First User: downloads via HTTP, daemon auto-seeds ─────────────────
+  first-user:
+    build:
+      context: .
+      dockerfile: tests/e2e/Dockerfile.test
+    container_name: llmpt-daemon-first-user
+    volumes:
+      - .:/app
+    environment:
+      - HF_HOME=/tmp/hf_cache_first
+      - ROLE=first-user
+      - TRACKER_URL=http://118.195.159.242
+      - HF_P2P_PORT=6881
+      - HF_P2P_WEBSEED=0
+    networks:
+      - llmpt_test
+    command: >
+      python -m pytest
+      tests/e2e/test_daemon_bootstrap.py::test_daemon_cold_start_bootstrap
+      --run-integration -v -s --log-cli-level=INFO
+
+  # ── Second User: downloads via P2P from first-user's daemon ──────────
+  second-user:
+    build:
+      context: .
+      dockerfile: tests/e2e/Dockerfile.test
+    container_name: llmpt-daemon-second-user
+    depends_on:
+      first-user:
+        condition: service_started
+    volumes:
+      - .:/app
+    environment:
+      - HF_HOME=/tmp/hf_cache_second
+      - ROLE=second-user
+      - TRACKER_URL=http://118.195.159.242
+      - TEST_SEEDER_PEER=llmpt-daemon-first-user:6881
+      - HF_P2P_WEBSEED=0
+    networks:
+      - llmpt_test
+    command: >
+      python -m pytest
+      tests/e2e/test_daemon_bootstrap.py::test_daemon_p2p_download_after_bootstrap
+      --run-integration -v -s --log-cli-level=INFO

@@ -29,10 +29,19 @@ from typing import List, Optional, Tuple
 
 logger = logging.getLogger("llmpt.cache_scanner")
 
-# Default HF cache directory
-HF_HUB_CACHE = os.path.expanduser(
-    os.getenv("HF_HOME", os.path.join("~", ".cache", "huggingface", "hub"))
-)
+# Default HF cache directory.
+# HuggingFace convention: $HF_HOME/hub (not $HF_HOME directly).
+# Try to use the official constant from huggingface_hub first.
+def _resolve_hf_hub_cache() -> str:
+    try:
+        from huggingface_hub import constants
+        return constants.HF_HUB_CACHE
+    except (ImportError, AttributeError):
+        pass
+    hf_home = os.getenv("HF_HOME", os.path.join(os.path.expanduser("~"), ".cache", "huggingface"))
+    return os.path.join(hf_home, "hub")
+
+HF_HUB_CACHE = _resolve_hf_hub_cache()
 
 # 40-char lowercase hex commit hash
 _COMMIT_HASH_RE = re.compile(r"^[0-9a-f]{40}$")
