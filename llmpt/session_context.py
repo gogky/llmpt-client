@@ -83,6 +83,8 @@ class SessionContext:
         
         self.worker_thread = None
         self.test_peer_addr = None  # (ip, port) tuple for direct peer connection in test environments
+        self._has_webseed = False   # set during _init_torrent if WebSeed proxy is active
+        self._peer_ready = threading.Event()  # signals that ≥1 peer is connected (test warmup)
 
     def _init_torrent(self) -> bool:
         """Initialize the libtorrent handle if not already done."""
@@ -119,6 +121,7 @@ class SessionContext:
             # 3. Add WebSeed URL if proxy is running
             webseed_url = self._get_webseed_url()
             if webseed_url:
+                self._has_webseed = True
                 self.handle.add_url_seed(webseed_url)
                 logger.info(f"[{self.repo_id}] WebSeed added: {webseed_url}")
 
@@ -150,6 +153,45 @@ class SessionContext:
                 self.lt_session.remove_torrent(self.handle)
                 self.handle = None
             return False
+
+    def _wait_for_peer_ready(self, warmup_timeout: int = 60) -> None:
+        """Wait until at least one peer is connected (test environments only).
+
+        In pure-P2P test scenarios (no WebSeed), HuggingFace launches 10+
+        concurrent download threads.  Without this warmup, all threads start
+        their timeout countdowns *before* the peer handshake completes,
+        causing early files to time out and fall back to HTTP.
+
+        This method blocks until ``handle.status().num_peers > 0``, then
+        sets ``_peer_ready`` so subsequent threads return immediately.
+
+        Only called when ``test_peer_addr`` is set and ``_has_webseed`` is
+        False — zero impact on production.
+        """
+        if self._peer_ready.is_set():
+            return
+
+        logger.info(f"[{self.repo_id}] Peer warmup: waiting for peer connection before starting downloads...")
+
+        # Ensure we're actively trying to connect
+        if self.handle and self.test_peer_addr:
+            self.handle.connect_peer(self.test_peer_addr, 0)
+
+        deadline = time.time() + warmup_timeout
+        while time.time() < deadline:
+            if not self.is_valid:
+                break
+            try:
+                if self.handle and self.handle.status().num_peers > 0:
+                    logger.info(f"[{self.repo_id}] Peer warmup complete — {self.handle.status().num_peers} peer(s) connected.")
+                    self._peer_ready.set()
+                    return
+            except Exception:
+                pass
+            time.sleep(0.5)
+
+        logger.warning(f"[{self.repo_id}] Peer warmup timed out after {warmup_timeout}s. Proceeding anyway.")
+        self._peer_ready.set()  # unblock all waiting threads
 
     def download_file(self, filename: str, destination: str) -> bool:
         """
@@ -220,6 +262,13 @@ class SessionContext:
                 if self.test_peer_addr:
                     self.handle.connect_peer(self.test_peer_addr, 0)
                     logger.debug(f"[{self.repo_id}] Connected to test peer {self.test_peer_addr} after resume")
+
+        # Peer warmup: in test environments without WebSeed, wait for the peer
+        # handshake to complete BEFORE starting the download timer.  This
+        # prevents the race where concurrent threads all time out because the
+        # peer wasn't connected yet.
+        if self.test_peer_addr and not self._has_webseed:
+            self._wait_for_peer_ready()
         
         # Block until the background thread signals completion, but also check
         # if the monitor thread has exited (is_valid becomes False) so we can
