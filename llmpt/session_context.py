@@ -122,12 +122,11 @@ class SessionContext:
                 self.handle.add_url_seed(webseed_url)
                 logger.info(f"[{self.repo_id}] WebSeed added: {webseed_url}")
 
-            # 4. Connect to test peer if configured
+            # 4. Resolve test peer if configured (connection handled by monitor loop)
             peer_addr = resolve_test_peer()
             if peer_addr:
                 self.test_peer_addr = peer_addr
-                logger.info(f"[{self.repo_id}] Test peer: connecting to {peer_addr[0]}:{peer_addr[1]}")
-                self.handle.connect_peer(self.test_peer_addr, 0)
+                logger.info(f"[{self.repo_id}] Test peer resolved to {peer_addr[0]}:{peer_addr[1]}")
 
             # torrent_info is immediately available — no metadata wait needed
             self.torrent_info_obj = self.handle.torrent_file()
@@ -218,6 +217,9 @@ class SessionContext:
             
             if self.handle:
                 self.handle.resume()
+                if self.test_peer_addr:
+                    self.handle.connect_peer(self.test_peer_addr, 0)
+                    logger.debug(f"[{self.repo_id}] Connected to test peer {self.test_peer_addr} after resume")
         
         # Block until the background thread signals completion, but also check
         # if the monitor thread has exited (is_valid becomes False) so we can

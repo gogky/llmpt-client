@@ -188,6 +188,21 @@ def _process_alerts(ctx: "SessionContext") -> None:
 
         elif isinstance(alert, lt.save_resume_data_failed_alert):
             logger.debug(f"[{ctx.repo_id}] Save resume data failed: {alert.message()}")
+            
+        elif isinstance(alert, lt.peer_error_alert):
+            logger.warning(f"[{ctx.repo_id}] PEER ERROR: {alert.message()}")
+            
+        elif isinstance(alert, lt.peer_disconnected_alert):
+            logger.warning(f"[{ctx.repo_id}] PEER DISCONNECTED: {alert.message()}")
+            
+        elif isinstance(alert, lt.torrent_error_alert):
+            logger.warning(f"[{ctx.repo_id}] TORRENT ERROR: {alert.message()}")
+            
+        elif isinstance(alert, lt.hash_failed_alert):
+            logger.warning(f"[{ctx.repo_id}] HASH FAILED: {alert.message()}")
+
+        elif isinstance(alert, lt.file_error_alert):
+            logger.warning(f"[{ctx.repo_id}] FILE ERROR: {alert.message()}")
 
 
 def _check_pending_files(ctx: "SessionContext") -> bool:
