@@ -25,4 +25,7 @@
 
 - seeding_mapper去掉pad逻辑
 
+- 边下变做种（制作.torrent
+
+
 目前monitor+session_context的设计合理吗？职责分配合理吗（比如monitor要负责检查是否有.torrent错误），代码中这么多轮询有没有性能问题？

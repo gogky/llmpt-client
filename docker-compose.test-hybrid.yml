@@ -1,3 +1,12 @@
+# Docker Compose for WebSeed + P2P hybrid E2E test.
+#
+# This file tests the hybrid scenario: a P2P seeder IS present AND
+# WebSeed is enabled. libtorrent should intelligently schedule pieces
+# from both the P2P peer and the WebSeed HTTP source.
+#
+# Usage:
+#   docker compose -f docker-compose.test-hybrid.yml up --build
+#
 version: '3.8'
 
 networks:
@@ -5,11 +14,12 @@ networks:
     driver: bridge
 
 services:
+  # ── Seeder: seeds via P2P as usual ───────────────────────────────────
   seeder:
-    build: 
+    build:
       context: .
       dockerfile: tests/e2e/Dockerfile.test
-    container_name: llmpt-seeder
+    container_name: llmpt-hybrid-seeder
     volumes:
       - .:/app
     environment:
@@ -26,27 +36,26 @@ services:
       timeout: 5s
       retries: 3
 
-  downloader:
+  # ── Hybrid Downloader: P2P peer + WebSeed ────────────────────────────
+  downloader-hybrid:
     build:
       context: .
       dockerfile: tests/e2e/Dockerfile.test
-    container_name: llmpt-downloader
+    container_name: llmpt-downloader-hybrid
     depends_on:
       seeder:
         condition: service_started
     volumes:
       - .:/app
     environment:
-      - HF_HOME=/tmp/hf_cache_downloader
+      - HF_HOME=/tmp/hf_cache_hybrid
       - ROLE=downloader
       - TRACKER_URL=http://118.195.159.242
-      - TEST_SEEDER_PEER=llmpt-seeder:6881
-      - HF_P2P_WEBSEED=0
+      - TEST_SEEDER_PEER=llmpt-hybrid-seeder:6881
+      # HF_P2P_WEBSEED defaults to '1' (enabled) — both P2P and WebSeed active
     networks:
       - llmpt_test
     command: >
       python -m pytest
-      tests/e2e/test_docker_p2p.py::test_true_p2p_download
-      tests/e2e/test_docker_p2p.py::test_webseed_disabled
+      tests/e2e/test_docker_p2p.py::test_webseed_with_p2p_download
       --run-integration -v -s --log-cli-level=INFO
-

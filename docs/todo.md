@@ -154,7 +154,7 @@ graph TD
   - ~~16MB 对小文件（<100MB）过大，导致单 piece 包含多个文件，无法精细地按文件优先级下载~~
   - ~~对 100GB+ 的超大模型可能需要更大 piece~~
 
-### 2.5 · seeder.py 重构
+### ~~2.5 · seeder.py 重构~~ 已完全重构
 - **现状**：`seeder.py` 直接操作 `P2PBatchManager` 的内部状态（`manager.sessions`、`manager._lock`、`manager.lt_session`），严重违反封装。
 - **方案**：
   1. 将 `stop_seeding()`、`stop_all_seeding()`、`get_seeding_status()` 的逻辑迁移到 `P2PBatchManager` 内部作为方法
@@ -283,7 +283,7 @@ graph TD
   - 或在 Xet 引擎上层拦截
 - **复杂度**：Xet 是 HuggingFace 的内容寻址存储引擎，其下载路径与 HTTP 完全不同，需要深入分析
 
-### 3.7 - 死代码清理
+### ~~3.7 - 死代码清理~~
 - `TrackerClient.announce()` 方法已标注 unused，libtorrent 内部自动处理 announce，可以移除
 - 如果确认不会使用，清理掉以减少维护负担
 

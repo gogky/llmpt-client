@@ -116,7 +116,13 @@ class SessionContext:
             )
             self.handle = self.lt_session.add_torrent(params)
 
-            # 3. Connect to test peer if configured
+            # 3. Add WebSeed URL if proxy is running
+            webseed_url = self._get_webseed_url()
+            if webseed_url:
+                self.handle.add_url_seed(webseed_url)
+                logger.info(f"[{self.repo_id}] WebSeed added: {webseed_url}")
+
+            # 4. Connect to test peer if configured
             peer_addr = resolve_test_peer()
             if peer_addr:
                 self.test_peer_addr = peer_addr
@@ -259,6 +265,23 @@ class SessionContext:
             if strip_torrent_root(lt_path) == target_norm:
                 return i
                 
+        return None
+
+    def _get_webseed_url(self) -> Optional[str]:
+        """Build the WebSeed URL for this session's repo, if the proxy is running.
+
+        Reads ``webseed_proxy_port`` from the global config set by
+        :func:`llmpt.enable_p2p`.  Returns ``None`` when:
+        - The proxy was not started (port is None).
+        - The import fails (should never happen in normal operation).
+        """
+        try:
+            from . import get_config
+            proxy_port = get_config().get('webseed_proxy_port')
+            if proxy_port:
+                return f"http://127.0.0.1:{proxy_port}/ws/{self.repo_id}/"
+        except Exception:
+            pass
         return None
 
     def map_all_files_for_seeding(self) -> bool:

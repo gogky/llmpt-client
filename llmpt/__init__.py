@@ -40,7 +40,9 @@ _config = {
     'seed_duration': 3600,  # 1 hour
     'timeout': 300,  # 5 minutes
     'port': None,  # None = use default 6881 with auto-fallback; set int to override
+    'hf_token': None,  # HuggingFace token for WebSeed proxy (private/gated repos)
 }
+_webseed_proxy = None  # WebSeedProxy instance (created in enable_p2p)
 
 __version__ = "0.1.0"
 __all__ = [
@@ -94,6 +96,8 @@ def enable_p2p(
     seed_duration: int = 3600,
     timeout: int = 300,
     port: Optional[int] = None,
+    hf_token: Optional[str] = None,
+    webseed: bool = True,
 ) -> None:
     """
     Enable P2P-accelerated downloads for HuggingFace Hub.
@@ -106,6 +110,9 @@ def enable_p2p(
         timeout: P2P download timeout in seconds.
         port: The port to bind libtorrent to. Defaults to HF_P2P_PORT env var,
               or auto-selects from 6881-6999 range.
+        hf_token: HuggingFace token for WebSeed proxy (private/gated repos).
+        webseed: Whether to enable the WebSeed proxy. Defaults to True.
+                 Set to False to disable WebSeed (useful for debugging).
 
     Example:
         >>> from llmpt import enable_p2p
@@ -113,7 +120,7 @@ def enable_p2p(
         >>> from huggingface_hub import snapshot_download
         >>> snapshot_download("gpt2")  # Uses P2P
     """
-    global _patched, _config, _atexit_registered
+    global _patched, _config, _atexit_registered, _webseed_proxy
 
     if not _LIBTORRENT_AVAILABLE:
         logger.warning(
@@ -135,12 +142,30 @@ def enable_p2p(
     _config['auto_seed'] = auto_seed
     _config['seed_duration'] = seed_duration
     _config['timeout'] = timeout
+    _config['hf_token'] = hf_token
+    _config['webseed'] = webseed
     if port is not None:
         _config['port'] = port
     elif os.getenv('HF_P2P_PORT'):
         _config['port'] = int(os.getenv('HF_P2P_PORT'))
 
     _disable_xet_storage(_config)
+
+    # Start WebSeed proxy (if enabled)
+    if webseed:
+        from .webseed_proxy import WebSeedProxy
+        _webseed_proxy = WebSeedProxy(hf_token=hf_token)
+        try:
+            proxy_port = _webseed_proxy.start()
+            _config['webseed_proxy_port'] = proxy_port
+            logger.info(f"WebSeed proxy started on port {proxy_port}")
+        except Exception as e:
+            logger.warning(f"Failed to start WebSeed proxy: {e}. WebSeed disabled.")
+            _webseed_proxy = None
+            _config['webseed_proxy_port'] = None
+    else:
+        _config['webseed_proxy_port'] = None
+        logger.info("WebSeed disabled by user")
 
     # Apply monkey patch
     from .patch import apply_patch
@@ -164,7 +189,7 @@ def disable_p2p() -> None:
         >>> from llmpt import disable_p2p
         >>> disable_p2p()
     """
-    global _patched
+    global _patched, _webseed_proxy
 
     if not _patched:
         logger.info("P2P not enabled")
@@ -174,6 +199,12 @@ def disable_p2p() -> None:
     remove_patch()
 
     _restore_xet_storage(_config)
+
+    # Stop WebSeed proxy
+    if _webseed_proxy is not None:
+        _webseed_proxy.stop()
+        _webseed_proxy = None
+        _config['webseed_proxy_port'] = None
 
     _patched = False
     logger.info("✓ P2P disabled")
@@ -238,12 +269,22 @@ def shutdown() -> None:
         >>> from llmpt import shutdown
         >>> shutdown()
     """
+    global _webseed_proxy
     from .p2p_batch import P2PBatchManager
     try:
         manager = P2PBatchManager()
         manager.shutdown()
     except Exception:
         pass  # Best-effort during interpreter shutdown
+
+    # Stop WebSeed proxy
+    if _webseed_proxy is not None:
+        try:
+            _webseed_proxy.stop()
+        except Exception:
+            pass
+        _webseed_proxy = None
+        _config['webseed_proxy_port'] = None
 
 
 def _cleanup_on_exit():
@@ -262,6 +303,7 @@ def _auto_enable_from_env():
             auto_seed=os.getenv('HF_P2P_AUTO_SEED', '1') == '1',
             seed_duration=int(os.getenv('HF_P2P_SEED_TIME', '3600')),
             timeout=int(os.getenv('HF_P2P_TIMEOUT', '300')),
+            webseed=os.getenv('HF_P2P_WEBSEED', '1') == '1',
         )
 
 

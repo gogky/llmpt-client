@@ -1,0 +1,69 @@
+# Docker Compose for WebSeed E2E tests.
+#
+# This file tests the WebSeed cold-start scenario: NO P2P seeder is present,
+# and the downloader relies entirely on the WebSeed proxy to fetch pieces
+# from the HuggingFace CDN.
+#
+# PREREQUISITE: A torrent for the test repo must already be registered on
+# the tracker. Run the standard P2P test first (docker-compose.test.yml)
+# to seed and register the torrent, or ensure it's pre-registered.
+#
+# Usage:
+#   docker compose -f docker-compose.test-webseed.yml up --build
+#
+version: '3.8'
+
+networks:
+  llmpt_test:
+    driver: bridge
+
+services:
+  # ── Seeder: registers torrent then exits ──────────────────────────────
+  # We need a seeder to register the .torrent file on the tracker so that
+  # the downloader can obtain torrent metadata. However, the seeder is NOT
+  # used as a P2P peer by the downloader (no TEST_SEEDER_PEER is set).
+  seeder:
+    build:
+      context: .
+      dockerfile: tests/e2e/Dockerfile.test
+    container_name: llmpt-webseed-seeder
+    volumes:
+      - .:/app
+    environment:
+      - HF_HOME=/tmp/hf_cache_seeder
+      - ROLE=seeder
+      - TRACKER_URL=http://118.195.159.242
+      - HF_P2P_PORT=6881
+    networks:
+      - llmpt_test
+    command: ["python", "-m", "pytest", "tests/e2e/run_seeder.py", "--run-integration", "-s", "--log-cli-level=INFO"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://118.195.159.242/api/v1/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ── WebSeed Downloader: no P2P peer, pure WebSeed ────────────────────
+  downloader-webseed:
+    build:
+      context: .
+      dockerfile: tests/e2e/Dockerfile.test
+    container_name: llmpt-downloader-webseed
+    depends_on:
+      seeder:
+        condition: service_started
+    volumes:
+      - .:/app
+    environment:
+      - HF_HOME=/tmp/hf_cache_webseed
+      - ROLE=downloader
+      - TRACKER_URL=http://118.195.159.242
+      # NOTE: TEST_SEEDER_PEER is intentionally NOT set.
+      # The downloader has NO direct P2P peer and relies entirely on WebSeed.
+      # HF_P2P_WEBSEED defaults to '1' (enabled).
+    networks:
+      - llmpt_test
+    command: >
+      python -m pytest
+      tests/e2e/test_docker_p2p.py::test_webseed_only_download
+      --run-integration -v -s --log-cli-level=INFO
