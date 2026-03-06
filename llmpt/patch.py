@@ -13,6 +13,7 @@ logger = logging.getLogger('llmpt.patch')
 # Store original functions
 _original_hf_hub_download = None
 _original_http_get = None
+_original_snapshot_download = None
 
 # Patching configuration (set by apply_patch)
 _config = {}
@@ -159,6 +160,45 @@ def _patched_http_get(url: str, temp_file, **kwargs):
     return _original_http_get(url, temp_file, **{**kwargs, 'resume_size': 0})
 
 
+def _patched_snapshot_download(*args, **kwargs):
+    """Patched snapshot_download that notifies the daemon after completion.
+
+    After the original snapshot_download finishes (all files downloaded),
+    we notify the seeding daemon so it can create a .torrent (if needed)
+    and start seeding the model for future downloaders.
+    """
+    # Reset stats to track which files went through HTTP vs P2P in this batch
+    reset_download_stats()
+
+    result = _original_snapshot_download(*args, **kwargs)
+
+    # After download completes, notify the daemon
+    try:
+        repo_id = args[0] if args else kwargs.get('repo_id')
+        revision = kwargs.get('revision', 'main')
+
+        if not repo_id:
+            return result
+
+        # Resolve revision to commit hash for the daemon
+        from .utils import resolve_commit_hash
+        try:
+            resolved = resolve_commit_hash(repo_id, revision)
+        except Exception:
+            resolved = revision
+
+        # Notify the daemon (fire-and-forget — safe even if daemon isn't running)
+        from .ipc import notify_daemon
+        notify_daemon("seed", repo_id=repo_id, revision=resolved)
+        logger.debug(f"[P2P] Notified daemon to seed {repo_id}@{resolved[:8]}...")
+
+    except Exception as e:
+        # Never let notification failures break the download flow
+        logger.debug(f"[P2P] Post-download daemon notification failed: {e}")
+
+    return result
+
+
 def apply_patch(config: dict) -> None:
     """
     Apply monkey patch to huggingface_hub.
@@ -166,7 +206,7 @@ def apply_patch(config: dict) -> None:
     Args:
         config: Configuration dictionary containing tracker_url, etc.
     """
-    global _original_hf_hub_download, _original_http_get, _config
+    global _original_hf_hub_download, _original_http_get, _original_snapshot_download, _config
 
     if _original_hf_hub_download is not None:
         logger.debug("Patch is already applied. Skipping.")
@@ -183,6 +223,7 @@ def apply_patch(config: dict) -> None:
     _config = config
     _original_hf_hub_download = huggingface_hub.hf_hub_download
     _original_http_get = file_download.http_get
+    _original_snapshot_download = _snapshot_download.snapshot_download
 
     # Apply patches
     # NOTE: This top-level assignment has NO real effect on newer huggingface_hub versions.
@@ -194,12 +235,16 @@ def apply_patch(config: dict) -> None:
     _snapshot_download.hf_hub_download = _patched_hf_hub_download  # snapshot_download() internals
     file_download.http_get = _patched_http_get
 
+    # Patch snapshot_download to notify daemon after download completes
+    huggingface_hub.snapshot_download = _patched_snapshot_download
+    _snapshot_download.snapshot_download = _patched_snapshot_download
+
     logger.debug("Monkey patch applied successfully")
 
 
 def remove_patch() -> None:
     """Remove monkey patch and restore original functions."""
-    global _original_hf_hub_download, _original_http_get, _config
+    global _original_hf_hub_download, _original_http_get, _original_snapshot_download, _config
 
     if _original_hf_hub_download is None:
         return
@@ -214,9 +259,15 @@ def remove_patch() -> None:
         _snapshot_download.hf_hub_download = _original_hf_hub_download
         file_download.http_get = _original_http_get
 
+        # Restore snapshot_download
+        if _original_snapshot_download:
+            huggingface_hub.snapshot_download = _original_snapshot_download
+            _snapshot_download.snapshot_download = _original_snapshot_download
+
         # Reset stored state
         _original_hf_hub_download = None
         _original_http_get = None
+        _original_snapshot_download = None
         _config = {}
 
         logger.debug("Monkey patch removed successfully")

@@ -106,6 +106,22 @@ Examples:
         help='repo_id@revision to stop (e.g. meta-llama/Llama-2-7b@main). Omit to stop all.'
     )
 
+    # Daemon command
+    daemon_parser = subparsers.add_parser(
+        'daemon',
+        help='Manage the background seeding daemon'
+    )
+    daemon_parser.add_argument(
+        'daemon_action',
+        choices=['start', 'stop', 'status', 'restart'],
+        help='Daemon action: start, stop, status, or restart'
+    )
+    daemon_parser.add_argument(
+        '--foreground',
+        action='store_true',
+        help='Run daemon in the foreground (for debugging)'
+    )
+
     args = parser.parse_args()
 
     # Setup logging
@@ -133,6 +149,8 @@ Examples:
         cmd_status(args)
     elif args.command == 'stop':
         cmd_stop(args)
+    elif args.command == 'daemon':
+        cmd_daemon(args)
     else:
         parser.print_help()
         sys.exit(1)
@@ -289,6 +307,84 @@ def cmd_stop(args):
     else:
         count = stop_all_seeding()
         print(f"✓ Stopped all seeding ({count} tasks)")
+
+
+def cmd_daemon(args):
+    """Execute daemon command."""
+    from llmpt.daemon import start_daemon, stop_daemon, is_daemon_running, LOG_FILE
+    from llmpt.ipc import query_daemon
+    from llmpt.utils import format_bytes
+
+    tracker_url = args.tracker or 'http://localhost:8080'
+
+    if args.daemon_action == 'start':
+        existing = is_daemon_running()
+        if existing:
+            print(f"Daemon already running (PID: {existing})")
+            return
+
+        print("Starting daemon...")
+        pid = start_daemon(
+            tracker_url=tracker_url,
+            foreground=args.foreground,
+        )
+        if pid:
+            print(f"✓ Daemon started (PID: {pid})")
+            print(f"  Tracker: {tracker_url}")
+            print(f"  Logs: {LOG_FILE}")
+        else:
+            print("Error: Failed to start daemon")
+            sys.exit(1)
+
+    elif args.daemon_action == 'stop':
+        if stop_daemon():
+            print("✓ Daemon stopped")
+        else:
+            print("Daemon is not running")
+
+    elif args.daemon_action == 'restart':
+        stop_daemon()
+        import time
+        time.sleep(0.5)
+        pid = start_daemon(tracker_url=tracker_url)
+        if pid:
+            print(f"✓ Daemon restarted (PID: {pid})")
+        else:
+            print("Error: Failed to restart daemon")
+            sys.exit(1)
+
+    elif args.daemon_action == 'status':
+        pid = is_daemon_running()
+        if not pid:
+            print("Daemon is not running")
+            print("  Start with: llmpt-cli daemon start")
+            return
+
+        # Query detailed status via IPC
+        response = query_daemon("status")
+        if not response:
+            print(f"Daemon running (PID: {pid}) but not responding to IPC")
+            return
+
+        print(f"llmptd (PID: {pid}) — running")
+        sessions = response.get('sessions', {})
+        if not sessions:
+            print("  No active seeding tasks")
+            return
+
+        print(f"\nSeeding {len(sessions)} model(s):\n")
+        for repo_key, info in sessions.items():
+            state = info.get('state', '?')
+            uploaded = info.get('uploaded', 0)
+            peers = info.get('peers', 0)
+            rate = info.get('upload_rate', 0)
+            progress = info.get('progress', 0)
+            print(
+                f"  {repo_key:<45} "
+                f"↑ {format_bytes(uploaded):>8}  │ "
+                f"{peers} peers │ "
+                f"{format_bytes(rate)}/s"
+            )
 
 
 if __name__ == '__main__':

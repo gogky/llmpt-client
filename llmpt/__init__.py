@@ -173,6 +173,26 @@ def enable_p2p(
 
     _patched = True
 
+    # Auto-start the seeding daemon if auto_seed is enabled.
+    # The daemon runs as an independent background process that survives
+    # the current HF process exit, ensuring continuous seeding.
+    if auto_seed:
+        try:
+            from .daemon import is_daemon_running, start_daemon
+            if not is_daemon_running():
+                daemon_pid = start_daemon(
+                    tracker_url=_config['tracker_url'],
+                )
+                if daemon_pid:
+                    logger.info(f"Seeding daemon auto-started (PID: {daemon_pid})")
+                else:
+                    logger.debug("Could not auto-start seeding daemon")
+            else:
+                logger.debug("Seeding daemon already running")
+        except Exception as e:
+            # Non-fatal: daemon auto-start failure should never break downloads
+            logger.debug(f"Seeding daemon auto-start skipped: {e}")
+
     # Register atexit handler (once) so process exit always cleans up
     if not _atexit_registered:
         atexit.register(_cleanup_on_exit)
