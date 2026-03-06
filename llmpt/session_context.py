@@ -224,8 +224,9 @@ class SessionContext:
         # Block until the background thread signals completion, but also check
         # if the monitor thread has exited (is_valid becomes False) so we can
         # fail fast instead of waiting the full timeout.
+        # timeout=0 means "no timeout" (WebSeed guarantees progress).
         logger.debug(f"[{self.repo_id}] Blocking waiting for P2P download of {filename}...")
-        deadline = time.time() + self.timeout
+        deadline = time.time() + self.timeout if self.timeout > 0 else float('inf')
         
         # Use huggingface_hub's tqdm to integrate with native HF progress bars
         try:

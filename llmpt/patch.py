@@ -130,13 +130,23 @@ def _patched_http_get(url: str, temp_file, **kwargs):
             logger.info(f"[P2P] Intercepted HTTP request for {repo_id}/{filename} (rev: {revision})")
 
             manager = P2PBatchManager()
+
+            # With WebSeed enabled, download speed >= HTTP (WebSeed is a
+            # guaranteed fallback source inside libtorrent). A fixed timeout
+            # would only cause unnecessary HTTP fallbacks, so we disable it.
+            # Without WebSeed (pure P2P), the timeout acts as a safety net.
+            if config.get('webseed_proxy_port'):
+                effective_timeout = 0  # 0 = no timeout
+            else:
+                effective_timeout = config.get('timeout', 300)
+
             success = manager.register_request(
                 repo_id=repo_id,
                 revision=revision,
                 filename=filename,
                 temp_file_path=temp_file.name,
                 tracker_client=tracker,
-                timeout=config.get('timeout', 300)
+                timeout=effective_timeout
             )
 
             if success:
