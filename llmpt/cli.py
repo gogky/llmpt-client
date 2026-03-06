@@ -62,6 +62,12 @@ Examples:
         action='store_true',
         help='Do not seed after download'
     )
+    download_parser.add_argument(
+        '--repo-type',
+        default='model',
+        choices=['model', 'dataset', 'space'],
+        help='Repository type (model, dataset, or space)'
+    )
 
     # Seed command
     seed_parser = subparsers.add_parser(
@@ -182,7 +188,8 @@ def cmd_download(args):
     # Download
     path = snapshot_download(
         args.repo_id,
-        local_dir=args.local_dir
+        local_dir=args.local_dir,
+        repo_type=args.repo_type,
     )
 
     print(f"✓ Downloaded to: {path}")

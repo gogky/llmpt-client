@@ -47,8 +47,8 @@ HF_HUB_CACHE = _resolve_hf_hub_cache()
 _COMMIT_HASH_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
-def _parse_repo_id(dirname: str) -> Optional[str]:
-    """Convert a HuggingFace cache directory name to a repo_id.
+def _parse_repo_id(dirname: str) -> Optional[Tuple[str, str]]:
+    """Convert a HuggingFace cache directory name to (repo_id, repo_type).
 
     Examples:
         ``models--gpt2``                      → ``gpt2``
@@ -56,8 +56,8 @@ def _parse_repo_id(dirname: str) -> Optional[str]:
         ``datasets--squad``                   → ``squad``
 
     Returns:
-        The repository ID, or ``None`` if the directory name doesn't follow
-        the expected pattern.
+        ``(repo_id, repo_type)`` where repo_type is one of ``model``/``dataset``/``space``,
+        or ``None`` if the directory name doesn't follow the expected pattern.
     """
     # Expected format: {type}--{org}--{name} or {type}--{name}
     parts = dirname.split("--", 1)
@@ -65,14 +65,15 @@ def _parse_repo_id(dirname: str) -> Optional[str]:
         return None
 
     repo_type_prefix = parts[0]  # e.g. "models", "datasets", "spaces"
-    if repo_type_prefix not in ("models", "datasets", "spaces"):
+    type_map = {"models": "model", "datasets": "dataset", "spaces": "space"}
+    if repo_type_prefix not in type_map:
         return None
 
     # The remaining part uses "--" as separator for org/name
     # e.g. "meta-llama--Llama-2-7b" → "meta-llama/Llama-2-7b"
     # But "gpt2" stays as "gpt2"
     repo_name = parts[1].replace("--", "/", 1)
-    return repo_name
+    return repo_name, type_map[repo_type_prefix]
 
 
 def _is_snapshot_complete(snapshot_dir: Path) -> bool:
@@ -113,30 +114,31 @@ def _is_snapshot_complete(snapshot_dir: Path) -> bool:
 
 def scan_hf_cache(
     cache_dir: Optional[str] = None,
-) -> List[Tuple[str, str]]:
-    """Scan the HuggingFace cache and return seedable (repo_id, revision) pairs.
+) -> List[Tuple[str, str, str]]:
+    """Scan the HuggingFace cache and return seedable (repo_id, revision, repo_type) tuples.
 
     Args:
         cache_dir: Path to the HF hub cache directory.  Defaults to
                    ``~/.cache/huggingface/hub`` (or ``$HF_HOME``).
 
     Returns:
-        List of ``(repo_id, commit_hash)`` tuples for all complete snapshots.
+        List of ``(repo_id, commit_hash, repo_type)`` tuples for all complete snapshots.
     """
     hub_dir = Path(cache_dir or HF_HUB_CACHE)
     if not hub_dir.exists():
         logger.info(f"HF cache directory not found: {hub_dir}")
         return []
 
-    seedable: List[Tuple[str, str]] = []
+    seedable: List[Tuple[str, str, str]] = []
 
     for model_dir in sorted(hub_dir.iterdir()):
         if not model_dir.is_dir():
             continue
 
-        repo_id = _parse_repo_id(model_dir.name)
-        if not repo_id:
+        parsed = _parse_repo_id(model_dir.name)
+        if not parsed:
             continue
+        repo_id, repo_type = parsed
 
         snapshots_dir = model_dir / "snapshots"
         if not snapshots_dir.exists() or not snapshots_dir.is_dir():
@@ -154,7 +156,7 @@ def scan_hf_cache(
                 continue
 
             if _is_snapshot_complete(snapshot):
-                seedable.append((repo_id, snapshot.name))
+                seedable.append((repo_id, snapshot.name, repo_type))
                 logger.debug(f"Seedable: {repo_id}@{snapshot.name[:8]}...")
             else:
                 logger.debug(

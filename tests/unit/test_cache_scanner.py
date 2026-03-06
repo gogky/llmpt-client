@@ -17,16 +17,16 @@ class TestParseRepoId:
     """Tests for _parse_repo_id()."""
 
     def test_simple_model(self):
-        assert _parse_repo_id("models--gpt2") == "gpt2"
+        assert _parse_repo_id("models--gpt2") == ("gpt2", "model")
 
     def test_org_model(self):
-        assert _parse_repo_id("models--meta-llama--Llama-2-7b") == "meta-llama/Llama-2-7b"
+        assert _parse_repo_id("models--meta-llama--Llama-2-7b") == ("meta-llama/Llama-2-7b", "model")
 
     def test_dataset(self):
-        assert _parse_repo_id("datasets--squad") == "squad"
+        assert _parse_repo_id("datasets--squad") == ("squad", "dataset")
 
     def test_space(self):
-        assert _parse_repo_id("spaces--some-user--my-space") == "some-user/my-space"
+        assert _parse_repo_id("spaces--some-user--my-space") == ("some-user/my-space", "space")
 
     def test_invalid_prefix(self):
         assert _parse_repo_id("unknown--gpt2") is None
@@ -39,7 +39,7 @@ class TestParseRepoId:
 
     def test_hyphenated_names(self):
         """Hyphens within org/model names should be preserved."""
-        assert _parse_repo_id("models--my-org--my-model-v2") == "my-org/my-model-v2"
+        assert _parse_repo_id("models--my-org--my-model-v2") == ("my-org/my-model-v2", "model")
 
 
 class TestIsSnapshotComplete:
@@ -135,7 +135,7 @@ class TestScanHfCache:
             "models--gpt2": {commit: ["config.json", "model.bin"]}
         })
         result = scan_hf_cache(str(tmp_path))
-        assert result == [("gpt2", commit)]
+        assert result == [("gpt2", commit, "model")]
 
     def test_multiple_models(self, tmp_path):
         commit1 = "a" * 40
@@ -146,8 +146,8 @@ class TestScanHfCache:
         })
         result = scan_hf_cache(str(tmp_path))
         assert len(result) == 2
-        assert ("gpt2", commit1) in result
-        assert ("org/model", commit2) in result
+        assert ("gpt2", commit1, "model") in result
+        assert ("org/model", commit2, "model") in result
 
     def test_skips_non_commit_hash_dirs(self, tmp_path):
         commit = "a" * 40

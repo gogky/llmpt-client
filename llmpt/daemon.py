@@ -230,9 +230,9 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
     manager = P2PBatchManager()
 
     # Track what we're already seeding to avoid duplicate work
-    seeding_set: Set[Tuple[str, str]] = set()
+    seeding_set: Set[Tuple[str, str, str]] = set()
     # Track what we've already attempted (to avoid re-processing failures)
-    attempted_set: Set[Tuple[str, str]] = set()
+    attempted_set: Set[Tuple[str, str, str]] = set()
 
     running = True
 
@@ -251,12 +251,13 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
         if action == "seed":
             repo_id = msg.get("repo_id")
             revision = msg.get("revision")
+            repo_type = msg.get("repo_type", "model")
             if repo_id and revision:
-                key = (repo_id, revision)
+                key = (repo_id, revision, repo_type)
                 if key not in seeding_set:
                     logger.info(f"IPC: seed request for {repo_id}@{revision[:8]}...")
                     _process_seedable(
-                        repo_id, revision, tracker_client, manager,
+                        repo_id, revision, repo_type, tracker_client, manager,
                         seeding_set, attempted_set,
                     )
                 return {"status": "ok"}
@@ -334,22 +335,22 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
 def _scan_and_seed(
     tracker_client,
     manager,
-    seeding_set: Set[Tuple[str, str]],
-    attempted_set: Set[Tuple[str, str]],
+    seeding_set: Set[Tuple[str, str, str]],
+    attempted_set: Set[Tuple[str, str, str]],
 ) -> None:
-    """Scan HF cache and start seeding any new models found."""
+    """Scan HF cache and start seeding any new repositories found."""
     from .cache_scanner import scan_hf_cache
 
     seedable = scan_hf_cache()
     new_count = 0
 
-    for repo_id, revision in seedable:
-        key = (repo_id, revision)
+    for repo_id, revision, repo_type in seedable:
+        key = (repo_id, revision, repo_type)
         if key in seeding_set or key in attempted_set:
             continue
 
         _process_seedable(
-            repo_id, revision, tracker_client, manager,
+            repo_id, revision, repo_type, tracker_client, manager,
             seeding_set, attempted_set,
         )
         new_count += 1
@@ -361,13 +362,14 @@ def _scan_and_seed(
 def _process_seedable(
     repo_id: str,
     revision: str,
+    repo_type: str,
     tracker_client,
     manager,
-    seeding_set: Set[Tuple[str, str]],
-    attempted_set: Set[Tuple[str, str]],
+    seeding_set: Set[Tuple[str, str, str]],
+    attempted_set: Set[Tuple[str, str, str]],
 ) -> None:
-    """Process a single seedable model: create torrent if needed, start seeding."""
-    key = (repo_id, revision)
+    """Process a single seedable repo: create torrent if needed, start seeding."""
+    key = (repo_id, revision, repo_type)
     attempted_set.add(key)
 
     logger.info(f"[{repo_id}@{revision[:8]}] Processing seedable model...")
@@ -388,7 +390,7 @@ def _process_seedable(
             torrent_info = create_and_register_torrent(
                 repo_id=repo_id,
                 revision=revision,
-                repo_type="model",
+                repo_type=repo_type,
                 name=repo_id,
                 tracker_client=tracker_client,
             )

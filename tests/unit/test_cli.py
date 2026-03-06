@@ -42,6 +42,15 @@ class TestMainDispatch:
         assert args.tracker == 'http://t.com'
         assert args.local_dir == '/tmp/out'
         assert args.no_seed is True
+        assert args.repo_type == 'model'
+
+
+    @patch('llmpt.cli.cmd_download')
+    def test_download_with_repo_type(self, mock_cmd):
+        with patch('sys.argv', ['llmpt-cli', 'download', 'fka/prompts.chat', '--repo-type', 'dataset']):
+            main()
+        args = mock_cmd.call_args[0][0]
+        assert args.repo_type == 'dataset'
 
     @patch('llmpt.cli.cmd_seed')
     def test_seed_command(self, mock_cmd):
@@ -98,6 +107,7 @@ class TestCmdDownload:
         args.no_seed = False
         args.repo_id = "gpt2"
         args.local_dir = None
+        args.repo_type = "dataset"
 
         with patch('huggingface_hub.snapshot_download', mock_download), \
              patch('llmpt.enable_p2p', mock_enable), \
@@ -108,7 +118,7 @@ class TestCmdDownload:
             tracker_url="http://tracker.example.com",
             auto_seed=True,
         )
-        mock_download.assert_called_once_with("gpt2", local_dir=None)
+        mock_download.assert_called_once_with("gpt2", local_dir=None, repo_type="dataset")
 
     @patch('llmpt.cli.snapshot_download', create=True)
     @patch('llmpt.cli.enable_p2p', create=True)
@@ -119,6 +129,7 @@ class TestCmdDownload:
         args.no_seed = True
         args.repo_id = "gpt2"
         args.local_dir = "/tmp/out"
+        args.repo_type = "model"
 
         with patch('huggingface_hub.snapshot_download', mock_download):
             with patch('llmpt.enable_p2p', mock_enable):
