@@ -226,15 +226,68 @@ class SessionContext:
         # fail fast instead of waiting the full timeout.
         logger.debug(f"[{self.repo_id}] Blocking waiting for P2P download of {filename}...")
         deadline = time.time() + self.timeout
-        while not event.is_set():
-            if not self.is_valid:
-                logger.warning(f"[{self.repo_id}] P2P download of {filename} ABORTED (monitor stopped).")
-                return False
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                break
-            event.wait(timeout=min(1.0, remaining))
         
+        # Use huggingface_hub's tqdm to integrate with native HF progress bars
+        try:
+            from huggingface_hub.utils import tqdm as hf_tqdm, are_progress_bars_disabled
+            disable_pbar = are_progress_bars_disabled()
+        except ImportError:
+            # Fallback if huggingface_hub is not available (shouldn't happen in our context)
+            hf_tqdm = None
+            disable_pbar = True
+
+        pbar = None
+        last_progress = 0
+        total_size = 0
+        file_index = None
+
+        try:
+            while not event.is_set():
+                if not self.is_valid:
+                    logger.warning(f"[{self.repo_id}] P2P download of {filename} ABORTED (monitor stopped).")
+                    return False
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                event.wait(timeout=min(1.0, remaining))
+                
+                # Fetch metadata and file properties dynamically if they arrive
+                if file_index is None and self.torrent_info_obj:
+                    file_index = self._find_file_index(filename)
+                    if file_index is not None:
+                        total_size = self.torrent_info_obj.files().file_size(file_index)
+                
+                # If we have a valid index and handle, we can update the progress bar
+                if file_index is not None and self.handle and self.handle.is_valid():
+                    if pbar is None and not disable_pbar and hf_tqdm:
+                        pbar = hf_tqdm(
+                            total=total_size,
+                            unit='B',
+                            unit_scale=True,
+                            desc=f"{filename} (P2P)"
+                        )
+                    
+                    try:
+                        progresses = self.handle.file_progress()
+                        current_progress = progresses[file_index]
+                        if current_progress > last_progress:
+                            # Avoid over-updating standard totals
+                            if pbar:
+                                pbar.update(current_progress - last_progress)
+                            last_progress = current_progress
+                        
+                        if pbar:
+                            s = self.handle.status()
+                            pbar.set_postfix({"peers": s.num_peers, "dl_speed": f"{s.download_rate / 1024:.1f}KB/s"})
+                    except Exception:
+                        pass
+
+        finally:
+            if pbar is not None:
+                if event.is_set() and last_progress < total_size:
+                    pbar.update(total_size - last_progress)
+                pbar.close()
+
         if event.is_set():
             logger.info(f"[{self.repo_id}] P2P download of {filename} SUCCESS.")
             return True

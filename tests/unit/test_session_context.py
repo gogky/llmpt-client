@@ -355,7 +355,7 @@ class TestInitTorrent:
 
         assert result is True
         mock_dns.assert_called_once_with('seeder-host')
-        mock_handle.connect_peer.assert_called_once_with(('10.0.0.5', 6881), 0)
+        assert ctx.test_peer_addr == ('10.0.0.5', 6881)
 
     def test_test_seeder_peer_no_port(self, make_ctx, mock_lt):
         """When TEST_SEEDER_PEER has no port, should default to 6881."""
@@ -372,7 +372,7 @@ class TestInitTorrent:
 
         assert result is True
         mock_dns.assert_called_once_with('seeder-host')
-        mock_handle.connect_peer.assert_called_once_with(('10.0.0.5', 6881), 0)
+        assert ctx.test_peer_addr == ('10.0.0.5', 6881)
 
     def test_test_seeder_peer_ipv6_bracket(self, make_ctx, mock_lt):
         """When TEST_SEEDER_PEER uses [IPv6]:port notation, should parse correctly."""
@@ -389,7 +389,7 @@ class TestInitTorrent:
 
         assert result is True
         mock_dns.assert_called_once_with('::1')
-        mock_handle.connect_peer.assert_called_once_with(('::1', 7000), 0)
+        assert ctx.test_peer_addr == ('::1', 7000)
 
 
 

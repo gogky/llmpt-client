@@ -118,7 +118,7 @@ def _log_diagnostics(ctx: "SessionContext") -> None:
             s = handle.status()
             state_str = _STATE_NAMES[s.state] if s.state < len(_STATE_NAMES) else str(s.state)
             total_pieces = ti.num_pieces() if ti else s.num_pieces
-            logger.info(
+            logger.debug(
                 f"[{ctx.repo_id}] STATUS: state={state_str} "
                 f"progress={s.progress * 100:.1f}% "
                 f"peers={s.num_peers} seeds={s.num_seeds} "
