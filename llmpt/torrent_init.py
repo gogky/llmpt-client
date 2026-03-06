@@ -77,15 +77,21 @@ def build_add_torrent_params(
     if session_mode == 'full_seed':
         params.flags |= lt.torrent_flags.seed_mode
     else:
-        _load_fastresume(params, info, save_path, fastresume_path, repo_id)
+        params = _load_fastresume(params, info, save_path, fastresume_path, repo_id)
 
     return params, info
 
 
-def _load_fastresume(params, info, save_path: str, path: str, repo_id: str) -> None:
-    """Attempt to load fastresume data into *params* (best-effort)."""
+def _load_fastresume(params, info, save_path: str, path: str, repo_id: str):
+    """Attempt to load fastresume data into *params* (best-effort).
+
+    Returns:
+        The ``add_torrent_params`` object to use — either the original
+        *params* (mutated in-place) or a brand-new object produced by
+        ``lt.read_resume_data()``.
+    """
     if not os.path.exists(path):
-        return
+        return params
 
     try:
         with open(path, "rb") as f:
@@ -103,8 +109,11 @@ def _load_fastresume(params, info, save_path: str, path: str, repo_id: str) -> N
             params.save_path = save_path
             params.ti = info
             params.flags |= lt.torrent_flags.paused
+            logger.info(f"[{repo_id}] Loaded fastresume data from {path}")
     except Exception as e:
         logger.warning(f"[{repo_id}] Failed to load resume data: {e}")
+
+    return params
 
 
 def resolve_test_peer(env_var: str = 'TEST_SEEDER_PEER') -> Optional[tuple]:
