@@ -65,7 +65,7 @@ def test_register_request_success(mock_lt_all_modules):
 
         assert success is True
         mock_download.assert_called_once_with("model.bin", "/tmp/fake")
-        assert ("demo", "main") in manager.sessions
+        assert ("model", "demo", "main") in manager.sessions
 
 
 def test_session_context_init_torrent(mock_lt_all_modules):
@@ -98,7 +98,7 @@ def test_session_context_init_torrent(mock_lt_all_modules):
 
     mock_lt_session.add_torrent.return_value = mock_handle
 
-    ctx = SessionContext("demo", "main", tracker, mock_lt_session, session_mode='on_demand', timeout=10)
+    ctx = SessionContext('demo', 'main', tracker, mock_lt_session, 'on_demand', 10, repo_type='model')
 
     # Mock the monitor loop to prevent real background thread work,
     # and mock the three-layer torrent resolver to return fake data

@@ -26,7 +26,7 @@ class TestAcquireTorrentData:
         tracker = MagicMock()
         result = acquire_torrent_data("r/1", "abc", tracker, None)
         assert result == b"cached"
-        mock_resolve.assert_called_once_with("r/1", "abc", tracker)
+        mock_resolve.assert_called_once_with("r/1", "abc", tracker, repo_type="model")
 
     @patch('llmpt.torrent_cache.resolve_torrent_data', return_value=None)
     def test_returns_none_when_unavailable(self, mock_resolve):

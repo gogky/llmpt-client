@@ -55,6 +55,8 @@ def create_torrent(
     repo_id: str,
     revision: str,
     tracker_client: Any,
+    *,
+    repo_type: str = "model",
 ) -> Optional[dict]:
     """
     Create a torrent file for an entire HuggingFace repository snapshot.
@@ -86,7 +88,7 @@ def create_torrent(
         # If we or another seeder already generated a torrent for this repo@revision,
         # reuse it. This skips the expensive set_piece_hashes() call which can take
         # 30+ minutes for large models on HDD.
-        cached_or_downloaded = resolve_torrent_data(repo_id, revision, tracker_client)
+        cached_or_downloaded = resolve_torrent_data(repo_id, revision, tracker_client, repo_type=repo_type)
         if cached_or_downloaded:
             logger.info(f"Using existing torrent for {repo_id}@{revision} (from cache or tracker)")
             result = _torrent_data_to_result(cached_or_downloaded, repo_id)
@@ -109,6 +111,7 @@ def create_torrent(
         snapshot_path = snapshot_download(
             repo_id=repo_id, 
             revision=revision, 
+            repo_type=repo_type if repo_type != "model" else None,
             local_files_only=True,
         )
         file_path = Path(snapshot_path)
@@ -173,7 +176,7 @@ def create_torrent(
         torrent_data = lt.bencode(torrent)
 
         # Cache the generated torrent for future use
-        save_torrent_to_cache(repo_id, revision, torrent_data)
+        save_torrent_to_cache(repo_id, revision, torrent_data, repo_type=repo_type)
 
         # Get info hash
         info = lt.torrent_info(torrent)
@@ -233,6 +236,7 @@ def create_and_register_torrent(
         repo_id=repo_id,
         revision=revision,
         tracker_client=tracker_client,
+        repo_type=repo_type,
     )
 
     if not torrent_info:

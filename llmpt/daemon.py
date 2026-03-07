@@ -209,7 +209,7 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
         logger.error("libtorrent not available, daemon cannot start")
         return
 
-    from .cache_scanner import scan_hf_cache
+    from llmpt.cache_scanner import scan_hf_cache
     from .ipc import IPCServer
     from .p2p_batch import P2PBatchManager
     from .tracker_client import TrackerClient
@@ -230,9 +230,9 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
     manager = P2PBatchManager()
 
     # Track what we're already seeding to avoid duplicate work
-    seeding_set: Set[Tuple[str, str]] = set()
+    seeding_set: Set[Tuple[str, str, str]] = set()
     # Track what we've already attempted (to avoid re-processing failures)
-    attempted_set: Set[Tuple[str, str]] = set()
+    attempted_set: Set[Tuple[str, str, str]] = set()
 
     running = True
 
@@ -251,13 +251,14 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
         if action == "seed":
             repo_id = msg.get("repo_id")
             revision = msg.get("revision")
+            repo_type = msg.get("repo_type", "model")
             if repo_id and revision:
-                key = (repo_id, revision)
+                key = (repo_type, repo_id, revision)
                 if key not in seeding_set:
                     logger.info(f"IPC: seed request for {repo_id}@{revision[:8]}...")
                     _process_seedable(
                         repo_id, revision, tracker_client, manager,
-                        seeding_set, attempted_set,
+                        seeding_set, attempted_set, repo_type=repo_type,
                     )
                 return {"status": "ok"}
 
@@ -281,8 +282,10 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
             }
 
         elif action == "scan":
-            # Clear attempted set to allow re-scanning
+            nonlocal last_scan_time
+            # Clear attempted set and reset scan timer to trigger immediate rescan
             attempted_set.clear()
+            last_scan_time = 0.0
             return {"status": "ok", "message": "scan triggered"}
 
         elif action == "ping":
@@ -334,23 +337,23 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
 def _scan_and_seed(
     tracker_client,
     manager,
-    seeding_set: Set[Tuple[str, str]],
-    attempted_set: Set[Tuple[str, str]],
+    seeding_set: Set[Tuple[str, str, str]],
+    attempted_set: Set[Tuple[str, str, str]],
 ) -> None:
     """Scan HF cache and start seeding any new models found."""
-    from .cache_scanner import scan_hf_cache
+    from llmpt.cache_scanner import scan_hf_cache
 
     seedable = scan_hf_cache()
     new_count = 0
 
-    for repo_id, revision in seedable:
-        key = (repo_id, revision)
+    for repo_type, repo_id, revision in seedable:
+        key = (repo_type, repo_id, revision)
         if key in seeding_set or key in attempted_set:
             continue
 
         _process_seedable(
             repo_id, revision, tracker_client, manager,
-            seeding_set, attempted_set,
+            seeding_set, attempted_set, repo_type=repo_type,
         )
         new_count += 1
 
@@ -363,11 +366,13 @@ def _process_seedable(
     revision: str,
     tracker_client,
     manager,
-    seeding_set: Set[Tuple[str, str]],
-    attempted_set: Set[Tuple[str, str]],
+    seeding_set: Set[Tuple[str, str, str]],
+    attempted_set: Set[Tuple[str, str, str]],
+    *,
+    repo_type: str = "model"
 ) -> None:
     """Process a single seedable model: create torrent if needed, start seeding."""
-    key = (repo_id, revision)
+    key = (repo_type, repo_id, revision)
     attempted_set.add(key)
 
     logger.info(f"[{repo_id}@{revision[:8]}] Processing seedable model...")
@@ -378,7 +383,7 @@ def _process_seedable(
 
         # Try to get existing torrent (local cache or tracker)
         logger.info(f"[{repo_id}] Checking for existing torrent...")
-        torrent_data = resolve_torrent_data(repo_id, revision, tracker_client)
+        torrent_data = resolve_torrent_data(repo_id, revision, tracker_client, repo_type=repo_type)
 
         if not torrent_data:
             # No torrent exists anywhere — we need to create it
@@ -388,7 +393,7 @@ def _process_seedable(
             torrent_info = create_and_register_torrent(
                 repo_id=repo_id,
                 revision=revision,
-                repo_type="model",
+                repo_type=repo_type,
                 name=repo_id,
                 tracker_client=tracker_client,
             )
@@ -409,6 +414,7 @@ def _process_seedable(
         success = manager.register_seeding_task(
             repo_id=repo_id,
             revision=revision,
+            repo_type=repo_type,
             tracker_client=tracker_client,
             torrent_data=torrent_data,
         )

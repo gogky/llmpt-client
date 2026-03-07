@@ -21,6 +21,8 @@ def acquire_torrent_data(
     revision: str,
     tracker_client: object,
     supplied_data: Optional[bytes],
+    *,
+    repo_type: str = "model",
 ) -> Optional[bytes]:
     """Resolve torrent data from supplied bytes or three-layer cache.
 
@@ -42,7 +44,7 @@ def acquire_torrent_data(
         return supplied_data
 
     from .torrent_cache import resolve_torrent_data
-    return resolve_torrent_data(repo_id, revision, tracker_client)
+    return resolve_torrent_data(repo_id, revision, tracker_client, repo_type=repo_type)
 
 
 def build_add_torrent_params(

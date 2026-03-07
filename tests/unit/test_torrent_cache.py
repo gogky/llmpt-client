@@ -27,7 +27,7 @@ class TestLoadCachedTorrent:
         from llmpt.torrent_cache import load_cached_torrent
 
         # Create a fake cached torrent file
-        cache_file = tmp_path / "test_repo_abc123.torrent"
+        cache_file = tmp_path / "model_test_repo_abc123.torrent"
         cache_file.write_bytes(b"torrent_data_bytes")
 
         with patch('llmpt.torrent_cache.TORRENT_CACHE_DIR', str(tmp_path)):
@@ -39,7 +39,7 @@ class TestLoadCachedTorrent:
         """An empty cached file is treated as a cache miss and cleaned up."""
         from llmpt.torrent_cache import load_cached_torrent
 
-        cache_file = tmp_path / "test_repo_abc123.torrent"
+        cache_file = tmp_path / "model_test_repo_abc123.torrent"
         cache_file.write_bytes(b"")
 
         with patch('llmpt.torrent_cache.TORRENT_CACHE_DIR', str(tmp_path)):
@@ -52,7 +52,7 @@ class TestLoadCachedTorrent:
         """If reading the file fails, returns None gracefully."""
         from llmpt.torrent_cache import load_cached_torrent
 
-        cache_file = tmp_path / "test_repo_abc123.torrent"
+        cache_file = tmp_path / "model_test_repo_abc123.torrent"
         cache_file.write_bytes(b"some_data")
 
         with patch('llmpt.torrent_cache.TORRENT_CACHE_DIR', str(tmp_path)), \
@@ -73,7 +73,7 @@ class TestSaveTorrentToCache:
         with patch('llmpt.torrent_cache.TORRENT_CACHE_DIR', str(tmp_path)):
             save_torrent_to_cache("test/repo", "abc123", b"torrent_bytes")
 
-        cache_file = tmp_path / "test_repo_abc123.torrent"
+        cache_file = tmp_path / "model_test_repo_abc123.torrent"
         assert cache_file.exists()
         assert cache_file.read_bytes() == b"torrent_bytes"
 
@@ -86,7 +86,7 @@ class TestSaveTorrentToCache:
         with patch('llmpt.torrent_cache.TORRENT_CACHE_DIR', str(cache_dir)):
             save_torrent_to_cache("test/repo", "abc123", b"data")
 
-        assert (cache_dir / "test_repo_abc123.torrent").exists()
+        assert (cache_dir / "model_test_repo_abc123.torrent").exists()
 
     def test_atomic_write_no_tmp_file_remains(self, tmp_path):
         """After save, only the final file should exist (no .tmp remnant)."""
@@ -97,14 +97,14 @@ class TestSaveTorrentToCache:
 
         files = list(tmp_path.iterdir())
         assert len(files) == 1
-        assert files[0].name == "test_repo_abc123.torrent"
+        assert files[0].name == "model_test_repo_abc123.torrent"
         assert not any(f.name.endswith('.tmp') for f in files)
 
     def test_overwrites_existing_cache(self, tmp_path):
         """Should overwrite an existing cached file with new data."""
         from llmpt.torrent_cache import save_torrent_to_cache
 
-        cache_file = tmp_path / "test_repo_abc123.torrent"
+        cache_file = tmp_path / "model_test_repo_abc123.torrent"
         cache_file.write_bytes(b"old_data")
 
         with patch('llmpt.torrent_cache.TORRENT_CACHE_DIR', str(tmp_path)):
@@ -130,7 +130,7 @@ class TestResolveTorrentData:
         """Layer 1: local cache hit → returns without contacting tracker."""
         from llmpt.torrent_cache import resolve_torrent_data
 
-        cache_file = tmp_path / "test_repo_abc123.torrent"
+        cache_file = tmp_path / "model_test_repo_abc123.torrent"
         cache_file.write_bytes(b"cached_torrent")
 
         tracker = MagicMock()
@@ -152,9 +152,9 @@ class TestResolveTorrentData:
             result = resolve_torrent_data("test/repo", "abc123", tracker)
 
         assert result == b"tracker_torrent"
-        tracker.download_torrent.assert_called_once_with("test/repo", "abc123")
+        tracker.download_torrent.assert_called_once_with("test/repo", "abc123", repo_type="model")
         # Verify it was cached locally
-        cache_file = tmp_path / "test_repo_abc123.torrent"
+        cache_file = tmp_path / "model_test_repo_abc123.torrent"
         assert cache_file.exists()
         assert cache_file.read_bytes() == b"tracker_torrent"
 
@@ -169,7 +169,7 @@ class TestResolveTorrentData:
             result = resolve_torrent_data("test/repo", "abc123", tracker)
 
         assert result is None
-        tracker.download_torrent.assert_called_once()
+        tracker.download_torrent.assert_called_once_with("test/repo", "abc123", repo_type="model")
 
     def test_repo_id_with_slashes_in_filename(self, tmp_path):
         """Repo IDs with slashes should be sanitized in filenames."""
@@ -181,5 +181,5 @@ class TestResolveTorrentData:
 
         assert result == b"data"
         # Filename should use underscore instead of slash
-        cache_file = tmp_path / "org_model-name_abc123.torrent"
+        cache_file = tmp_path / "model_org_model-name_abc123.torrent"
         assert cache_file.exists()

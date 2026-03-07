@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # ── HF cache resolution ──────────────────────────────────────────────────────
 
-def resolve_hf_blob(repo_id: str, filename: str, revision: str) -> Optional[str]:
+def resolve_hf_blob(repo_id: str, filename: str, revision: str, *, repo_type: str = "model") -> Optional[str]:
     """Look up a file in the local HuggingFace cache and return its real path.
 
     Returns:
@@ -31,6 +31,7 @@ def resolve_hf_blob(repo_id: str, filename: str, revision: str) -> Optional[str]
             repo_id=repo_id,
             filename=filename,
             revision=revision,
+            repo_type=repo_type if repo_type != "model" else None,
         )
         if local_path and isinstance(local_path, str):
             return os.path.realpath(local_path)
@@ -61,6 +62,8 @@ def hardlink_files_for_seeding(
     temp_dir: str,
     repo_id: str,
     revision: str,
+    *,
+    repo_type: str = "model",
 ) -> Tuple[List[str], int]:
     """Create hardlinks at paths libtorrent expects, pointing to HF blobs.
 
@@ -96,7 +99,7 @@ def hardlink_files_for_seeding(
             continue
 
         # Resolve the HF cache blob path
-        real_path = resolve_hf_blob(repo_id, target_norm, revision)
+        real_path = resolve_hf_blob(repo_id, target_norm, revision, repo_type=repo_type)
         if not real_path:
             logger.warning(f"[{repo_id}] Cache miss for seeding [{file_index}]: {target_norm} (revision={revision})")
             continue
@@ -125,6 +128,8 @@ def rename_files_for_seeding(
     temp_dir: str,
     repo_id: str,
     revision: str,
+    *,
+    repo_type: str = "model",
 ) -> int:
     """Map files via rename_file() and trigger a force_recheck().
 
@@ -160,7 +165,7 @@ def rename_files_for_seeding(
             handle.rename_file(file_index, pad_file_path)
             continue
 
-        real_path = resolve_hf_blob(repo_id, target_norm, revision)
+        real_path = resolve_hf_blob(repo_id, target_norm, revision, repo_type=repo_type)
         if real_path:
             handle.rename_file(file_index, real_path)
             mapped_count += 1

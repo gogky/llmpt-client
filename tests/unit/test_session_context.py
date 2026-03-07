@@ -239,7 +239,7 @@ class TestInitTorrent:
         assert ctx.is_valid is False
         # Should only call resolver once, no fallback
         mock_resolve.assert_called_once_with(
-            "test/repo", "a" * 40, ctx.tracker_client
+            "test/repo", "a" * 40, ctx.tracker_client, repo_type="model"
         )
 
     def test_successful_torrent_init(self, make_ctx, mock_lt):
@@ -525,7 +525,7 @@ class TestMapAllFilesForSeeding:
              patch('huggingface_hub.try_to_load_from_cache') as mock_cache, \
              patch('os.path.realpath') as mock_realpath:
 
-            mock_cache.side_effect = lambda repo_id, filename, revision: {
+            mock_cache.side_effect = lambda repo_id, filename, revision, **kwargs: {
                 "config.json": "/hf/snapshots/abc/config.json",
                 "model.bin": "/hf/snapshots/abc/model.bin",
             }.get(filename)

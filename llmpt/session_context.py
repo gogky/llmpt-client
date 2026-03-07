@@ -38,6 +38,7 @@ class SessionContext:
         timeout: int,
         torrent_data: Optional[bytes] = None,
         *,
+        repo_type: str = 'model',
         auto_seed: bool = True,
         seed_duration: int = 3600,
     ) -> None:
@@ -46,6 +47,7 @@ class SessionContext:
         self.session_mode = session_mode
         self.repo_id = repo_id
         self.revision = revision
+        self.repo_type = repo_type
         self.tracker_client = tracker_client
         self.lt_session = lt_session
         self.timeout = timeout
@@ -97,7 +99,7 @@ class SessionContext:
 
         # 1. Obtain torrent data
         torrent_data = acquire_torrent_data(
-            self.repo_id, self.revision, self.tracker_client, self.torrent_data
+            self.repo_id, self.revision, self.tracker_client, self.torrent_data, repo_type=self.repo_type
         )
         if not torrent_data:
             logger.warning(f"[{self.repo_id}] No torrent data available from tracker.")
@@ -384,7 +386,7 @@ class SessionContext:
             from . import get_config
             proxy_port = get_config().get('webseed_proxy_port')
             if proxy_port:
-                return f"http://127.0.0.1:{proxy_port}/ws/{self.repo_id}/"
+                return f"http://127.0.0.1:{proxy_port}/ws/{self.repo_type}/{self.repo_id}/"
         except Exception:
             pass
         return None
@@ -409,6 +411,7 @@ class SessionContext:
         try:
             hardlinks, mapped_count = hardlink_files_for_seeding(
                 self.torrent_info_obj, self.temp_dir, self.repo_id, self.revision,
+                repo_type=self.repo_type,
             )
             self.seeding_hardlinks = hardlinks
 
@@ -429,6 +432,7 @@ class SessionContext:
             rename_files_for_seeding(
                 self.handle, self.torrent_info_obj,
                 self.temp_dir, self.repo_id, self.revision,
+                repo_type=self.repo_type,
             )
             return True
 

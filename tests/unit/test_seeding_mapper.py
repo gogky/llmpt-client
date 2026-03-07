@@ -18,7 +18,7 @@ class TestResolveHfBlob:
 
         result = resolve_hf_blob("test/repo", "config.json", "main")
         assert result == "/real/blobs/abc123"
-        mock_cache.assert_called_once_with(repo_id="test/repo", filename="config.json", revision="main")
+        mock_cache.assert_called_once_with(repo_id="test/repo", filename="config.json", revision="main", repo_type=None)
 
     @patch('huggingface_hub.try_to_load_from_cache', return_value=None)
     def test_returns_none_on_cache_miss(self, mock_cache):

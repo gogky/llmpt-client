@@ -47,6 +47,7 @@ services:
     command: >
       python -m pytest
       tests/e2e/test_docker_p2p.py::test_true_p2p_download
+      tests/e2e/test_docker_p2p.py::test_dataset_p2p_download
       tests/e2e/test_docker_p2p.py::test_webseed_disabled
       --run-integration -v -s --log-cli-level=INFO
 

@@ -25,6 +25,9 @@ import shutil
 REPO_ID = "hf-internal-testing/tiny-random-GPTJForCausalLM"
 EXPECTED_FILES = {"config.json", "pytorch_model.bin", "tokenizer.json"}
 
+DATASET_ID = "fka/prompts.chat"
+EXPECTED_DATASET_FILES = {"data/train-00000-of-00001-c8dc32dd59957fc3.parquet"}
+
 
 # ─── Shared helpers ──────────────────────────────────────────────────────────
 
@@ -174,6 +177,58 @@ def test_true_p2p_download():
     # ── 2. Download report and assertions ──
     stats = get_download_stats()
     _print_download_report(stats, files_in_repo, label="Pure P2P")
+    _assert_all_p2p(stats, files_in_repo)
+
+    # ── 3. Verify WebSeed was NOT active ──
+    config = llmpt.get_config()
+    assert config.get('webseed_proxy_port') is None, (
+        "WebSeed proxy port should be None when webseed=False"
+    )
+
+    print(f"[Downloader] ✅ All {len(stats['p2p'])} files downloaded via pure P2P to {local_path}!", flush=True)
+
+
+def test_dataset_p2p_download():
+    """
+    Downloads the dataset that the Seeder container is currently hosting.
+    Asserts that every single file goes through P2P — no HTTP fallbacks.
+    """
+    # Give containers a moment to fully start up before polling
+    time.sleep(15)
+
+    tracker_url = os.environ.get("TRACKER_URL", "http://118.195.159.242")
+    llmpt.enable_p2p(tracker_url=tracker_url, timeout=60, webseed=False)
+
+    # Reset download stats before the test
+    from llmpt.patch import reset_download_stats, get_download_stats
+    reset_download_stats()
+
+    # Deterministically wait until the seeder has registered the torrent.
+    print("[Downloader] Polling tracker until seeder is registered...", flush=True)
+    seeder_ready = _wait_for_seeder_ready(tracker_url, DATASET_ID, timeout=180)
+    assert seeder_ready, (
+        f"Seeder never registered torrent for {DATASET_ID} within 180s. "
+        "Check seeder container logs for errors."
+    )
+
+    print("[Downloader] Requesting snapshot_download for dataset...", flush=True)
+    local_path = snapshot_download(
+        repo_id=DATASET_ID,
+        repo_type="dataset",
+        local_files_only=False,
+        force_download=True,  # Must bypass HF local cache to ensure http_get is always called
+    )
+
+    # ── 1. Basic file existence checks ──
+    assert os.path.exists(local_path)
+    files_in_repo = _collect_files(local_path)
+
+    missing = EXPECTED_DATASET_FILES - files_in_repo
+    assert not missing, f"Core files missing from snapshot: {missing}"
+
+    # ── 2. Download report and assertions ──
+    stats = get_download_stats()
+    _print_download_report(stats, files_in_repo, label="Pure Dataset P2P")
     _assert_all_p2p(stats, files_in_repo)
 
     # ── 3. Verify WebSeed was NOT active ──

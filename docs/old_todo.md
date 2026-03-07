@@ -33,4 +33,7 @@
 
 # 场景 4：守护进程自动做种（冷启动 → 自动创建 torrent → P2P 下载）
 docker compose -f docker-compose.test-daemon.yml up --build
-这个E2E测试失败了，为我分析原因，是因为服务器上已有.torrent种子吗？
+
+auto_seed是否可以取消了，这是下载端与做种端没有解耦前的设计。因为目前有了做种端可以单独存在，所以其实强制auto_seed的，下载端下载完成后直接退出就好，让做种端接管，对吗？你认为是否可以取消auto_seed和seed_duration变量。
+-  ipv6
+- 下载端和做种端可能端口冲突

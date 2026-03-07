@@ -108,7 +108,7 @@ class TestCmdDownload:
             tracker_url="http://tracker.example.com",
             auto_seed=True,
         )
-        mock_download.assert_called_once_with("gpt2", local_dir=None)
+        mock_download.assert_called_once_with("gpt2", repo_type=args.repo_type, local_dir=None)
 
     @patch('llmpt.cli.snapshot_download', create=True)
     @patch('llmpt.cli.enable_p2p', create=True)
@@ -231,7 +231,7 @@ class TestCmdStop:
         with patch('llmpt.seeder.stop_seeding', return_value=True) as mock_stop:
             cmd_stop(args)
 
-        mock_stop.assert_called_once_with("gpt2", "main")
+        mock_stop.assert_called_once_with("gpt2", "main", repo_type="model")
         captured = capsys.readouterr()
         assert "Stopped seeding" in captured.out
 
@@ -274,4 +274,4 @@ class TestCmdStop:
             cmd_stop(args)
 
         # Should split on the LAST '@': repo_id="user@org/model", revision="v2"
-        mock_stop.assert_called_once_with("user@org/model", "v2")
+        mock_stop.assert_called_once_with("user@org/model", "v2", repo_type="model")

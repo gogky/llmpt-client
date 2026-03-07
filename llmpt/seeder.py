@@ -23,6 +23,7 @@ def start_seeding(
     revision: str,
     tracker_client: 'TrackerClient',
     torrent_data: Optional[bytes] = None,
+    repo_type: str = 'model',
 ) -> bool:
     """
     Start seeding a repository in the background using the unified P2PBatchManager.
@@ -47,6 +48,7 @@ def start_seeding(
     success = manager.register_seeding_task(
         repo_id=repo_id,
         revision=revision,
+        repo_type=repo_type,
         tracker_client=tracker_client,
         torrent_data=torrent_data,
     )
@@ -59,10 +61,10 @@ def start_seeding(
     return success
 
 
-def stop_seeding(repo_id: str, revision: str) -> bool:
+def stop_seeding(repo_id: str, revision: str, repo_type: str = 'model') -> bool:
     """Stop seeding a specific repository."""
     manager = P2PBatchManager()
-    removed = manager.remove_session(repo_id, revision)
+    removed = manager.remove_session(repo_id, revision, repo_type=repo_type)
 
     if removed:
         logger.info(f"Stopped seeding for: {repo_id}@{revision}")

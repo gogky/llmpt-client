@@ -62,6 +62,12 @@ Examples:
         action='store_true',
         help='Do not seed after download'
     )
+    download_parser.add_argument(
+        '--repo-type',
+        default='model',
+        choices=['model', 'dataset', 'space'],
+        help='Repository type'
+    )
 
     # Seed command
     seed_parser = subparsers.add_parser(
@@ -182,6 +188,7 @@ def cmd_download(args):
     # Download
     path = snapshot_download(
         args.repo_id,
+        repo_type=args.repo_type,
         local_dir=args.local_dir
     )
 
@@ -304,12 +311,18 @@ def cmd_stop(args):
     from llmpt.seeder import stop_seeding, stop_all_seeding
 
     if args.repo_key:
-        # Expected format: "repo_id@revision", e.g. "meta-llama/Llama-2-7b@main"
+        # Expected format: "repo_type:repo_id@revision", e.g. "model:meta-llama/Llama-2-7b@main"
         if '@' not in args.repo_key:
-            print("Error: repo_key must be in format repo_id@revision (e.g. gpt2@main)")
+            print("Error: repo_key must be in format repo_type:repo_id@revision (e.g. model:gpt2@main) or repo_id@revision")
             sys.exit(1)
-        repo_id, revision = args.repo_key.rsplit('@', 1)
-        success = stop_seeding(repo_id, revision)
+        
+        repo_type = 'model'
+        repo_id_rev = args.repo_key
+        if ':' in args.repo_key:
+            repo_type, repo_id_rev = args.repo_key.split(':', 1)
+            
+        repo_id, revision = repo_id_rev.rsplit('@', 1)
+        success = stop_seeding(repo_id, revision, repo_type=repo_type)
         if success:
             print(f"✓ Stopped seeding: {args.repo_key}")
         else:

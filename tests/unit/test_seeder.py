@@ -38,6 +38,7 @@ class TestStartSeeding:
         mock_instance.register_seeding_task.assert_called_once_with(
             repo_id="test/repo",
             revision="main",
+            repo_type="model",
             tracker_client=tracker,
             torrent_data=None,
         )
@@ -70,7 +71,7 @@ class TestStopSeeding:
 
         result = stop_seeding("no/repo", "main")
         assert result is False
-        mock_instance.remove_session.assert_called_once_with("no/repo", "main")
+        mock_instance.remove_session.assert_called_once_with("no/repo", "main", repo_type="model")
 
     @patch('llmpt.seeder.P2PBatchManager')
     def test_stop_existing(self, MockManager):
@@ -83,7 +84,7 @@ class TestStopSeeding:
 
         result = stop_seeding("test/repo", "main")
         assert result is True
-        mock_instance.remove_session.assert_called_once_with("test/repo", "main")
+        mock_instance.remove_session.assert_called_once_with("test/repo", "main", repo_type="model")
 
 
 # ─── stop_all_seeding ─────────────────────────────────────────────────────────

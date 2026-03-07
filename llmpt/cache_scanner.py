@@ -56,7 +56,7 @@ def _parse_repo_id(dirname: str) -> Optional[str]:
         ``datasets--squad``                   → ``squad``
 
     Returns:
-        The repository ID, or ``None`` if the directory name doesn't follow
+        A tuple of `(repo_type, repo_id)`, or `None` if the directory name doesn't follow
         the expected pattern.
     """
     # Expected format: {type}--{org}--{name} or {type}--{name}
@@ -68,11 +68,15 @@ def _parse_repo_id(dirname: str) -> Optional[str]:
     if repo_type_prefix not in ("models", "datasets", "spaces"):
         return None
 
+    # "models--gpt2" -> ("model", "gpt2")
+    # "datasets--squad" -> ("dataset", "squad")
+    repo_type = repo_type_prefix.rstrip("s") # "models" -> "model", "datasets" -> "dataset", "spaces" -> "space"
+    
     # The remaining part uses "--" as separator for org/name
     # e.g. "meta-llama--Llama-2-7b" → "meta-llama/Llama-2-7b"
     # But "gpt2" stays as "gpt2"
     repo_name = parts[1].replace("--", "/", 1)
-    return repo_name
+    return repo_type, repo_name
 
 
 def _is_snapshot_complete(snapshot_dir: Path) -> bool:
@@ -113,30 +117,31 @@ def _is_snapshot_complete(snapshot_dir: Path) -> bool:
 
 def scan_hf_cache(
     cache_dir: Optional[str] = None,
-) -> List[Tuple[str, str]]:
-    """Scan the HuggingFace cache and return seedable (repo_id, revision) pairs.
+) -> List[Tuple[str, str, str]]:
+    """Scan the HuggingFace cache and return seedable (repo_type, repo_id, revision) pairs.
 
     Args:
         cache_dir: Path to the HF hub cache directory.  Defaults to
                    ``~/.cache/huggingface/hub`` (or ``$HF_HOME``).
 
     Returns:
-        List of ``(repo_id, commit_hash)`` tuples for all complete snapshots.
+        List of ``(repo_type, repo_id, commit_hash)`` tuples for all complete snapshots.
     """
     hub_dir = Path(cache_dir or HF_HUB_CACHE)
     if not hub_dir.exists():
         logger.info(f"HF cache directory not found: {hub_dir}")
         return []
 
-    seedable: List[Tuple[str, str]] = []
+    seedable: List[Tuple[str, str, str]] = []
 
     for model_dir in sorted(hub_dir.iterdir()):
         if not model_dir.is_dir():
             continue
 
-        repo_id = _parse_repo_id(model_dir.name)
-        if not repo_id:
+        parsed = _parse_repo_id(model_dir.name)
+        if not parsed:
             continue
+        repo_type, repo_id = parsed
 
         snapshots_dir = model_dir / "snapshots"
         if not snapshots_dir.exists() or not snapshots_dir.is_dir():
@@ -154,7 +159,7 @@ def scan_hf_cache(
                 continue
 
             if _is_snapshot_complete(snapshot):
-                seedable.append((repo_id, snapshot.name))
+                seedable.append((repo_type, repo_id, snapshot.name))
                 logger.debug(f"Seedable: {repo_id}@{snapshot.name[:8]}...")
             else:
                 logger.debug(

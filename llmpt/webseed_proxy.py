@@ -79,13 +79,19 @@ class WebSeedProxyHandler(BaseHTTPRequestHandler):
             self.send_error(400, "Bad path format")
             return
 
-        repo_id, commit_hash, file_path = parts
+        repo_type, repo_id, commit_hash, file_path = parts
 
         # ── 2. Build upstream URL ─────────────────────────────────────────
         hf_endpoint = self.server.hf_endpoint
         # URL-encode the file_path segments but keep '/' as-is.
         encoded_file_path = "/".join(quote(seg, safe="") for seg in file_path.split("/"))
-        upstream_url = f"{hf_endpoint}/{repo_id}/resolve/{commit_hash}/{encoded_file_path}"
+        
+        if repo_type == "dataset":
+            upstream_url = f"{hf_endpoint}/datasets/{repo_id}/resolve/{commit_hash}/{encoded_file_path}"
+        elif repo_type == "space":
+            upstream_url = f"{hf_endpoint}/spaces/{repo_id}/resolve/{commit_hash}/{encoded_file_path}"
+        else:
+            upstream_url = f"{hf_endpoint}/{repo_id}/resolve/{commit_hash}/{encoded_file_path}"
 
         # ── 3. Build upstream headers ─────────────────────────────────────
         upstream_headers = {}
@@ -133,12 +139,12 @@ class WebSeedProxyHandler(BaseHTTPRequestHandler):
     # ── Path parsing ──────────────────────────────────────────────────────
 
     def _parse_path(self):
-        """Parse the request path into (repo_id, commit_hash, file_path).
+        """Parse the request path into (repo_type, repo_id, commit_hash, file_path).
 
-        Expected format: ``/ws/{org}/{repo}/{commit_hash}/{file_path...}``
+        Expected format: ``/ws/{repo_type}/{repo_id...}/{commit_hash}/{file_path...}``
 
         Returns:
-            Tuple of (repo_id, commit_hash, file_path) or None on error.
+            Tuple of (repo_type, repo_id, commit_hash, file_path) or None on error.
         """
         path = self.path
 
@@ -151,22 +157,35 @@ class WebSeedProxyHandler(BaseHTTPRequestHandler):
             return None
 
         remaining = path[4:]  # strip "/ws/"
-
-        # Split into parts: org / repo / commit_hash / file_path...
         segments = remaining.split("/")
-        if len(segments) < 4:
+        if len(segments) < 3:
             return None
 
-        org = segments[0]
-        repo = segments[1]
-        commit_hash = segments[2]
-        file_path = "/".join(segments[3:])
+        repo_type_maybe = segments[0]
+        if repo_type_maybe in ("model", "dataset", "space"):
+            repo_type = repo_type_maybe
+            repo_id_start = 1
+        else:
+            repo_type = "model"
+            repo_id_start = 0
 
-        if not org or not repo or not commit_hash or not file_path:
+        commit_index = -1
+        for i in range(repo_id_start, len(segments)):
+            if len(segments[i]) == 40 and all(c in "0123456789abcdef" for c in segments[i].lower()):
+                commit_index = i
+                break
+
+        if commit_index == -1 or commit_index == repo_id_start:
             return None
 
-        repo_id = f"{org}/{repo}"
-        return repo_id, commit_hash, file_path
+        repo_id = "/".join(segments[repo_id_start:commit_index])
+        commit_hash = segments[commit_index]
+        file_path = "/".join(segments[commit_index+1:])
+
+        if not repo_id or not commit_hash or not file_path:
+            return None
+
+        return repo_type, repo_id, commit_hash, file_path
 
 
 class _WebSeedHTTPServer(HTTPServer):
@@ -242,7 +261,7 @@ class WebSeedProxy:
         self.thread = None
         self.port = None
 
-    def get_webseed_url(self, repo_id: str) -> str:
+    def get_webseed_url(self, repo_id: str, repo_type: str = "model") -> str:
         """Build the WebSeed URL for a given repository.
 
         The trailing ``/`` is critical — it tells libtorrent to use BEP 19
@@ -250,6 +269,7 @@ class WebSeedProxy:
 
         Args:
             repo_id: The HuggingFace repository identifier (e.g. "meta-llama/Llama-2-7b").
+            repo_type: The repository type.
 
         Returns:
             WebSeed URL string.
@@ -259,7 +279,7 @@ class WebSeedProxy:
         """
         if self.port is None:
             raise RuntimeError("WebSeedProxy is not running")
-        return f"http://127.0.0.1:{self.port}/ws/{repo_id}/"
+        return f"http://127.0.0.1:{self.port}/ws/{repo_type}/{repo_id}/"
 
     @property
     def is_running(self) -> bool:

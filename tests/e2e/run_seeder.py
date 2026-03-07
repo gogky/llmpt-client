@@ -29,11 +29,16 @@ def test_seeder_initialization():
     """
     tracker_url = os.environ.get("TRACKER_URL", "http://118.195.159.242")
     repo_id = "hf-internal-testing/tiny-random-GPTJForCausalLM"
+    dataset_id = "fka/prompts.chat"
 
     # ── 1. Populate HF local cache (before enabling P2P) ──
     print(f"[Seeder] Downloading {repo_id} from HuggingFace (HTTP)...", flush=True)
     local_path = snapshot_download(repo_id=repo_id, local_files_only=False)
     assert os.path.exists(local_path), f"snapshot_download returned non-existent path: {local_path}"
+
+    print(f"[Seeder] Downloading {dataset_id} from HuggingFace (HTTP)...", flush=True)
+    dataset_path = snapshot_download(repo_id=dataset_id, repo_type="dataset", local_files_only=False)
+    assert os.path.exists(dataset_path), f"snapshot_download returned non-existent path: {dataset_path}"
 
     # Wait for tracker to be reachable
     print("[Seeder] Waiting 5s for tracker to come online...", flush=True)
@@ -55,30 +60,34 @@ def test_seeder_initialization():
     registered = False
 
     print("[Seeder] Waiting for daemon to create and register torrent...", flush=True)
+    model_registered = False
+    dataset_registered = False
+
     while time.time() < deadline:
         try:
             resp = requests.get(api_url, timeout=5)
             if resp.status_code == 200:
                 body = resp.json()
                 torrents = body.get("data", body) if isinstance(body, dict) else body
+                
                 for t in torrents:
                     if t.get("repo_id") == repo_id:
-                        print(
-                            f"[Seeder] ✅ Torrent registered! "
-                            f"info_hash={t.get('info_hash', '?')[:16]}...",
-                            flush=True,
-                        )
-                        registered = True
-                        break
+                        if not model_registered:
+                            print(f"[Seeder] ✅ Model Torrent registered! info_hash={t.get('info_hash', '?')[:16]}...", flush=True)
+                            model_registered = True
+                    elif t.get("repo_id") == dataset_id:
+                        if not dataset_registered:
+                            print(f"[Seeder] ✅ Dataset Torrent registered! info_hash={t.get('info_hash', '?')[:16]}...", flush=True)
+                            dataset_registered = True
         except Exception as e:
             print(f"[Seeder] Tracker poll failed: {e}", flush=True)
 
-        if registered:
+        if model_registered and dataset_registered:
             break
         time.sleep(5)
 
-    assert registered, (
-        f"Daemon did not register torrent for {repo_id} within 180s. "
+    assert model_registered and dataset_registered, (
+        f"Daemon did not register both torrents within 180s. "
         "Check daemon logs at ~/.cache/llmpt/daemon.log"
     )
 

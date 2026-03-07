@@ -33,9 +33,9 @@ logger = logging.getLogger("llmpt.torrent_cache")
 TORRENT_CACHE_DIR = os.path.expanduser("~/.cache/llmpt/torrents")
 
 
-def _cache_path(repo_id: str, revision: str) -> str:
+def _cache_path(repo_id: str, revision: str, repo_type: str = "model") -> str:
     """Return the filesystem path for a cached .torrent file."""
-    safe_repo = repo_id.replace("/", "_")
+    safe_repo = f"{repo_type}_{repo_id.replace('/', '_')}"
     return os.path.join(TORRENT_CACHE_DIR, f"{safe_repo}_{revision}.torrent")
 
 
@@ -43,13 +43,13 @@ def _cache_path(repo_id: str, revision: str) -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
-def load_cached_torrent(repo_id: str, revision: str) -> Optional[bytes]:
+def load_cached_torrent(repo_id: str, revision: str, *, repo_type: str = "model") -> Optional[bytes]:
     """Load a .torrent from the local disk cache.
 
     Returns:
         Raw torrent bytes, or *None* if no cached entry exists.
     """
-    path = _cache_path(repo_id, revision)
+    path = _cache_path(repo_id, revision, repo_type)
     if not os.path.exists(path):
         return None
 
@@ -71,7 +71,7 @@ def load_cached_torrent(repo_id: str, revision: str) -> Optional[bytes]:
 
 
 def save_torrent_to_cache(
-    repo_id: str, revision: str, torrent_data: bytes
+    repo_id: str, revision: str, torrent_data: bytes, *, repo_type: str = "model"
 ) -> None:
     """Persist .torrent data to the local disk cache.
 
@@ -79,7 +79,7 @@ def save_torrent_to_cache(
     a partially-written file.
     """
     os.makedirs(TORRENT_CACHE_DIR, exist_ok=True)
-    path = _cache_path(repo_id, revision)
+    path = _cache_path(repo_id, revision, repo_type)
     tmp_path = path + ".tmp"
     try:
         with open(tmp_path, "wb") as f:
@@ -101,6 +101,8 @@ def resolve_torrent_data(
     repo_id: str,
     revision: str,
     tracker_client: "TrackerClient",
+    *,
+    repo_type: str = "model",
 ) -> Optional[bytes]:
     """Three-layer .torrent resolution.
 
@@ -111,17 +113,17 @@ def resolve_torrent_data(
        or fall back to HTTP (downloader).
     """
     # Layer 1: local disk cache
-    cached = load_cached_torrent(repo_id, revision)
+    cached = load_cached_torrent(repo_id, revision, repo_type=repo_type)
     if cached is not None:
         return cached
 
     # Layer 2: tracker server
-    torrent_data = tracker_client.download_torrent(repo_id, revision)
+    torrent_data = tracker_client.download_torrent(repo_id, revision, repo_type=repo_type)
     if torrent_data:
         logger.info(
             f"[{repo_id}] Torrent downloaded from tracker, caching locally"
         )
-        save_torrent_to_cache(repo_id, revision, torrent_data)
+        save_torrent_to_cache(repo_id, revision, torrent_data, repo_type=repo_type)
         return torrent_data
 
     # Layer 3: not found

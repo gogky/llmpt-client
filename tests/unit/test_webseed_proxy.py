@@ -37,14 +37,14 @@ class TestParsePathDirect:
         return handler
 
     def test_valid_path(self):
-        h = self._make_handler("/ws/meta-llama/Llama-2-7b/abc123/config.json")
+        h = self._make_handler("/ws/meta-llama/Llama-2-7b/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/config.json")
         result = h._parse_path()
-        assert result == ("meta-llama/Llama-2-7b", "abc123", "config.json")
+        assert result == ("model", "meta-llama/Llama-2-7b", "a"*40, "config.json")
 
     def test_valid_nested_file_path(self):
-        h = self._make_handler("/ws/org/repo/deadbeef/subdir/deep/model.bin")
+        h = self._make_handler("/ws/org/repo/dddddddddddddddddddddddddddddddddddddddd/subdir/deep/model.bin")
         result = h._parse_path()
-        assert result == ("org/repo", "deadbeef", "subdir/deep/model.bin")
+        assert result == ("model", "org/repo", "d"*40, "subdir/deep/model.bin")
 
     def test_missing_ws_prefix(self):
         h = self._make_handler("/other/org/repo/hash/file.bin")
@@ -55,14 +55,14 @@ class TestParsePathDirect:
         assert h._parse_path() is None
 
     def test_exactly_four_segments(self):
-        h = self._make_handler("/ws/org/repo/abc123/file.txt")
+        h = self._make_handler("/ws/org/repo/cccccccccccccccccccccccccccccccccccccccc/file.txt")
         result = h._parse_path()
-        assert result == ("org/repo", "abc123", "file.txt")
+        assert result == ("model", "org/repo", "c"*40, "file.txt")
 
     def test_strips_query_string(self):
-        h = self._make_handler("/ws/org/repo/hash/file.bin?foo=bar")
+        h = self._make_handler("/ws/org/repo/1111111111111111111111111111111111111111/file.bin?foo=bar")
         result = h._parse_path()
-        assert result == ("org/repo", "hash", "file.bin")
+        assert result == ("model", "org/repo", "1"*40, "file.bin")
 
     def test_empty_segments_rejected(self):
         h = self._make_handler("/ws///hash/file.bin")
@@ -149,8 +149,8 @@ class TestProxyLifecycle:
         proxy = WebSeedProxy()
         port = proxy.start()
         try:
-            url = proxy.get_webseed_url("meta-llama/Llama-2-7b")
-            assert url == f"http://127.0.0.1:{port}/ws/meta-llama/Llama-2-7b/"
+            url = proxy.get_webseed_url("meta-llama/Llama-2-7b", repo_type="model")
+            assert url == f"http://127.0.0.1:{port}/ws/model/meta-llama/Llama-2-7b/"
             assert url.endswith("/")  # Critical for BEP 19 multi-file mode
         finally:
             proxy.stop()
@@ -197,14 +197,14 @@ class TestProxyHTTPIntegration:
         )
 
         with patch("llmpt.webseed_proxy._requests.get", return_value=mock_resp) as mock_get:
-            status, body, _ = _http_get(self.port, "/ws/org/repo/abc123/config.json")
+            status, body, _ = _http_get(self.port, "/ws/org/repo/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/config.json")
 
         assert status == 200
         assert body == b"hello"
 
         # Verify upstream URL was constructed correctly
         call_args = mock_get.call_args
-        assert call_args[0][0] == "https://huggingface.co/org/repo/resolve/abc123/config.json"
+        assert call_args[0][0] == "https://huggingface.co/org/repo/resolve/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/config.json"
         # Verify token was injected
         assert call_args[1]["headers"]["Authorization"] == "Bearer test_token_123"
 
@@ -222,7 +222,7 @@ class TestProxyHTTPIntegration:
 
         with patch("llmpt.webseed_proxy._requests.get", return_value=mock_resp) as mock_get:
             status, body, _ = _http_get(
-                self.port, "/ws/org/repo/hash/model.bin",
+                self.port, "/ws/org/repo/1111111111111111111111111111111111111111/model.bin",
                 headers={"Range": "bytes=0-9"},
             )
 
@@ -240,7 +240,7 @@ class TestProxyHTTPIntegration:
         """When upstream request fails, should return 502."""
         with patch("llmpt.webseed_proxy._requests.get",
                     side_effect=_real_requests.ConnectionError("Network down")):
-            status, _, _ = _http_get(self.port, "/ws/org/repo/hash/file.bin")
+            status, _, _ = _http_get(self.port, "/ws/org/repo/1111111111111111111111111111111111111111/file.bin")
         assert status == 502
 
     def test_no_token_no_auth_header(self):
@@ -260,7 +260,7 @@ class TestProxyHTTPIntegration:
             )
 
             with patch("llmpt.webseed_proxy._requests.get", return_value=mock_resp) as mock_get:
-                status, body, _ = _http_get(port, "/ws/org/repo/hash/file.bin")
+                status, body, _ = _http_get(port, "/ws/org/repo/1111111111111111111111111111111111111111/file.bin")
 
             assert status == 200
             upstream_headers = mock_get.call_args[1]["headers"]
@@ -284,7 +284,7 @@ class TestProxyHTTPIntegration:
             )
 
             with patch("llmpt.webseed_proxy._requests.get", return_value=mock_resp) as mock_get:
-                _http_get(port, "/ws/org/repo/hash/file.bin")
+                _http_get(port, "/ws/org/repo/1111111111111111111111111111111111111111/file.bin")
 
             upstream_url = mock_get.call_args[0][0]
             assert upstream_url.startswith("https://hf-mirror.com/")
@@ -302,11 +302,11 @@ class TestProxyHTTPIntegration:
         with patch("llmpt.webseed_proxy._requests.get", return_value=mock_resp) as mock_get:
             _http_get(
                 self.port,
-                "/ws/org/repo/hash/subdir/deep/nested/file.safetensors",
+                "/ws/org/repo/1111111111111111111111111111111111111111/subdir/deep/nested/file.safetensors",
             )
 
         upstream_url = mock_get.call_args[0][0]
-        assert upstream_url == "https://huggingface.co/org/repo/resolve/hash/subdir/deep/nested/file.safetensors"
+        assert upstream_url == "https://huggingface.co/org/repo/resolve/1111111111111111111111111111111111111111/subdir/deep/nested/file.safetensors"
 
 
 # ─── SessionContext._get_webseed_url ─────────────────────────────────────────
@@ -331,7 +331,7 @@ class TestSessionContextWebSeed:
         ctx = self._make_ctx()
         with patch('llmpt.get_config', return_value={'webseed_proxy_port': 54321}):
             url = ctx._get_webseed_url()
-        assert url == "http://127.0.0.1:54321/ws/org/repo/"
+        assert url == "http://127.0.0.1:54321/ws/model/org/repo/"
 
     def test_get_webseed_url_without_proxy(self):
         """When proxy port is None, should return None."""

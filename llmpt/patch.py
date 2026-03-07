@@ -75,8 +75,9 @@ def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
     # what seeders registered.  If resolution fails (e.g. network error),
     # fall back to the raw value — the download still works via HTTP.
     raw_revision = kwargs.get('revision', 'main')
+    repo_type = kwargs.get('repo_type', 'model')
     try:
-        revision = resolve_commit_hash(repo_id, raw_revision)
+        revision = resolve_commit_hash(repo_id, raw_revision, repo_type=repo_type)
     except Exception as e:
         logger.debug(f"[P2P] Could not resolve revision '{raw_revision}': {e}")
         revision = raw_revision
@@ -91,6 +92,7 @@ def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
 
     # Backup previous context (in case of nested/recursive hf_hub_download calls)
     prev_repo_id = getattr(_context, 'repo_id', None)
+    prev_repo_type = getattr(_context, 'repo_type', None)
     prev_filename = getattr(_context, 'filename', None)
     prev_revision = getattr(_context, 'revision', None)
     prev_tracker = getattr(_context, 'tracker', None)
@@ -98,6 +100,7 @@ def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
 
     # Store context for http_get to use
     _context.repo_id = repo_id
+    _context.repo_type = repo_type
     _context.filename = actual_filename
     _context.revision = revision
     _context.tracker = tracker
@@ -109,6 +112,7 @@ def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
     finally:
         # Restore previous context instead of clearing it (supports recursion)
         _context.repo_id = prev_repo_id
+        _context.repo_type = prev_repo_type
         _context.filename = prev_filename
         _context.revision = prev_revision
         _context.tracker = prev_tracker
@@ -119,6 +123,7 @@ def _patched_http_get(url: str, temp_file, **kwargs):
     """Patched version of http_get that uses P2P batch manager when available."""
     # Check if we have P2P context (injected by patched hf_hub_download)
     repo_id = getattr(_context, 'repo_id', None)
+    repo_type = getattr(_context, 'repo_type', 'model')
     filename = getattr(_context, 'filename', None)
     revision = getattr(_context, 'revision', None)
     tracker = getattr(_context, 'tracker', None)
@@ -146,7 +151,8 @@ def _patched_http_get(url: str, temp_file, **kwargs):
                 filename=filename,
                 temp_file_path=temp_file.name,
                 tracker_client=tracker,
-                timeout=effective_timeout
+                timeout=effective_timeout,
+                repo_type=repo_type
             )
 
             if success:
@@ -186,6 +192,7 @@ def _patched_snapshot_download(*args, **kwargs):
     try:
         repo_id = args[0] if args else kwargs.get('repo_id')
         revision = kwargs.get('revision', 'main')
+        repo_type = kwargs.get('repo_type', 'model')
 
         if not repo_id:
             return result
@@ -193,13 +200,13 @@ def _patched_snapshot_download(*args, **kwargs):
         # Resolve revision to commit hash for the daemon
         from .utils import resolve_commit_hash
         try:
-            resolved = resolve_commit_hash(repo_id, revision)
+            resolved = resolve_commit_hash(repo_id, revision, repo_type=repo_type)
         except Exception:
             resolved = revision
 
         # Notify the daemon (fire-and-forget — safe even if daemon isn't running)
         from .ipc import notify_daemon
-        notify_daemon("seed", repo_id=repo_id, revision=resolved)
+        notify_daemon("seed", repo_id=repo_id, revision=resolved, repo_type=repo_type)
         logger.debug(f"[P2P] Notified daemon to seed {repo_id}@{resolved[:8]}...")
 
     except Exception as e:

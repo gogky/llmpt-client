@@ -28,7 +28,9 @@ class TrackerClient:
     def get_torrent_info(
         self,
         repo_id: str,
-        revision: Optional[str] = None
+        revision: Optional[str] = None,
+        *,
+        repo_type: str = 'model'
     ) -> Optional[Dict[str, Any]]:
         """
         Query tracker for torrent information.
@@ -43,7 +45,7 @@ class TrackerClient:
         """
         try:
             url = urljoin(self.tracker_url, '/api/v1/torrents')
-            params = {'repo_id': repo_id}
+            params = {'repo_id': repo_id, 'repo_type': repo_type}
             if revision:
                 params['revision'] = revision
 
@@ -82,6 +84,8 @@ class TrackerClient:
         self,
         repo_id: str,
         revision: str,
+        *,
+        repo_type: str = 'model'
     ) -> Optional[bytes]:
         """
         Download raw .torrent file from tracker.
@@ -98,7 +102,7 @@ class TrackerClient:
 
             response = self.session.get(
                 url,
-                params={'repo_id': repo_id, 'revision': revision},
+                params={'repo_id': repo_id, 'revision': revision, 'repo_type': repo_type},
                 timeout=self.timeout
             )
 

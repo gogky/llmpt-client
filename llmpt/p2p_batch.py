@@ -136,7 +136,7 @@ class P2PBatchManager:
                 # like listen_succeeded_alert) are intentionally dropped here;
                 # they are informational and not required for correctness.
 
-    def register_seeding_task(self, repo_id: str, revision: str, tracker_client: 'TrackerClient', torrent_data: Optional[bytes] = None) -> bool:
+    def register_seeding_task(self, repo_id: str, revision: str, tracker_client: 'TrackerClient', torrent_data: Optional[bytes] = None, *, repo_type: str = 'model') -> bool:
         """
         Register a repository to be tracked for background seeding.
         This behaves like a download but without any specific HTTP interception blocks.
@@ -144,12 +144,13 @@ class P2PBatchManager:
         if not LIBTORRENT_AVAILABLE:
             return False
 
-        repo_key = (repo_id, revision)
+        repo_key = (repo_type, repo_id, revision)
         with self._lock:
             if repo_key not in self.sessions:
                 self.sessions[repo_key] = SessionContext(
                     repo_id=repo_id,
                     revision=revision,
+                    repo_type=repo_type,
                     tracker_client=tracker_client,
                     lt_session=self.lt_session,
                     session_mode='full_seed',
@@ -177,7 +178,9 @@ class P2PBatchManager:
         filename: str,
         temp_file_path: str,
         tracker_client: 'TrackerClient',
-        timeout: int = 300
+        timeout: int = 300,
+        *,
+        repo_type: str = 'model'
     ) -> bool:
         """
         Register a file download request.
@@ -189,6 +192,7 @@ class P2PBatchManager:
             temp_file_path: The absolute path where HF expects the file to be saved.
             tracker_client: Instance of TrackerClient to query torrennt info.
             timeout: Max time to wait for the download.
+            repo_type: Repository type.
             
         Returns:
             True if P2P download succeeds, False if it failed and should fallback to HTTP.
@@ -196,7 +200,7 @@ class P2PBatchManager:
         if not LIBTORRENT_AVAILABLE:
             return False
 
-        repo_key = (repo_id, revision)
+        repo_key = (repo_type, repo_id, revision)
         
         with self._lock:
             if repo_key not in self.sessions:
@@ -205,6 +209,7 @@ class P2PBatchManager:
                 self.sessions[repo_key] = SessionContext(
                     repo_id=repo_id,
                     revision=revision,
+                    repo_type=repo_type,
                     tracker_client=tracker_client,
                     lt_session=self.lt_session,
                     session_mode='on_demand',
@@ -249,17 +254,18 @@ class P2PBatchManager:
                 pass
         return ctx.worker_thread
 
-    def remove_session(self, repo_id: str, revision: str) -> bool:
+    def remove_session(self, repo_id: str, revision: str, *, repo_type: str = 'model') -> bool:
         """Remove a single session (stop seeding a specific repo).
 
         Args:
             repo_id: HuggingFace repository ID.
             revision: Revision string.
+            repo_type: Repository type.
 
         Returns:
             True if the session was found and removed, False otherwise.
         """
-        repo_key = (repo_id, revision)
+        repo_key = (repo_type, repo_id, revision)
         worker = None
 
         with self._lock:
@@ -301,15 +307,16 @@ class P2PBatchManager:
         """Get status of all active sessions with valid handles.
 
         Returns:
-            Dictionary keyed by ``"repo_id@revision"`` with status info.
+            Dictionary keyed by ``"repo_type:repo_id@revision"`` with status info.
         """
         status = {}
         with self._lock:
-            for (repo_id, revision), ctx in self.sessions.items():
+            for (repo_type, repo_id, revision), ctx in self.sessions.items():
                 if not ctx.handle or not ctx.handle.is_valid():
                     continue
                 s = ctx.handle.status()
-                status[f"{repo_id}@{revision}"] = {
+                status[f"{repo_type}:{repo_id}@{revision}"] = {
+                    'repo_type': repo_type,
                     'repo_id': repo_id,
                     'revision': revision,
                     'uploaded': s.total_upload,
