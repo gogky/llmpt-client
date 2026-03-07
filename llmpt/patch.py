@@ -4,6 +4,8 @@ Monkey Patch implementation for huggingface_hub.
 This module patches huggingface_hub's download functions to enable P2P acceleration.
 """
 
+import sys
+import atexit
 import threading
 import logging
 from typing import Optional, Any
@@ -27,6 +29,39 @@ _download_stats = {
     'p2p': set(),      # filenames successfully delivered via P2P
     'http': set(),     # filenames that fell back to HTTP
 }
+
+# Fallback daemon notification via debounce.
+# When _patched_snapshot_download runs, it adds repo_id to _active_wrapper_repos
+# so the fallback in _patched_hf_hub_download is suppressed.  When the user
+# imports snapshot_download BEFORE enable_p2p(), _patched_snapshot_download
+# never runs, and this fallback fires after a 2-second quiet period.
+_deferred_lock = threading.Lock()
+_deferred_timers: dict[str, threading.Timer] = {}
+_deferred_contexts: dict[str, dict] = {}   # repo_id -> {repo_id, revision, repo_type}
+_active_wrapper_repos: set[str] = set()
+
+def _flush_deferred_notifications():
+    """Flush pending deferred notifications on process exit."""
+    with _deferred_lock:
+        contexts = list(_deferred_contexts.values())
+        for timer in _deferred_timers.values():
+            timer.cancel()
+        _deferred_timers.clear()
+        _deferred_contexts.clear()
+        
+    for ctx in contexts:
+        try:
+            from .ipc import notify_daemon
+            notify_daemon(
+                "seed",
+                repo_id=ctx['repo_id'],
+                revision=ctx['revision'],
+                repo_type=ctx['repo_type'],
+            )
+        except Exception:
+            pass
+
+atexit.register(_flush_deferred_notifications)
 
 
 def get_download_stats() -> dict:
@@ -61,6 +96,109 @@ def _truncate_temp_file(temp_file, filename: str) -> None:
         logger.debug(f"[P2P] Truncated temp_file for clean HTTP fallback: {filename}")
     except Exception as e:
         logger.warning(f"[P2P] Could not truncate temp_file for {filename}: {e}")
+
+
+def _extract_context_from_stack() -> Optional[dict]:
+    """Walk the call stack to extract download context from hf_hub_download.
+
+    This is a fallback for when the user imports hf_hub_download BEFORE
+    enable_p2p(), bypassing _patched_hf_hub_download's context injection.
+
+    By the time http_get is called, the original hf_hub_download is still
+    on the stack with all the context we need (repo_id, filename,
+    commit_hash, etc.) as local variables.
+
+    Returns:
+        dict with repo_id, filename, revision, repo_type if found,
+        or None if the frame cannot be located.
+    """
+    try:
+        frame = sys._getframe(1)  # start from caller
+        for _ in range(10):       # walk up at most 10 frames
+            frame = frame.f_back
+            if frame is None:
+                break
+            if frame.f_code.co_name == 'hf_hub_download':
+                loc = frame.f_locals
+                repo_id = loc.get('repo_id')
+                filename = loc.get('filename')
+                if not (repo_id and filename):
+                    return None
+
+                # commit_hash (40-char SHA) is resolved by the HEAD request
+                # inside hf_hub_download; prefer it over the raw `revision`.
+                revision = loc.get('commit_hash') or loc.get('revision') or 'main'
+                repo_type = loc.get('repo_type') or 'model'
+
+                # Resolve subfolder exactly as huggingface_hub does
+                subfolder = loc.get('subfolder')
+                actual_filename = filename
+                if subfolder and subfolder != '':
+                    actual_filename = f"{subfolder}/{filename}"
+
+                return {
+                    'repo_id': repo_id,
+                    'filename': actual_filename,
+                    'revision': revision,
+                    'repo_type': repo_type,
+                }
+    except (AttributeError, ValueError):
+        pass
+    return None
+
+
+def _fire_deferred_notification(repo_id: str) -> None:
+    """Called by the debounce timer — sends a daemon seed notification."""
+    with _deferred_lock:
+        ctx = _deferred_contexts.pop(repo_id, None)
+        _deferred_timers.pop(repo_id, None)
+        
+    if ctx is None:
+        return
+        
+    try:
+        from .ipc import notify_daemon
+        notify_daemon(
+            "seed",
+            repo_id=ctx['repo_id'],
+            revision=ctx['revision'],
+            repo_type=ctx['repo_type'],
+        )
+        logger.debug(
+            f"[P2P] Deferred daemon notification sent for "
+            f"{ctx['repo_id']}@{ctx['revision'][:8]}..."
+        )
+    except Exception as e:
+        logger.debug(f"[P2P] Deferred daemon notification failed: {e}")
+
+
+def _schedule_deferred_notification(
+    repo_id: str, revision: str, repo_type: str
+) -> None:
+    """Schedule (or reschedule) a deferred daemon notification.
+
+    Each call resets the 2-second timer.  When the timer finally fires
+    (i.e. no new hf_hub_download calls for 2 s), we notify the daemon.
+    This acts as a fallback for when _patched_snapshot_download is
+    bypassed due to import-order issues.
+    """
+    with _deferred_lock:
+        # Cancel any existing timer for this specific repo_id
+        timer = _deferred_timers.get(repo_id)
+        if timer is not None:
+            timer.cancel()
+            
+        _deferred_contexts[repo_id] = {
+            'repo_id': repo_id,
+            'revision': revision,
+            'repo_type': repo_type,
+        }
+        
+        # Start a new timer
+        new_timer = threading.Timer(2.0, _fire_deferred_notification, args=[repo_id])
+        new_timer.daemon = True
+        new_timer.start()
+        _deferred_timers[repo_id] = new_timer
 
 
 def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
@@ -118,6 +256,15 @@ def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
         _context.tracker = prev_tracker
         _context.config = prev_config
 
+        # Fallback daemon notification: if _patched_snapshot_download is not
+        # wrapping this call (import-order issue), schedule a deferred
+        # notification so the daemon still learns about this download.
+        with _deferred_lock:
+            wrapper_active = repo_id in _active_wrapper_repos
+            
+        if not wrapper_active:
+            _schedule_deferred_notification(repo_id, revision, repo_type)
+
 
 def _patched_http_get(url: str, temp_file, **kwargs):
     """Patched version of http_get that uses P2P batch manager when available."""
@@ -128,6 +275,31 @@ def _patched_http_get(url: str, temp_file, **kwargs):
     revision = getattr(_context, 'revision', None)
     tracker = getattr(_context, 'tracker', None)
     config = getattr(_context, 'config', {})
+
+    # Fallback: if _patched_hf_hub_download was bypassed (import-order issue),
+    # try to recover context by inspecting the call stack.  The original
+    # hf_hub_download is still on the stack with repo_id, filename, etc.
+    if not (repo_id and filename and revision):
+        stack_ctx = _extract_context_from_stack()
+        if stack_ctx:
+            from .tracker_client import TrackerClient
+            repo_id = stack_ctx['repo_id']
+            filename = stack_ctx['filename']
+            revision = stack_ctx['revision']
+            repo_type = stack_ctx['repo_type']
+            tracker = TrackerClient(_config['tracker_url']) if _config.get('tracker_url') else None
+            config = _config
+            logger.debug(
+                f"[P2P] Recovered context from stack frame: "
+                f"{repo_id}/{filename}@{revision[:8]}..."
+            )
+            
+            # Since we bypassed _patched_hf_hub_download, we must schedule the
+            # deferred daemon notification here so the daemon knows to seed it.
+            with _deferred_lock:
+                wrapper_active = repo_id in _active_wrapper_repos
+            if not wrapper_active:
+                _schedule_deferred_notification(repo_id, revision, repo_type)
 
     if repo_id and filename and tracker and revision:
         try:
@@ -183,10 +355,21 @@ def _patched_snapshot_download(*args, **kwargs):
     we notify the seeding daemon so it can create a .torrent (if needed)
     and start seeding the model for future downloaders.
     """
+    repo_id = args[0] if args else kwargs.get('repo_id')
+
+    if repo_id:
+        with _deferred_lock:
+            _active_wrapper_repos.add(repo_id)
+
     # Reset stats to track which files went through HTTP vs P2P in this batch
     reset_download_stats()
 
-    result = _original_snapshot_download(*args, **kwargs)
+    try:
+        result = _original_snapshot_download(*args, **kwargs)
+    finally:
+        if repo_id:
+            with _deferred_lock:
+                _active_wrapper_repos.discard(repo_id)
 
     # After download completes, notify the daemon
     try:
@@ -203,6 +386,13 @@ def _patched_snapshot_download(*args, **kwargs):
             resolved = resolve_commit_hash(repo_id, revision, repo_type=repo_type)
         except Exception:
             resolved = revision
+
+        # Cancel any deferred notification — we handle it here directly.
+        with _deferred_lock:
+            timer = _deferred_timers.pop(repo_id, None)
+            if timer is not None:
+                timer.cancel()
+            _deferred_contexts.pop(repo_id, None)
 
         # Notify the daemon (fire-and-forget — safe even if daemon isn't running)
         from .ipc import notify_daemon

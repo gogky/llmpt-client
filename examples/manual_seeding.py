@@ -5,13 +5,14 @@ Example: Manual seeding control.
 from llmpt import enable_p2p, stop_seeding
 from llmpt.seeder import get_seeding_status
 from llmpt.utils import format_bytes
-from huggingface_hub import snapshot_download
 import time
 
-# Enable P2P without auto-seeding
+# Enable P2P without auto-seeding BEFORE importing huggingface_hub
 enable_p2p(
     tracker_url="http://localhost:8080"
 )
+
+from huggingface_hub import snapshot_download
 
 # Download model
 print("Downloading gpt2...")

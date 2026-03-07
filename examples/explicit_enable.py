@@ -1,11 +1,15 @@
 """
 Example: Explicit enable with custom configuration.
+
+Import order does NOT matter — you can import huggingface_hub functions
+before or after calling enable_p2p().
 """
 
+from huggingface_hub import snapshot_download   # OK to import first!
 from llmpt import enable_p2p, get_config
-from huggingface_hub import snapshot_download
 
-# Enable P2P with custom settings
+# Enable P2P with custom settings — works even though snapshot_download
+# was imported above.
 enable_p2p(
     tracker_url="http://localhost:8080",
     timeout=600  # 10 minute timeout

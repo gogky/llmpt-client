@@ -86,3 +86,246 @@ def test_double_apply_is_idempotent():
 
     assert patched_once is patched_twice, \
         "apply_patch() is not idempotent — double application wraps the function twice!"
+
+
+# ---------------------------------------------------------------------------
+# Deferred daemon notification (import-order fallback) tests
+# ---------------------------------------------------------------------------
+
+class TestDeferredDaemonNotification:
+    """Verify that daemon notifications fire even when snapshot_download
+    is imported BEFORE apply_patch (the import-order problem)."""
+
+    def test_deferred_notification_fires_when_snapshot_wrapper_inactive(self, monkeypatch):
+        """
+        Simulate the import-order scenario:
+          1) User does `from huggingface_hub import snapshot_download`
+          2) Then calls `enable_p2p()` (apply_patch)
+          3) Then calls the original snapshot_download reference
+
+        Since _patched_snapshot_download never wraps the call,
+        _patched_hf_hub_download should schedule a deferred notification
+        that eventually fires.
+        """
+        import llmpt.patch as patch_mod
+        from unittest.mock import MagicMock, patch as mock_patch
+        import time
+
+        apply_patch({'tracker_url': 'http://test-tracker'})
+
+        # Mock the daemon notification
+        mock_notify = MagicMock(return_value=True)
+        # Mock resolve_commit_hash to avoid network calls
+        mock_resolve = MagicMock(return_value='abc123' * 7)  # 42 chars
+
+        with mock_patch.object(patch_mod, '_active_wrapper_repos', set()):
+            with mock_patch('llmpt.utils.resolve_commit_hash', mock_resolve):
+                with mock_patch('llmpt.ipc.notify_daemon', mock_notify):
+                    # Directly call _patched_hf_hub_download with a fake original
+                    original_fn = MagicMock(return_value='/fake/path')
+                    patch_mod._original_hf_hub_download = original_fn
+
+                    patch_mod._patched_hf_hub_download('test/repo', 'model.bin',
+                                                       revision='main')
+
+                    # The timer is 2 seconds — wait a bit longer
+                    time.sleep(2.5)
+
+                    # Deferred notification should have fired
+                    mock_notify.assert_called_once()
+                    call_args = mock_notify.call_args
+                    assert call_args[0][0] == 'seed'
+                    assert call_args[1]['repo_id'] == 'test/repo'
+
+    def test_no_deferred_when_snapshot_wrapper_active(self, monkeypatch):
+        """When _patched_snapshot_download is wrapping the call,
+        no deferred notification should be scheduled."""
+        import llmpt.patch as patch_mod
+        from unittest.mock import MagicMock, patch as mock_patch
+        import time
+
+        apply_patch({'tracker_url': 'http://test-tracker'})
+
+        mock_notify = MagicMock(return_value=True)
+        mock_resolve = MagicMock(return_value='abc123' * 7)
+
+        # Simulate active wrapper repos (the normal case)
+        patch_mod._active_wrapper_repos.add('test/repo')
+        try:
+            with mock_patch('llmpt.utils.resolve_commit_hash', mock_resolve):
+                with mock_patch('llmpt.ipc.notify_daemon', mock_notify):
+                    original_fn = MagicMock(return_value='/fake/path')
+                    patch_mod._original_hf_hub_download = original_fn
+
+                    patch_mod._patched_hf_hub_download('test/repo', 'model.bin',
+                                                       revision='main')
+
+                    time.sleep(2.5)
+
+                    # No deferred notification should have fired
+                    mock_notify.assert_not_called()
+        finally:
+            patch_mod._active_wrapper_repos.discard('test/repo')
+
+
+# ---------------------------------------------------------------------------
+# Stack frame inspection (hf_hub_download import-order fallback) tests
+# ---------------------------------------------------------------------------
+
+class TestStackFrameInspection:
+    """Verify that _extract_context_from_stack correctly recovers P2P context
+    when hf_hub_download is imported BEFORE apply_patch."""
+
+    def test_extract_context_from_hf_hub_download_frame(self):
+        """Simulate a call stack where hf_hub_download is an ancestor frame.
+
+        _extract_context_from_stack should find the frame and extract
+        repo_id, filename, and commit_hash.
+        """
+        from llmpt.patch import _extract_context_from_stack
+
+        # Simulate being called from within an hf_hub_download call stack.
+        # We create a function named 'hf_hub_download' with the expected
+        # local variables, then call _extract_context_from_stack from within it.
+        def hf_hub_download():
+            repo_id = 'test-org/test-model'
+            filename = 'model.safetensors'
+            commit_hash = 'a' * 40  # 40-char SHA
+            revision = 'main'
+            repo_type = 'model'
+            subfolder = None
+
+            # Simulate the intermediate call chain
+            def _download_to_tmp_and_move():
+                return _extract_context_from_stack()
+
+            return _download_to_tmp_and_move()
+
+        result = hf_hub_download()
+
+        assert result is not None, "_extract_context_from_stack returned None"
+        assert result['repo_id'] == 'test-org/test-model'
+        assert result['filename'] == 'model.safetensors'
+        assert result['revision'] == 'a' * 40  # should prefer commit_hash
+        assert result['repo_type'] == 'model'
+
+    def test_extract_context_with_subfolder(self):
+        """subfolder should be prepended to filename."""
+        from llmpt.patch import _extract_context_from_stack
+
+        def hf_hub_download():
+            repo_id = 'test-org/test-model'
+            filename = 'weights.bin'
+            commit_hash = 'b' * 40
+            revision = 'main'
+            repo_type = 'model'
+            subfolder = 'unet'
+
+            def _download_to_tmp_and_move():
+                return _extract_context_from_stack()
+
+            return _download_to_tmp_and_move()
+
+        result = hf_hub_download()
+        assert result['filename'] == 'unet/weights.bin'
+
+    def test_extract_context_prefers_commit_hash_over_revision(self):
+        """When commit_hash is available, it should be used over revision."""
+        from llmpt.patch import _extract_context_from_stack
+
+        def hf_hub_download():
+            repo_id = 'owner/repo'
+            filename = 'file.bin'
+            commit_hash = 'c' * 40
+            revision = 'main'  # raw revision
+            repo_type = 'dataset'
+            subfolder = None
+
+            def inner():
+                return _extract_context_from_stack()
+            return inner()
+
+        result = hf_hub_download()
+        assert result['revision'] == 'c' * 40, "Should prefer commit_hash over 'main'"
+        assert result['repo_type'] == 'dataset'
+
+    def test_extract_context_falls_back_to_revision(self):
+        """When commit_hash is None, fall back to revision."""
+        from llmpt.patch import _extract_context_from_stack
+
+        def hf_hub_download():
+            repo_id = 'owner/repo'
+            filename = 'file.bin'
+            commit_hash = None
+            revision = 'v1.0'
+            repo_type = None  # should default to 'model'
+            subfolder = None
+
+            def inner():
+                return _extract_context_from_stack()
+            return inner()
+
+        result = hf_hub_download()
+        assert result['revision'] == 'v1.0'
+        assert result['repo_type'] == 'model'
+
+    def test_returns_none_when_not_in_hf_hub_download(self):
+        """When called outside of hf_hub_download, should return None."""
+        from llmpt.patch import _extract_context_from_stack
+
+        def some_other_function():
+            def deeper():
+                return _extract_context_from_stack()
+            return deeper()
+
+        result = some_other_function()
+        assert result is None
+
+
+    def test_http_get_schedules_notification_from_stack(self, monkeypatch):
+        """When hf_hub_download is imported before enable_p2p, _patched_hf_hub_download
+        is bypassed. _patched_http_get must schedule the deferred notification itself
+        after recovering context from the stack."""
+        import llmpt.patch as patch_mod
+        from unittest.mock import MagicMock, patch as mock_patch
+        import time
+
+        apply_patch({'tracker_url': 'http://test-tracker'})
+
+        mock_notify = MagicMock(return_value=True)
+
+        with mock_patch.object(patch_mod, '_active_wrapper_repos', set()):
+            with mock_patch('llmpt.ipc.notify_daemon', mock_notify):
+                
+                # Mock a call stack as if hf_hub_download was bypassed
+                def hf_hub_download():
+                    repo_id = 'org/model-from-stack'
+                    filename = 'weights.bin'
+                    commit_hash = 'd' * 40
+                    revision = 'main'
+                    repo_type = 'model'
+                    
+                    def _call_http_get():
+                        # Call _patched_http_get. It should inspect the stack, find this frame,
+                        # and then trigger a deferred notification.
+                        mock_file = MagicMock()
+                        mock_file.name = '/tmp/fake'
+                        
+                        # Mock the actual HTTP fetch or P2P bypass so it doesn't try to download
+                        with mock_patch('llmpt.patch.P2PBatchManager'):
+                            # Also mock original_http_get to do nothing
+                            with mock_patch.object(patch_mod, '_original_http_get'):
+                                patch_mod._patched_http_get('http://fake', mock_file)
+                    
+                    _call_http_get()
+
+                hf_hub_download()
+
+                # Wait for the deferred timer (2 seconds) to fire
+                time.sleep(2.5)
+
+                mock_notify.assert_called_once()
+                call_args = mock_notify.call_args
+                assert call_args[0][0] == 'seed'
+                assert call_args[1]['repo_id'] == 'org/model-from-stack'
+                assert call_args[1]['revision'] == 'd' * 40

@@ -170,12 +170,14 @@ Examples:
 def cmd_download(args):
     """Execute download command."""
     from llmpt import enable_p2p, get_config
-    from huggingface_hub import snapshot_download
 
-    # Enable P2P
+    # Enable P2P FIRST, so patches are applied
     enable_p2p(
         tracker_url=args.tracker
     )
+
+    # NOW import the patched function
+    from huggingface_hub import snapshot_download
 
     print(f"Downloading {args.repo_id}...")
 

@@ -4,6 +4,9 @@ llmpt - P2P-accelerated download client for HuggingFace Hub
 This package provides seamless P2P acceleration for HuggingFace Hub downloads
 using BitTorrent protocol. It works as a drop-in replacement with zero code changes.
 
+Import order does NOT matter — only ``enable_p2p()`` (or the ``HF_USE_P2P=1``
+environment variable) must be called/set before the first download starts.
+
 Usage:
     # Method 1: Environment variable
     export HF_USE_P2P=1
@@ -11,11 +14,11 @@ Usage:
     from huggingface_hub import snapshot_download
     snapshot_download("meta-llama/Llama-2-7b")  # Automatically uses P2P
 
-    # Method 2: Explicit enable
+    # Method 2: Explicit enable (import order does NOT matter)
+    from huggingface_hub import snapshot_download
     from llmpt import enable_p2p
     enable_p2p()
-    from huggingface_hub import snapshot_download
-    snapshot_download("meta-llama/Llama-2-7b")
+    snapshot_download("meta-llama/Llama-2-7b")  # Works correctly!
 """
 
 import os
@@ -109,9 +112,9 @@ def enable_p2p(
                  Set to False to disable WebSeed (useful for debugging).
 
     Example:
+        >>> from huggingface_hub import snapshot_download  # Import order doesn't matter
         >>> from llmpt import enable_p2p
         >>> enable_p2p(tracker_url="http://tracker.example.com")
-        >>> from huggingface_hub import snapshot_download
         >>> snapshot_download("gpt2")  # Uses P2P
     """
     global _patched, _config, _atexit_registered, _webseed_proxy
