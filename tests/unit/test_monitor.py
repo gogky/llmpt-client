@@ -470,9 +470,6 @@ class TestDeliverOutsideLock:
         event = threading.Event()
         ctx.file_events = {"model.bin": event}
         ctx.file_destinations = {"model.bin": "/dest/model.bin"}
-        ctx.auto_seed = False
-        ctx.seed_start_time = None
-        ctx.seed_duration = 0
 
         # No error
         status = MagicMock(spec=['state'])

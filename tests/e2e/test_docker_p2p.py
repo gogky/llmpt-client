@@ -28,6 +28,25 @@ EXPECTED_FILES = {"config.json", "pytorch_model.bin", "tokenizer.json"}
 DATASET_ID = "fka/prompts.chat"
 EXPECTED_DATASET_FILES = {"prompts.csv", "README.md"}
 
+# Signal file shared with the seeder container via /app volume mount.
+_SIGNAL_FILE = "/app/.e2e_tests_done"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def signal_seeder_on_completion():
+    """Signal the seeder container when all P2P download tests are done.
+
+    The seeder polls for this file instead of sleeping a fixed duration,
+    ensuring it stays alive exactly as long as needed.
+    """
+    # Clean stale signal from a previous run
+    if os.path.exists(_SIGNAL_FILE):
+        os.remove(_SIGNAL_FILE)
+    yield
+    # Write signal — runs even if tests fail
+    with open(_SIGNAL_FILE, "w") as f:
+        f.write("done")
+
 
 # ─── Shared helpers ──────────────────────────────────────────────────────────
 
@@ -146,7 +165,7 @@ def test_true_p2p_download():
     time.sleep(15)
 
     tracker_url = os.environ.get("TRACKER_URL", "http://118.195.159.242")
-    llmpt.enable_p2p(tracker_url=tracker_url, timeout=60, webseed=False)
+    llmpt.enable_p2p(tracker_url=tracker_url, timeout=120, webseed=False)
 
     # Reset download stats before the test
     from llmpt.patch import reset_download_stats, get_download_stats
@@ -197,7 +216,7 @@ def test_dataset_p2p_download():
     time.sleep(15)
 
     tracker_url = os.environ.get("TRACKER_URL", "http://118.195.159.242")
-    llmpt.enable_p2p(tracker_url=tracker_url, timeout=60, webseed=False)
+    llmpt.enable_p2p(tracker_url=tracker_url, timeout=120, webseed=False)
 
     # Reset download stats before the test
     from llmpt.patch import reset_download_stats, get_download_stats
@@ -358,7 +377,7 @@ def test_webseed_with_p2p_download():
     time.sleep(15)
 
     tracker_url = os.environ.get("TRACKER_URL", "http://118.195.159.242")
-    llmpt.enable_p2p(tracker_url=tracker_url, timeout=60, webseed=True)
+    llmpt.enable_p2p(tracker_url=tracker_url, timeout=120, webseed=True)
 
     # Verify WebSeed proxy is running
     config = llmpt.get_config()

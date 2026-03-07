@@ -91,13 +91,32 @@ def test_seeder_initialization():
         "Check daemon logs at ~/.cache/llmpt/daemon.log"
     )
 
-    # ── 4. Keep seeding for 3 minutes ──
-    print("[Seeder] Seeding for 180s...", flush=True)
-    time.sleep(180)
+    # ── 4. Wait for downloader to signal that P2P tests are done ──
+    # Instead of blindly sleeping a fixed duration (which causes flaky tests
+    # when the download takes longer than expected), we wait for the downloader
+    # to write a signal file.  Both containers share /app via volume mount.
+    signal_file = "/app/.e2e_tests_done"
+    # Clean up stale signal from previous runs
+    if os.path.exists(signal_file):
+        os.remove(signal_file)
+
+    max_wait = 600  # 10 minutes absolute safety net
+    print(f"[Seeder] Seeding until downloader signals completion (max {max_wait}s)...", flush=True)
+    deadline = time.time() + max_wait
+    while time.time() < deadline:
+        if os.path.exists(signal_file):
+            print("[Seeder] Downloader signaled completion. Stopping.", flush=True)
+            break
+        time.sleep(5)
+    else:
+        print(f"[Seeder] Timed out after {max_wait}s waiting for downloader signal.", flush=True)
 
     # ── 5. Clean up ──
     print("[Seeder] Stopping daemon...", flush=True)
     stop_daemon()
+    # Remove signal file so it doesn't affect next run
+    if os.path.exists(signal_file):
+        os.remove(signal_file)
     print("[Seeder] ✅ Seeding session completed.", flush=True)
 
 

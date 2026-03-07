@@ -481,10 +481,18 @@ class SessionContext:
             logger.debug(f"[{self.repo_id}] Copied {src} -> {dst}")
 
     def cleanup_temp_dir(self):
-        """Delete the temporary directory containing download payloads."""
-        if self.temp_dir and os.path.isdir(self.temp_dir):
-            try:
-                shutil.rmtree(self.temp_dir, ignore_errors=True)
-                logger.debug(f"[{self.repo_id}] Cleaned up temp dir: {self.temp_dir}")
-            except Exception as e:
-                logger.debug(f"[{self.repo_id}] Failed to clean temp dir {self.temp_dir}: {e}")
+        """Delete this torrent's subdirectory within p2p_root.
+
+        Each torrent stores its files under ``p2p_root/{torrent_name}/``.
+        We only clean up this torrent's subdirectory, leaving other
+        sessions' data intact.
+        """
+        if not self.temp_dir or not self.torrent_info_obj:
+            return
+        try:
+            torrent_subdir = os.path.join(self.temp_dir, self.torrent_info_obj.name())
+            if os.path.isdir(torrent_subdir):
+                shutil.rmtree(torrent_subdir, ignore_errors=True)
+                logger.debug(f"[{self.repo_id}] Cleaned up torrent dir: {torrent_subdir}")
+        except Exception as e:
+            logger.debug(f"[{self.repo_id}] Failed to clean torrent dir: {e}")
