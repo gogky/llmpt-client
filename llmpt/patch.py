@@ -31,14 +31,41 @@ _download_stats = {
 }
 
 # Fallback daemon notification via debounce.
-# When _patched_snapshot_download runs, it adds repo_id to _active_wrapper_repos
+# When _patched_snapshot_download runs, it increments _active_wrapper_counts[repo_id]
 # so the fallback in _patched_hf_hub_download is suppressed.  When the user
 # imports snapshot_download BEFORE enable_p2p(), _patched_snapshot_download
 # never runs, and this fallback fires after a 2-second quiet period.
 _deferred_lock = threading.Lock()
-_deferred_timers: dict[str, threading.Timer] = {}
-_deferred_contexts: dict[str, dict] = {}   # repo_id -> {repo_id, revision, repo_type}
-_active_wrapper_repos: set[str] = set()
+_deferred_timers: dict[tuple[str, str, str], threading.Timer] = {}
+_deferred_contexts: dict[tuple[str, str, str], dict] = {}   # (repo_type, repo_id, revision) -> context
+_active_wrapper_counts: dict[str, int] = {}  # repo_id -> active wrapper depth
+
+
+def _deferred_key(repo_id: str, revision: str, repo_type: str) -> tuple[str, str, str]:
+    """Build the dedupe key for deferred daemon notifications."""
+    return (repo_type or "model", repo_id, revision or "main")
+
+
+def _is_wrapper_active(repo_id: str) -> bool:
+    """Return True if patched snapshot_download is currently wrapping this repo."""
+    with _deferred_lock:
+        return _active_wrapper_counts.get(repo_id, 0) > 0
+
+
+def _enter_wrapper(repo_id: str) -> None:
+    """Increment active wrapper depth for a repo."""
+    with _deferred_lock:
+        _active_wrapper_counts[repo_id] = _active_wrapper_counts.get(repo_id, 0) + 1
+
+
+def _exit_wrapper(repo_id: str) -> None:
+    """Decrement active wrapper depth for a repo."""
+    with _deferred_lock:
+        depth = _active_wrapper_counts.get(repo_id, 0)
+        if depth <= 1:
+            _active_wrapper_counts.pop(repo_id, None)
+        else:
+            _active_wrapper_counts[repo_id] = depth - 1
 
 def _flush_deferred_notifications():
     """Flush pending deferred notifications on process exit."""
@@ -147,11 +174,11 @@ def _extract_context_from_stack() -> Optional[dict]:
     return None
 
 
-def _fire_deferred_notification(repo_id: str) -> None:
+def _fire_deferred_notification(key: tuple[str, str, str]) -> None:
     """Called by the debounce timer — sends a daemon seed notification."""
     with _deferred_lock:
-        ctx = _deferred_contexts.pop(repo_id, None)
-        _deferred_timers.pop(repo_id, None)
+        ctx = _deferred_contexts.pop(key, None)
+        _deferred_timers.pop(key, None)
         
     if ctx is None:
         return
@@ -182,23 +209,24 @@ def _schedule_deferred_notification(
     This acts as a fallback for when _patched_snapshot_download is
     bypassed due to import-order issues.
     """
+    key = _deferred_key(repo_id, revision, repo_type)
     with _deferred_lock:
-        # Cancel any existing timer for this specific repo_id
-        timer = _deferred_timers.get(repo_id)
+        # Cancel any existing timer for this specific repo+revision.
+        timer = _deferred_timers.get(key)
         if timer is not None:
             timer.cancel()
             
-        _deferred_contexts[repo_id] = {
+        _deferred_contexts[key] = {
             'repo_id': repo_id,
             'revision': revision,
             'repo_type': repo_type,
         }
         
         # Start a new timer
-        new_timer = threading.Timer(2.0, _fire_deferred_notification, args=[repo_id])
+        new_timer = threading.Timer(2.0, _fire_deferred_notification, args=[key])
         new_timer.daemon = True
         new_timer.start()
-        _deferred_timers[repo_id] = new_timer
+        _deferred_timers[key] = new_timer
 
 
 def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
@@ -244,9 +272,12 @@ def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
     _context.tracker = tracker
     _context.config = _config
 
+    download_succeeded = False
     try:
         # Call original function (will trigger patched http_get)
-        return _original_hf_hub_download(repo_id, filename, **kwargs)
+        result = _original_hf_hub_download(repo_id, filename, **kwargs)
+        download_succeeded = True
+        return result
     finally:
         # Restore previous context instead of clearing it (supports recursion)
         _context.repo_id = prev_repo_id
@@ -259,10 +290,7 @@ def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
         # Fallback daemon notification: if _patched_snapshot_download is not
         # wrapping this call (import-order issue), schedule a deferred
         # notification so the daemon still learns about this download.
-        with _deferred_lock:
-            wrapper_active = repo_id in _active_wrapper_repos
-            
-        if not wrapper_active:
+        if download_succeeded and not _is_wrapper_active(repo_id):
             _schedule_deferred_notification(repo_id, revision, repo_type)
 
 
@@ -275,6 +303,7 @@ def _patched_http_get(url: str, temp_file, **kwargs):
     revision = getattr(_context, 'revision', None)
     tracker = getattr(_context, 'tracker', None)
     config = getattr(_context, 'config', {})
+    schedule_deferred = False
 
     # Fallback: if _patched_hf_hub_download was bypassed (import-order issue),
     # try to recover context by inspecting the call stack.  The original
@@ -296,10 +325,8 @@ def _patched_http_get(url: str, temp_file, **kwargs):
             
             # Since we bypassed _patched_hf_hub_download, we must schedule the
             # deferred daemon notification here so the daemon knows to seed it.
-            with _deferred_lock:
-                wrapper_active = repo_id in _active_wrapper_repos
-            if not wrapper_active:
-                _schedule_deferred_notification(repo_id, revision, repo_type)
+            # Do this only after the file transfer succeeds.
+            schedule_deferred = not _is_wrapper_active(repo_id)
 
     if repo_id and filename and tracker and revision:
         try:
@@ -331,6 +358,8 @@ def _patched_http_get(url: str, temp_file, **kwargs):
                 logger.info(f"[P2P] Successfully delivered {filename} via P2P.")
                 with _stats_lock:
                     _download_stats['p2p'].add(filename)
+                if schedule_deferred:
+                    _schedule_deferred_notification(repo_id, revision, repo_type)
                 return  # Skip original http_get completely!
             else:
                 logger.warning(f"[P2P] P2P fulfillment failed for {filename}. Falling back to HTTP.")
@@ -345,7 +374,10 @@ def _patched_http_get(url: str, temp_file, **kwargs):
     if filename:
         with _stats_lock:
             _download_stats['http'].add(filename)
-    return _original_http_get(url, temp_file, **{**kwargs, 'resume_size': 0})
+    result = _original_http_get(url, temp_file, **{**kwargs, 'resume_size': 0})
+    if schedule_deferred:
+        _schedule_deferred_notification(repo_id, revision, repo_type)
+    return result
 
 
 def _patched_snapshot_download(*args, **kwargs):
@@ -358,8 +390,7 @@ def _patched_snapshot_download(*args, **kwargs):
     repo_id = args[0] if args else kwargs.get('repo_id')
 
     if repo_id:
-        with _deferred_lock:
-            _active_wrapper_repos.add(repo_id)
+        _enter_wrapper(repo_id)
 
     # Reset stats to track which files went through HTTP vs P2P in this batch
     reset_download_stats()
@@ -368,8 +399,7 @@ def _patched_snapshot_download(*args, **kwargs):
         result = _original_snapshot_download(*args, **kwargs)
     finally:
         if repo_id:
-            with _deferred_lock:
-                _active_wrapper_repos.discard(repo_id)
+            _exit_wrapper(repo_id)
 
     # After download completes, notify the daemon
     try:
@@ -387,12 +417,24 @@ def _patched_snapshot_download(*args, **kwargs):
         except Exception:
             resolved = revision
 
-        # Cancel any deferred notification — we handle it here directly.
+        # Cancel any deferred notification for this exact snapshot identity —
+        # we handle it here directly.
+        keys_to_cancel = []
         with _deferred_lock:
-            timer = _deferred_timers.pop(repo_id, None)
-            if timer is not None:
-                timer.cancel()
-            _deferred_contexts.pop(repo_id, None)
+            for key in list(_deferred_timers.keys()):
+                key_repo_type, key_repo_id, key_revision = key
+                if (
+                    key_repo_type == repo_type and
+                    key_repo_id == repo_id and
+                    key_revision in {revision, resolved}
+                ):
+                    keys_to_cancel.append(key)
+
+            for key in keys_to_cancel:
+                timer = _deferred_timers.pop(key, None)
+                if timer is not None:
+                    timer.cancel()
+                _deferred_contexts.pop(key, None)
 
         # Notify the daemon (fire-and-forget — safe even if daemon isn't running)
         from .ipc import notify_daemon
@@ -476,6 +518,12 @@ def remove_patch() -> None:
         _original_http_get = None
         _original_snapshot_download = None
         _config = {}
+        with _deferred_lock:
+            for timer in _deferred_timers.values():
+                timer.cancel()
+            _deferred_timers.clear()
+            _deferred_contexts.clear()
+            _active_wrapper_counts.clear()
 
         logger.debug("Monkey patch removed successfully")
     except ImportError:

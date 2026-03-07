@@ -17,6 +17,7 @@ import atexit
 import json
 import logging
 import os
+import random
 import signal
 import sys
 import time
@@ -33,6 +34,9 @@ LOG_FILE = os.path.join(LLMPT_DIR, "daemon.log")
 
 # Daemon configuration
 SCAN_INTERVAL = 300  # seconds between full HF cache scans
+RETRY_BASE_DELAY = 60   # first retry after 60s
+RETRY_MAX_DELAY = 3600  # cap backoff at 1h
+RETRY_JITTER_RATIO = 0.10
 
 
 # ---------------------------------------------------------------------------
@@ -231,8 +235,9 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
 
     # Track what we're already seeding to avoid duplicate work
     seeding_set: Set[Tuple[str, str, str]] = set()
-    # Track what we've already attempted (to avoid re-processing failures)
-    attempted_set: Set[Tuple[str, str, str]] = set()
+    # Failed seed attempts with retry/backoff metadata.
+    # key -> {"attempts": int, "next_retry_ts": float, "last_error": str}
+    failed_attempts: Dict[Tuple[str, str, str], Dict[str, object]] = {}
 
     running = True
 
@@ -256,9 +261,11 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
                 key = (repo_type, repo_id, revision)
                 if key not in seeding_set:
                     logger.info(f"IPC: seed request for {repo_id}@{revision[:8]}...")
+                    # Explicit seed requests should not wait for backoff.
+                    failed_attempts.pop(key, None)
                     _process_seedable(
                         repo_id, revision, tracker_client, manager,
-                        seeding_set, attempted_set, repo_type=repo_type,
+                        seeding_set, failed_attempts, repo_type=repo_type,
                     )
                 return {"status": "ok"}
 
@@ -283,8 +290,8 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
 
         elif action == "scan":
             nonlocal last_scan_time
-            # Clear attempted set and reset scan timer to trigger immediate rescan
-            attempted_set.clear()
+            # Clear failure backoff and reset scan timer to trigger immediate rescan
+            failed_attempts.clear()
             last_scan_time = 0.0
             return {"status": "ok", "message": "scan triggered"}
 
@@ -317,7 +324,7 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
             if now - last_scan_time >= SCAN_INTERVAL:
                 last_scan_time = now
                 _scan_and_seed(
-                    tracker_client, manager, seeding_set, attempted_set
+                    tracker_client, manager, seeding_set, failed_attempts
                 )
 
             time.sleep(1)
@@ -338,27 +345,59 @@ def _scan_and_seed(
     tracker_client,
     manager,
     seeding_set: Set[Tuple[str, str, str]],
-    attempted_set: Set[Tuple[str, str, str]],
+    failed_attempts: Dict[Tuple[str, str, str], Dict[str, object]],
 ) -> None:
     """Scan HF cache and start seeding any new models found."""
     from llmpt.cache_scanner import scan_hf_cache
 
     seedable = scan_hf_cache()
     new_count = 0
+    now = time.time()
 
     for repo_type, repo_id, revision in seedable:
         key = (repo_type, repo_id, revision)
-        if key in seeding_set or key in attempted_set:
+        if key in seeding_set:
             continue
+
+        failure = failed_attempts.get(key)
+        if failure is not None:
+            next_retry_ts = float(failure.get("next_retry_ts", 0.0))
+            if now < next_retry_ts:
+                continue
 
         _process_seedable(
             repo_id, revision, tracker_client, manager,
-            seeding_set, attempted_set, repo_type=repo_type,
+            seeding_set, failed_attempts, repo_type=repo_type,
         )
         new_count += 1
 
     if new_count > 0:
         logger.info(f"Scan processed {new_count} new models")
+
+
+def _record_seed_failure(
+    key: Tuple[str, str, str],
+    failed_attempts: Dict[Tuple[str, str, str], Dict[str, object]],
+    reason: str,
+) -> None:
+    """Record a failed seed attempt and compute its next retry deadline."""
+    state = failed_attempts.get(key, {"attempts": 0})
+    attempts = int(state.get("attempts", 0)) + 1
+    backoff = min(RETRY_BASE_DELAY * (2 ** (attempts - 1)), RETRY_MAX_DELAY)
+    jitter = random.uniform(0, backoff * RETRY_JITTER_RATIO)
+    next_retry = time.time() + backoff + jitter
+    failed_attempts[key] = {
+        "attempts": attempts,
+        "next_retry_ts": next_retry,
+        "last_error": reason,
+    }
+
+    _, repo_id, revision = key
+    wait_seconds = max(1, int(next_retry - time.time()))
+    logger.warning(
+        f"[{repo_id}@{revision[:8]}] Seeding attempt failed ({reason}). "
+        f"Retry in {wait_seconds}s (attempt {attempts})."
+    )
 
 
 def _process_seedable(
@@ -367,13 +406,12 @@ def _process_seedable(
     tracker_client,
     manager,
     seeding_set: Set[Tuple[str, str, str]],
-    attempted_set: Set[Tuple[str, str, str]],
+    failed_attempts: Dict[Tuple[str, str, str], Dict[str, object]],
     *,
     repo_type: str = "model"
-) -> None:
+) -> bool:
     """Process a single seedable model: create torrent if needed, start seeding."""
     key = (repo_type, repo_id, revision)
-    attempted_set.add(key)
 
     logger.info(f"[{repo_id}@{revision[:8]}] Processing seedable model...")
 
@@ -405,7 +443,8 @@ def _process_seedable(
                 )
             else:
                 logger.warning(f"[{repo_id}] Failed to create torrent")
-                return
+                _record_seed_failure(key, failed_attempts, "create_torrent_failed")
+                return False
         else:
             logger.info(f"[{repo_id}] Found existing torrent ({len(torrent_data)} bytes)")
 
@@ -421,10 +460,15 @@ def _process_seedable(
 
         if success:
             seeding_set.add(key)
+            failed_attempts.pop(key, None)
             logger.info(f"[{repo_id}] ✓ Seeding started successfully")
+            return True
         else:
             logger.warning(f"[{repo_id}] ✗ Failed to start seeding (register_seeding_task returned False)")
+            _record_seed_failure(key, failed_attempts, "register_seeding_task_false")
+            return False
 
     except Exception as e:
         logger.error(f"[{repo_id}] Error processing seedable: {e}", exc_info=True)
-
+        _record_seed_failure(key, failed_attempts, f"exception:{type(e).__name__}")
+        return False

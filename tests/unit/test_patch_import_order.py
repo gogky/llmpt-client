@@ -118,7 +118,7 @@ class TestDeferredDaemonNotification:
         # Mock resolve_commit_hash to avoid network calls
         mock_resolve = MagicMock(return_value='abc123' * 7)  # 42 chars
 
-        with mock_patch.object(patch_mod, '_active_wrapper_repos', set()):
+        with mock_patch.object(patch_mod, '_active_wrapper_counts', {}):
             with mock_patch('llmpt.utils.resolve_commit_hash', mock_resolve):
                 with mock_patch('llmpt.ipc.notify_daemon', mock_notify):
                     # Directly call _patched_hf_hub_download with a fake original
@@ -150,7 +150,7 @@ class TestDeferredDaemonNotification:
         mock_resolve = MagicMock(return_value='abc123' * 7)
 
         # Simulate active wrapper repos (the normal case)
-        patch_mod._active_wrapper_repos.add('test/repo')
+        patch_mod._active_wrapper_counts['test/repo'] = 1
         try:
             with mock_patch('llmpt.utils.resolve_commit_hash', mock_resolve):
                 with mock_patch('llmpt.ipc.notify_daemon', mock_notify):
@@ -165,7 +165,54 @@ class TestDeferredDaemonNotification:
                     # No deferred notification should have fired
                     mock_notify.assert_not_called()
         finally:
-            patch_mod._active_wrapper_repos.discard('test/repo')
+            patch_mod._active_wrapper_counts.pop('test/repo', None)
+
+    def test_deferred_dedup_key_preserves_multiple_revisions(self, monkeypatch):
+        """Different revisions for the same repo should trigger separate notifications."""
+        import llmpt.patch as patch_mod
+        from unittest.mock import MagicMock, patch as mock_patch
+        import time
+
+        apply_patch({'tracker_url': 'http://test-tracker'})
+
+        mock_notify = MagicMock(return_value=True)
+        revisions = ['a' * 40, 'b' * 40]
+
+        with mock_patch.object(patch_mod, '_active_wrapper_counts', {}):
+            with mock_patch('llmpt.utils.resolve_commit_hash', side_effect=revisions):
+                with mock_patch('llmpt.ipc.notify_daemon', mock_notify):
+                    patch_mod._original_hf_hub_download = MagicMock(return_value='/fake/path')
+
+                    patch_mod._patched_hf_hub_download('test/repo', 'model.bin', revision='rev-a')
+                    patch_mod._patched_hf_hub_download('test/repo', 'model.bin', revision='rev-b')
+
+                    time.sleep(2.5)
+
+                    assert mock_notify.call_count == 2
+                    notified_revs = sorted(call.kwargs['revision'] for call in mock_notify.call_args_list)
+                    assert notified_revs == sorted(revisions)
+
+    def test_no_deferred_notification_when_hf_download_fails(self, monkeypatch):
+        """If hf_hub_download raises, we should not notify daemon."""
+        import llmpt.patch as patch_mod
+        from unittest.mock import MagicMock, patch as mock_patch
+        import time
+
+        apply_patch({'tracker_url': 'http://test-tracker'})
+
+        mock_notify = MagicMock(return_value=True)
+        failing_fn = MagicMock(side_effect=RuntimeError("download failed"))
+
+        with mock_patch.object(patch_mod, '_active_wrapper_counts', {}):
+            with mock_patch('llmpt.utils.resolve_commit_hash', return_value='c' * 40):
+                with mock_patch('llmpt.ipc.notify_daemon', mock_notify):
+                    patch_mod._original_hf_hub_download = failing_fn
+
+                    with pytest.raises(RuntimeError, match="download failed"):
+                        patch_mod._patched_hf_hub_download('test/repo', 'model.bin', revision='main')
+
+                    time.sleep(2.5)
+                    mock_notify.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +341,7 @@ class TestStackFrameInspection:
 
         mock_notify = MagicMock(return_value=True)
 
-        with mock_patch.object(patch_mod, '_active_wrapper_repos', set()):
+        with mock_patch.object(patch_mod, '_active_wrapper_counts', {}):
             with mock_patch('llmpt.ipc.notify_daemon', mock_notify):
                 
                 # Mock a call stack as if hf_hub_download was bypassed
@@ -312,9 +359,12 @@ class TestStackFrameInspection:
                         mock_file.name = '/tmp/fake'
                         
                         # Mock the actual HTTP fetch or P2P bypass so it doesn't try to download
-                        with mock_patch('llmpt.patch.P2PBatchManager'):
+                        with mock_patch('llmpt.p2p_batch.P2PBatchManager') as mock_manager_cls:
+                            mock_manager = MagicMock()
+                            mock_manager.register_request.return_value = False
+                            mock_manager_cls.return_value = mock_manager
                             # Also mock original_http_get to do nothing
-                            with mock_patch.object(patch_mod, '_original_http_get'):
+                            with mock_patch.object(patch_mod, '_original_http_get', return_value=None):
                                 patch_mod._patched_http_get('http://fake', mock_file)
                     
                     _call_http_get()
@@ -329,3 +379,46 @@ class TestStackFrameInspection:
                 assert call_args[0][0] == 'seed'
                 assert call_args[1]['repo_id'] == 'org/model-from-stack'
                 assert call_args[1]['revision'] == 'd' * 40
+
+    def test_http_get_does_not_schedule_when_http_fails(self, monkeypatch):
+        """Stack fallback must not notify daemon if HTTP fallback raises."""
+        import llmpt.patch as patch_mod
+        from unittest.mock import MagicMock, patch as mock_patch
+        import time
+
+        apply_patch({'tracker_url': 'http://test-tracker'})
+
+        mock_notify = MagicMock(return_value=True)
+
+        with mock_patch.object(patch_mod, '_active_wrapper_counts', {}):
+            with mock_patch('llmpt.ipc.notify_daemon', mock_notify):
+
+                def hf_hub_download():
+                    repo_id = 'org/model-from-stack'
+                    filename = 'weights.bin'
+                    commit_hash = 'e' * 40
+                    revision = 'main'
+                    repo_type = 'model'
+
+                    def _call_http_get():
+                        mock_file = MagicMock()
+                        mock_file.name = '/tmp/fake'
+
+                        with mock_patch('llmpt.p2p_batch.P2PBatchManager') as mock_manager_cls:
+                            mock_manager = MagicMock()
+                            mock_manager.register_request.return_value = False
+                            mock_manager_cls.return_value = mock_manager
+
+                            with mock_patch.object(
+                                patch_mod,
+                                '_original_http_get',
+                                side_effect=RuntimeError("http failed"),
+                            ):
+                                with pytest.raises(RuntimeError, match="http failed"):
+                                    patch_mod._patched_http_get('http://fake', mock_file)
+
+                    _call_http_get()
+
+                hf_hub_download()
+                time.sleep(2.5)
+                mock_notify.assert_not_called()
