@@ -36,8 +36,6 @@ _patched = False
 _atexit_registered = False
 _config = {
     'tracker_url': None,
-    'auto_seed': True,
-    'seed_duration': 3600,  # 1 hour
     'timeout': 300,  # 5 minutes
     'port': None,  # None = use default 6881 with auto-fallback; set int to override
     'hf_token': None,  # HuggingFace token for WebSeed proxy (private/gated repos)
@@ -92,8 +90,6 @@ def _restore_xet_storage(config: dict) -> None:
 
 def enable_p2p(
     tracker_url: Optional[str] = None,
-    auto_seed: bool = True,
-    seed_duration: int = 3600,
     timeout: int = 300,
     port: Optional[int] = None,
     hf_token: Optional[str] = None,
@@ -105,8 +101,6 @@ def enable_p2p(
     Args:
         tracker_url: Tracker server URL. If None, uses HF_P2P_TRACKER env var
                      or default tracker.
-        auto_seed: Whether to automatically seed downloaded files.
-        seed_duration: How long to seed in seconds (0 = forever).
         timeout: P2P download timeout in seconds.
         port: The port to bind libtorrent to. Defaults to HF_P2P_PORT env var,
               or auto-selects from 6881-6999 range.
@@ -139,8 +133,6 @@ def enable_p2p(
         or os.getenv('HF_P2P_TRACKER')
         or 'http://localhost:8080'  # Default tracker
     )
-    _config['auto_seed'] = auto_seed
-    _config['seed_duration'] = seed_duration
     _config['timeout'] = timeout
     _config['hf_token'] = hf_token
     _config['webseed'] = webseed
@@ -173,26 +165,25 @@ def enable_p2p(
 
     _patched = True
 
-    # Auto-start the seeding daemon if auto_seed is enabled.
+    # Always attempt to start the seeding daemon in the background.
     # The daemon runs as an independent background process that survives
     # the current HF process exit, ensuring continuous seeding.
-    if auto_seed:
-        try:
-            from .daemon import is_daemon_running, start_daemon
-            if not is_daemon_running():
-                daemon_pid = start_daemon(
-                    tracker_url=_config['tracker_url'],
-                    port=_config.get('port'),
-                )
-                if daemon_pid:
-                    logger.info(f"Seeding daemon auto-started (PID: {daemon_pid})")
-                else:
-                    logger.debug("Could not auto-start seeding daemon")
+    try:
+        from .daemon import is_daemon_running, start_daemon
+        if not is_daemon_running():
+            daemon_pid = start_daemon(
+                tracker_url=_config['tracker_url'],
+                port=_config.get('port'),
+            )
+            if daemon_pid:
+                logger.info(f"Seeding daemon auto-started (PID: {daemon_pid})")
             else:
-                logger.debug("Seeding daemon already running")
-        except Exception as e:
-            # Non-fatal: daemon auto-start failure should never break downloads
-            logger.debug(f"Seeding daemon auto-start skipped: {e}")
+                logger.debug("Could not auto-start seeding daemon")
+        else:
+            logger.debug("Seeding daemon already running")
+    except Exception as e:
+        # Non-fatal: daemon auto-start failure should never break downloads
+        logger.debug(f"Seeding daemon auto-start skipped: {e}")
 
     # Register atexit handler (once) so process exit always cleans up
     if not _atexit_registered:
@@ -321,8 +312,6 @@ def _auto_enable_from_env():
         logger.info("[Auto] Detected HF_USE_P2P=1, enabling P2P...")
         enable_p2p(
             tracker_url=os.getenv('HF_P2P_TRACKER'),
-            auto_seed=os.getenv('HF_P2P_AUTO_SEED', '1') == '1',
-            seed_duration=int(os.getenv('HF_P2P_SEED_TIME', '3600')),
             timeout=int(os.getenv('HF_P2P_TIMEOUT', '300')),
             webseed=os.getenv('HF_P2P_WEBSEED', '1') == '1',
         )

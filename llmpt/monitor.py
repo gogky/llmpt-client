@@ -41,14 +41,9 @@ def run_monitor_loop(ctx: "SessionContext") -> None:
         while True:
             time.sleep(1)
 
-            # Snapshot shared state under lock to avoid TOCTOU races with
-            # stop_seeding() / shutdown() which set handle=None / is_valid=False,
-            # and download_file() which resets seed_start_time=None.
             with ctx.lock:
                 if not ctx.is_valid or not ctx.handle:
                     break
-                seed_start = ctx.seed_start_time
-                seed_dur = ctx.seed_duration
 
             try:
                 now = time.time()
@@ -67,18 +62,6 @@ def run_monitor_loop(ctx: "SessionContext") -> None:
                 if now - last_save_time > 5:
                     _save_resume_data(ctx)
                     last_save_time = now
-
-                # --- Check seed_duration timeout (using snapshot taken under lock) ---
-                if seed_start is not None and seed_dur > 0:
-                    elapsed = now - seed_start
-                    if elapsed >= seed_dur:
-                        logger.info(
-                            f"[{ctx.repo_id}] Seed duration {seed_dur}s elapsed. "
-                            f"Stopping auto-seed."
-                        )
-                        ctx._cleanup_download_sources()
-                        ctx.is_valid = False
-                        break
 
                 # --- Dispatch alerts from the global lt_session to per-session inboxes ---
                 from .p2p_batch import P2PBatchManager
@@ -252,10 +235,6 @@ def _check_pending_files(ctx: "SessionContext") -> bool:
             except Exception:
                 pass
 
-    # Check if all files are now delivered → start seed timer
-    with ctx.lock:
-        _update_seed_timer(ctx)
-
     return False
 
 
@@ -279,7 +258,6 @@ def _check_session_health(ctx: "SessionContext"):
 
     pending_files = [f for f, e in ctx.file_events.items() if not e.is_set()]
     if not pending_files:
-        _update_seed_timer(ctx)
         return False
 
     return None
@@ -330,27 +308,6 @@ def _collect_ready_files(ctx: "SessionContext") -> list:
             ready.append((src, destination, filename))
 
     return ready
-
-
-def _update_seed_timer(ctx: "SessionContext") -> None:
-    """Start the seed timer if all registered downloads are delivered.
-    Must be called under ctx.lock.
-    """
-    pending = [f for f, e in ctx.file_events.items() if not e.is_set()]
-    if pending:
-        return
-    if ctx.file_events and ctx.auto_seed and ctx.seed_start_time is None:
-        ctx.seed_start_time = time.time()
-        if ctx.seed_duration > 0:
-            logger.info(
-                f"[{ctx.repo_id}] All files delivered. "
-                f"Auto-seeding for {ctx.seed_duration}s."
-            )
-        else:
-            logger.info(
-                f"[{ctx.repo_id}] All files delivered. "
-                f"Auto-seeding indefinitely."
-            )
 
 
 def _has_torrent_error(status) -> bool:

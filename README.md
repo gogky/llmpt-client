@@ -103,8 +103,8 @@ $  # ← 立刻返回，terminal 可以关掉
 
 当使用 `enable_p2p()` 时，守护进程会 **自动启动**，用户无需手动操作。如果不想做种，可以：
 
-```python
-enable_p2p(auto_seed=False)  # 只下载，不做种
+```from llmpt import enable_p2p
+enable_p2p()
 ```
 
 ## 工作原理
@@ -177,14 +177,11 @@ HF_TOKEN=hf_xxxxx
 from llmpt import enable_p2p, disable_p2p, is_enabled, stop_seeding, get_config
 
 # 使用自定义设置启用
-enable_p2p(
-    tracker_url="http://118.195.159.242",
-    auto_seed=True,       # 自动启动守护进程做种（默认 True）
-    seed_duration=3600,
-    timeout=300,
-    port=6881,
-    webseed=True,
-    hf_token="hf_xxx",
+import llmpt
+
+llmpt.enable_p2p(
+    tracker_url="http://my-tracker.internal:8000",
+    timeout=600           # 10分钟超时
 )
 
 # 检查 P2P 是否启用

@@ -39,8 +39,6 @@ class SessionContext:
         torrent_data: Optional[bytes] = None,
         *,
         repo_type: str = 'model',
-        auto_seed: bool = True,
-        seed_duration: int = 3600,
     ) -> None:
         if session_mode not in ('on_demand', 'full_seed'):
             raise ValueError("session_mode must be 'on_demand' or 'full_seed'")
@@ -52,11 +50,6 @@ class SessionContext:
         self.lt_session = lt_session
         self.timeout = timeout
         self.torrent_data = torrent_data
-        
-        # Seeding configuration
-        self.auto_seed = auto_seed
-        self.seed_duration = seed_duration
-        self.seed_start_time = None  # Set when all downloads complete; seeds until seed_duration elapses
         
         self.handle = None
         self.is_valid = True
@@ -72,9 +65,6 @@ class SessionContext:
         # consumed by the monitor thread via _process_alerts().
         self.alert_lock = threading.Lock()
         self.pending_alerts: deque = deque()
-        
-        # Track source files kept for auto-seeding (cleaned up when seeding stops)
-        self.download_source_files = []
         
         # Determine paths for fastresume data
         self.fastresume_dir = os.path.expanduser("~/.cache/llmpt/p2p_resume")
@@ -175,19 +165,46 @@ class SessionContext:
 
         logger.info(f"[{self.repo_id}] Peer warmup: waiting for peer connection before starting downloads...")
 
+        def is_fully_downloaded() -> bool:
+            try:
+                if not self.handle or not self.torrent_info_obj:
+                    return False
+                status = self.handle.status()
+                if status.state in (4, 5):
+                    progresses = self.handle.file_progress()
+                    if sum(progresses) >= self.torrent_info_obj.total_size():
+                        return True
+            except Exception:
+                pass
+            return False
+
         # Ensure we're actively trying to connect
         if self.handle and self.test_peer_addr:
-            self.handle.connect_peer(self.test_peer_addr, 0)
+            try:
+                # If torrent is already complete (or close to), it might not need peers
+                if is_fully_downloaded():
+                    logger.info(f"[{self.repo_id}] Peer warmup bypassed (already fully downloaded).")
+                    self._peer_ready.set()
+                    return
+                self.handle.connect_peer(self.test_peer_addr, 0)
+            except Exception:
+                pass
 
         deadline = time.time() + warmup_timeout
         while time.time() < deadline:
             if not self.is_valid:
                 break
             try:
-                if self.handle and self.handle.status().num_peers > 0:
-                    logger.info(f"[{self.repo_id}] Peer warmup complete — {self.handle.status().num_peers} peer(s) connected.")
-                    self._peer_ready.set()
-                    return
+                if self.handle:
+                    status = self.handle.status()
+                    if status.num_peers > 0:
+                        logger.info(f"[{self.repo_id}] Peer warmup complete — {status.num_peers} peer(s) connected.")
+                        self._peer_ready.set()
+                        return
+                    if is_fully_downloaded():
+                        logger.info(f"[{self.repo_id}] Peer warmup bypassed (already fully downloaded).")
+                        self._peer_ready.set()
+                        return
             except Exception:
                 pass
             time.sleep(0.5)
@@ -219,10 +236,6 @@ class SessionContext:
                 event = threading.Event()
                 self.file_events[filename] = event
                 self.file_destinations[filename] = destination
-                
-                # Reset seed timer — new download activity means we haven't
-                # finished the full snapshot yet.
-                self.seed_start_time = None
                 
                 # Try finding the file. BUT, if torrent_info_obj is None because we 
                 # fell back to HTTP during metadata fetch, we just queue it up and
@@ -448,11 +461,9 @@ class SessionContext:
         Uses os.link() (hard link) for zero-copy on the same filesystem,
         falls back to shutil.copy2() for cross-device.
         
-        When auto_seed is True, the source file in p2p_root is preserved so
-        libtorrent can continue serving pieces to other peers.  These sources
-        are cleaned up later via _cleanup_download_sources().
-        
-        When auto_seed is False, the source is removed immediately.
+        The source files in p2p_root MUST be preserved while the torrent is active 
+        so libtorrent can read pieces/chunks across file boundaries. The entire
+        session's temporary directory is cleaned up upon session teardown.
         """
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         
@@ -468,29 +479,12 @@ class SessionContext:
             # Cross-device fallback
             shutil.copy2(src, dst)
             logger.debug(f"[{self.repo_id}] Copied {src} -> {dst}")
-        
-        if self.auto_seed:
-            # Keep source so libtorrent can continue seeding pieces.
-            # For hardlinks this costs zero extra disk space (same inode).
-            self.download_source_files.append(src)
-            logger.debug(f"[{self.repo_id}] Kept source for seeding: {src}")
-        else:
-            # Clean up source immediately: for hardlinks this just decrements
-            # the inode refcount (data remains at dst); for copies this frees
-            # the duplicate disk space.
-            try:
-                os.unlink(src)
-                logger.debug(f"[{self.repo_id}] Cleaned up source: {src}")
-            except OSError as e:
-                logger.debug(f"[{self.repo_id}] Could not remove source {src}: {e}")
 
-    def _cleanup_download_sources(self):
-        """Remove source files preserved for auto-seeding in p2p_root."""
-        for path in self.download_source_files:
+    def cleanup_temp_dir(self):
+        """Delete the temporary directory containing download payloads."""
+        if self.temp_dir and os.path.isdir(self.temp_dir):
             try:
-                if os.path.exists(path):
-                    os.unlink(path)
-                    logger.debug(f"[{self.repo_id}] Cleaned up seeding source: {path}")
-            except OSError as e:
-                logger.warning(f"[{self.repo_id}] Failed to clean up {path}: {e}")
-        self.download_source_files = []
+                shutil.rmtree(self.temp_dir, ignore_errors=True)
+                logger.debug(f"[{self.repo_id}] Cleaned up temp dir: {self.temp_dir}")
+            except Exception as e:
+                logger.debug(f"[{self.repo_id}] Failed to clean temp dir {self.temp_dir}: {e}")

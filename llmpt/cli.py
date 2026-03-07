@@ -58,11 +58,6 @@ Examples:
         help='Local directory to save files'
     )
     download_parser.add_argument(
-        '--no-seed',
-        action='store_true',
-        help='Do not seed after download'
-    )
-    download_parser.add_argument(
         '--repo-type',
         default='model',
         choices=['model', 'dataset', 'space'],
@@ -179,8 +174,7 @@ def cmd_download(args):
 
     # Enable P2P
     enable_p2p(
-        tracker_url=args.tracker,
-        auto_seed=not args.no_seed
+        tracker_url=args.tracker
     )
 
     print(f"Downloading {args.repo_id}...")
@@ -193,35 +187,6 @@ def cmd_download(args):
     )
 
     print(f"✓ Downloaded to: {path}")
-
-    # Block for seeding if auto_seed is enabled
-    if not args.no_seed:
-        import time
-
-        config = get_config()
-        duration = config.get('seed_duration', 3600)
-
-        if duration > 0:
-            # Format duration for human readability
-            if duration >= 3600:
-                dur_str = f"{duration // 3600}h{(duration % 3600) // 60:02d}m"
-            elif duration >= 60:
-                dur_str = f"{duration // 60}m"
-            else:
-                dur_str = f"{duration}s"
-            print(f"Seeding for {dur_str} (Ctrl+C to stop early)...")
-        else:
-            print("Seeding indefinitely (Ctrl+C to stop)...")
-
-        try:
-            elapsed = 0
-            while duration <= 0 or elapsed < duration:
-                time.sleep(1)
-                elapsed += 1
-        except KeyboardInterrupt:
-            pass
-
-        print("✓ Seeding stopped")
 
 
 def cmd_seed(args):

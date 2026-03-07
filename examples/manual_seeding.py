@@ -10,8 +10,7 @@ import time
 
 # Enable P2P without auto-seeding
 enable_p2p(
-    tracker_url="http://localhost:8080",
-    auto_seed=False  # We'll control seeding manually
+    tracker_url="http://localhost:8080"
 )
 
 # Download model

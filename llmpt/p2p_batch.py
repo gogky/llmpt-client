@@ -214,8 +214,6 @@ class P2PBatchManager:
                     lt_session=self.lt_session,
                     session_mode='on_demand',
                     timeout=timeout,
-                    auto_seed=config.get('auto_seed', True),
-                    seed_duration=config.get('seed_duration', 3600),
                 )
             session_ctx = self.sessions[repo_key]
         
@@ -224,25 +222,20 @@ class P2PBatchManager:
 
     # ── Session lifecycle management ──────────────────────────────────────
 
-    def _teardown_session(self, ctx: 'SessionContext', cleanup_downloads: bool = False) -> Optional[Any]:
+    def _teardown_session(self, ctx: 'SessionContext') -> Optional[Any]:
         """Teardown a single session (called while self._lock is held).
 
-        Cleans up hardlinks, optionally cleans download sources, invalidates
+        Cleans up hardlinks, invalidates
         the handle, removes the torrent from libtorrent, and returns the
         worker thread (if any) for the caller to join *outside* the lock.
 
         Args:
             ctx: The SessionContext to tear down.
-            cleanup_downloads: If True, also clean up download source files
-                               (used by shutdown, not by stop_seeding which
-                               only tears down seeding sessions).
 
         Returns:
             The worker thread to join, or None.
         """
         ctx._cleanup_seeding_hardlinks()
-        if cleanup_downloads:
-            ctx._cleanup_download_sources()
         with ctx.lock:
             handle = ctx.handle
             ctx.handle = None
@@ -250,6 +243,7 @@ class P2PBatchManager:
         if handle:
             try:
                 self.lt_session.remove_torrent(handle)
+                ctx.cleanup_temp_dir()
             except Exception:
                 pass
         return ctx.worker_thread
@@ -278,11 +272,8 @@ class P2PBatchManager:
             worker.join(timeout=3)
         return True
 
-    def remove_all_sessions(self, cleanup_downloads: bool = False) -> int:
+    def remove_all_sessions(self) -> int:
         """Remove all sessions.
-
-        Args:
-            cleanup_downloads: If True, also clean up download source files.
 
         Returns:
             Number of sessions removed.
@@ -291,7 +282,7 @@ class P2PBatchManager:
         with self._lock:
             count = len(self.sessions)
             for ctx in self.sessions.values():
-                worker = self._teardown_session(ctx, cleanup_downloads=cleanup_downloads)
+                worker = self._teardown_session(ctx)
                 if worker is not None:
                     threads_to_join.append(worker)
             self.sessions.clear()
@@ -331,10 +322,10 @@ class P2PBatchManager:
         """Gracefully shut down all sessions and release resources.
 
         Called by atexit handler or directly by user code.  Cleans up
-        seeding hardlinks, download source files, removes all torrent
+        seeding hardlinks, removes all torrent
         handles, and clears session state.  Waits for all monitor threads
         to exit before returning.
         """
-        count = self.remove_all_sessions(cleanup_downloads=True)
+        count = self.remove_all_sessions()
         logger.info(f"P2PBatchManager shutdown complete ({count} sessions removed).")
 

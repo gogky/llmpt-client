@@ -26,7 +26,7 @@ REPO_ID = "hf-internal-testing/tiny-random-GPTJForCausalLM"
 EXPECTED_FILES = {"config.json", "pytorch_model.bin", "tokenizer.json"}
 
 DATASET_ID = "fka/prompts.chat"
-EXPECTED_DATASET_FILES = {"data/train-00000-of-00001-c8dc32dd59957fc3.parquet"}
+EXPECTED_DATASET_FILES = {"prompts.csv", "README.md"}
 
 
 # ─── Shared helpers ──────────────────────────────────────────────────────────

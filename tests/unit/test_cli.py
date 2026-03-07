@@ -36,12 +36,11 @@ class TestMainDispatch:
     @patch('llmpt.cli.cmd_download')
     def test_download_with_options(self, mock_cmd):
         with patch('sys.argv', ['llmpt-cli', '--tracker', 'http://t.com',
-                                'download', 'gpt2', '--local-dir', '/tmp/out', '--no-seed']):
+                                'download', 'gpt2', '--local-dir', '/tmp/out']):
             main()
         args = mock_cmd.call_args[0][0]
         assert args.tracker == 'http://t.com'
         assert args.local_dir == '/tmp/out'
-        assert args.no_seed is True
 
     @patch('llmpt.cli.cmd_seed')
     def test_seed_command(self, mock_cmd):
@@ -95,37 +94,17 @@ class TestCmdDownload:
 
         args = MagicMock()
         args.tracker = "http://tracker.example.com"
-        args.no_seed = False
         args.repo_id = "gpt2"
         args.local_dir = None
 
         with patch('huggingface_hub.snapshot_download', mock_download), \
-             patch('llmpt.enable_p2p', mock_enable), \
-             patch('llmpt.get_config', return_value={'seed_duration': 3600}):
+             patch('llmpt.enable_p2p', mock_enable):
             cmd_download(args)
 
         mock_enable.assert_called_once_with(
-            tracker_url="http://tracker.example.com",
-            auto_seed=True,
+            tracker_url="http://tracker.example.com"
         )
         mock_download.assert_called_once_with("gpt2", repo_type=args.repo_type, local_dir=None)
-
-    @patch('llmpt.cli.snapshot_download', create=True)
-    @patch('llmpt.cli.enable_p2p', create=True)
-    def test_download_no_seed(self, mock_enable, mock_download):
-        mock_download.return_value = "/path"
-        args = MagicMock()
-        args.tracker = None
-        args.no_seed = True
-        args.repo_id = "gpt2"
-        args.local_dir = "/tmp/out"
-
-        with patch('huggingface_hub.snapshot_download', mock_download):
-            with patch('llmpt.enable_p2p', mock_enable):
-                cmd_download(args)
-
-        mock_enable.assert_called_once_with(tracker_url=None, auto_seed=False)
-
 
 # ─── cmd_seed ─────────────────────────────────────────────────────────────────
 

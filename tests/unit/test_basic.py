@@ -34,15 +34,11 @@ def test_config():
 
     llmpt.enable_p2p(
         tracker_url="http://test.com",
-        auto_seed=False,
-        seed_duration=7200,
         timeout=600
     )
 
     config = llmpt.get_config()
     assert config['tracker_url'] == "http://test.com"
-    assert config['auto_seed'] == False
-    assert config['seed_duration'] == 7200
     assert config['timeout'] == 600
 
     llmpt.disable_p2p()

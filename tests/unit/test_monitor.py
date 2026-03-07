@@ -18,7 +18,6 @@ from llmpt.monitor import (
     _check_session_health,
     _resolve_pending_metadata,
     _collect_ready_files,
-    _update_seed_timer,
     _has_torrent_error,
     _get_error_message,
 )
@@ -456,47 +455,6 @@ class TestCollectReadyFiles:
 
         result = _collect_ready_files(ctx)
         assert result == []
-
-
-# ─── _update_seed_timer ──────────────────────────────────────────────────────
-
-class TestUpdateSeedTimer:
-
-    def test_starts_timer_when_all_delivered(self):
-        ctx = make_mock_ctx()
-        event = threading.Event()
-        event.set()  # delivered
-        ctx.file_events = {"model.bin": event}
-        ctx.auto_seed = True
-        ctx.seed_start_time = None
-        ctx.seed_duration = 3600
-
-        _update_seed_timer(ctx)
-
-        assert ctx.seed_start_time is not None
-
-    def test_does_not_start_if_pending(self):
-        ctx = make_mock_ctx()
-        event = threading.Event()  # not set → still pending
-        ctx.file_events = {"model.bin": event}
-        ctx.auto_seed = True
-        ctx.seed_start_time = None
-
-        _update_seed_timer(ctx)
-
-        assert ctx.seed_start_time is None
-
-    def test_does_not_start_if_auto_seed_disabled(self):
-        ctx = make_mock_ctx()
-        event = threading.Event()
-        event.set()
-        ctx.file_events = {"model.bin": event}
-        ctx.auto_seed = False
-        ctx.seed_start_time = None
-
-        _update_seed_timer(ctx)
-
-        assert ctx.seed_start_time is None
 
 
 # ─── Integration: deliver outside lock ───────────────────────────────────────
