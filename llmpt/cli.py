@@ -305,7 +305,8 @@ def cmd_daemon(args):
     from llmpt.ipc import query_daemon
     from llmpt.utils import format_bytes
 
-    tracker_url = args.tracker or 'http://localhost:8080'
+    import os
+    tracker_url = args.tracker or os.getenv('HF_P2P_TRACKER') or 'http://localhost:8080'
 
     if args.daemon_action == 'start':
         existing = is_daemon_running()

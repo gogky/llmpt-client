@@ -341,6 +341,47 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
     logger.info("Daemon stopped")
 
 
+def _rewrite_announce_url(torrent_data: bytes, tracker_url: str, repo_id: str) -> bytes:
+    """Rewrite the announce URL in a .torrent file to match the current tracker.
+
+    The announce field is outside the ``info`` dict and therefore does NOT
+    affect the info_hash (swarm identity).  This lets us correct stale
+    announce URLs (e.g. ``localhost:8080/announce`` baked in during an earlier
+    run) without splitting the swarm.
+
+    Returns the original bytes unchanged if the URL is already correct or if
+    parsing fails.
+    """
+    from .utils import lt
+
+    correct_announce = f"{tracker_url.rstrip('/')}/announce"
+
+    try:
+        decoded = lt.bdecode(torrent_data)
+        if not isinstance(decoded, dict):
+            return torrent_data
+
+        current = decoded.get(b'announce', b'').decode('utf-8', errors='replace')
+        if current == correct_announce:
+            return torrent_data
+
+        logger.info(
+            f"[{repo_id}] Rewriting announce URL: {current!r} → {correct_announce!r}"
+        )
+        decoded[b'announce'] = correct_announce.encode('utf-8')
+
+        # Also fix announce-list if present
+        announce_list = decoded.get(b'announce-list')
+        if announce_list:
+            decoded[b'announce-list'] = [[correct_announce.encode('utf-8')]]
+
+        return lt.bencode(decoded)
+
+    except Exception as exc:
+        logger.warning(f"[{repo_id}] Failed to rewrite announce URL: {exc}")
+        return torrent_data
+
+
 def _scan_and_seed(
     tracker_client,
     manager,
@@ -416,7 +457,7 @@ def _process_seedable(
     logger.info(f"[{repo_id}@{revision[:8]}] Processing seedable model...")
 
     try:
-        from .torrent_cache import resolve_torrent_data
+        from .torrent_cache import resolve_torrent_data, save_torrent_to_cache
         from .torrent_creator import create_and_register_torrent
 
         # Try to get existing torrent (local cache or tracker)
@@ -447,6 +488,11 @@ def _process_seedable(
                 return False
         else:
             logger.info(f"[{repo_id}] Found existing torrent ({len(torrent_data)} bytes)")
+            # The announce URL embedded in a cached/downloaded torrent may be stale
+            # (e.g. created when the tracker was localhost:8080).  Rewrite it to
+            # match the current tracker so libtorrent announces to the right server.
+            torrent_data = _rewrite_announce_url(torrent_data, tracker_client.tracker_url, repo_id)
+            save_torrent_to_cache(repo_id, revision, torrent_data, repo_type=repo_type)
 
         # Start seeding
         logger.info(f"[{repo_id}] Starting seeding task...")
