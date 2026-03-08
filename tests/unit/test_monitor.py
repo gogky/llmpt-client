@@ -210,14 +210,21 @@ class TestCheckPendingFiles:
 
     @patch('llmpt.monitor.lt')
     def test_torrent_error_sets_invalid(self, mock_lt):
-        """Torrent-level error should mark ctx as invalid and return True."""
+        """Persistent torrent-level error should mark ctx as invalid after threshold ticks."""
+        from llmpt.monitor import _ERROR_THRESHOLD
         ctx = make_mock_ctx()
         status = ctx.handle.status.return_value
         status.errc.value.return_value = 42
         status.errc.message.return_value = "disk error"
 
-        result = _check_pending_files(ctx)
+        # First ticks: transient — should NOT kill the session
+        for _ in range(_ERROR_THRESHOLD - 1):
+            result = _check_pending_files(ctx)
+            assert result is False  # _check_session_health returns None, no pending files → False
+            assert ctx.is_valid is True
 
+        # Threshold tick: fatal
+        result = _check_pending_files(ctx)
         assert result is True
         assert ctx.is_valid is False
 
@@ -362,12 +369,23 @@ class TestCheckSessionHealth:
         ctx.handle = None
         assert _check_session_health(ctx) is True
 
-    def test_torrent_error_returns_true(self):
+    def test_torrent_error_returns_true_after_threshold(self):
+        """Error must persist for _ERROR_THRESHOLD ticks before becoming fatal."""
+        from llmpt.monitor import _ERROR_THRESHOLD
         ctx = make_mock_ctx()
         status = ctx.handle.status.return_value
         status.errc.value.return_value = 42
         status.errc.message.return_value = "disk error"
 
+        # First ticks: transient, should call clear_error and return None
+        for _ in range(_ERROR_THRESHOLD - 1):
+            result = _check_session_health(ctx)
+            assert result is None
+            assert ctx.is_valid is True
+            ctx.handle.clear_error.assert_called()
+            ctx.handle.resume.assert_called()
+
+        # Threshold tick: fatal
         result = _check_session_health(ctx)
         assert result is True
         assert ctx.is_valid is False

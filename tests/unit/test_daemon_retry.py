@@ -28,8 +28,14 @@ def test_record_seed_failure_increments_attempts_and_backoff(monkeypatch):
 def test_scan_and_seed_respects_retry_deadline(monkeypatch):
     import llmpt.daemon as daemon
 
+    from llmpt.cache_scanner import SeedableSource
+
     key = ("model", "org/repo", "b" * 40)
-    monkeypatch.setattr("llmpt.cache_scanner.scan_hf_cache", lambda: [key])
+    source = SeedableSource(
+        repo_type="model", repo_id="org/repo", revision="b" * 40,
+        storage_kind="hub_cache", storage_root="",
+    )
+    monkeypatch.setattr("llmpt.cache_scanner.scan_seedable_sources", lambda: [source])
 
     calls = []
 
@@ -42,6 +48,8 @@ def test_scan_and_seed_respects_retry_deadline(monkeypatch):
         failed_attempts,
         *,
         repo_type="model",
+        cache_dir=None,
+        local_dir=None,
     ):
         calls.append((repo_type, repo_id, revision))
         return True

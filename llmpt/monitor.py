@@ -24,6 +24,12 @@ _STATE_NAMES = [
     'checking_resume_data',
 ]
 
+# How many consecutive health-check ticks a torrent-level error must persist
+# before _check_session_health treats it as fatal and kills the session.
+# Transient errors (e.g. partfile_write on cross-piece boundaries) are common
+# and self-resolving; this threshold avoids aborting on them.
+_ERROR_THRESHOLD = 3
+
 
 def run_monitor_loop(ctx: "SessionContext") -> None:
     """Background thread entry point: monitor progress and trigger file-completion events.
@@ -247,6 +253,12 @@ def _check_pending_files(ctx: "SessionContext") -> bool:
 def _check_session_health(ctx: "SessionContext"):
     """Check handle and torrent-level errors. Must be called under ctx.lock.
 
+    Transient disk I/O errors (e.g. partfile_write "End of file" when a piece
+    spans a file whose priority is still 0) are common in libtorrent and are
+    usually self-resolving.  We call ``clear_error()`` on the first detection
+    and only treat the error as fatal after ``_ERROR_THRESHOLD`` consecutive
+    ticks still report an error.
+
     Returns:
         True  - loop should break (error or no handle)
         False - no pending files, nothing to do
@@ -258,9 +270,27 @@ def _check_session_health(ctx: "SessionContext"):
     status = ctx.handle.status()
     if _has_torrent_error(status):
         err_msg = _get_error_message(status)
-        logger.error(f"[{ctx.repo_id}] Torrent error: {err_msg}")
-        ctx.is_valid = False
-        return True
+        ticks = getattr(ctx, '_consecutive_error_ticks', None)
+        ctx._consecutive_error_ticks = (ticks + 1) if isinstance(ticks, int) else 1
+
+        if ctx._consecutive_error_ticks >= _ERROR_THRESHOLD:
+            logger.error(
+                f"[{ctx.repo_id}] Torrent error persisted for "
+                f"{ctx._consecutive_error_ticks} ticks, aborting: {err_msg}"
+            )
+            ctx.is_valid = False
+            return True
+
+        logger.warning(
+            f"[{ctx.repo_id}] Transient torrent error (tick "
+            f"{ctx._consecutive_error_ticks}/{_ERROR_THRESHOLD}): {err_msg}"
+        )
+        ctx.handle.clear_error()
+        ctx.handle.resume()
+        return None  # continue monitoring
+    else:
+        # Reset on recovery
+        ctx._consecutive_error_ticks = 0
 
     pending_files = [f for f, e in ctx.file_events.items() if not e.is_set()]
     if not pending_files:
