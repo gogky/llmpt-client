@@ -230,6 +230,10 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
 
     logger.info(f"Daemon starting (PID: {os.getpid()}, tracker: {tracker_url}, port: {llmpt._config.get('port', 'auto')})")
 
+    # Mark this process as the seeding daemon so P2PBatchManager binds
+    # to the daemon port (N) rather than the client port (N+1).
+    llmpt._config['_role'] = 'daemon'
+
     tracker_client = TrackerClient(tracker_url)
     manager = P2PBatchManager()
 

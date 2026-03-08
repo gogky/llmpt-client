@@ -22,40 +22,85 @@ from .session_context import SessionContext  # noqa: F401
 logger = logging.getLogger(__name__)
 
 # Default port range for libtorrent listen interface.
-_DEFAULT_PORT = 6881
+# Daemon (seeding) gets priority for the lower port; download clients
+# use the next port so the two never clash even when a fixed port is
+# specified by the user.
+_DEFAULT_DAEMON_PORT = 6881
+_DEFAULT_CLIENT_PORT = 6882
 _MAX_PORT = 6999
 
 
-def _resolve_listen_interfaces(configured_port) -> str:
-    """Resolve the ``listen_interfaces`` setting for libtorrent.
+def _is_port_available(port: int) -> bool:
+    """Check whether *port* is free on **both** IPv4 and IPv6.
 
-    Strategy:
-      * ``configured_port > 0``  → use exactly that port (user/env override).
-      * ``configured_port`` is ``None`` or ``0`` → try *_DEFAULT_PORT* first,
-        then walk 6882 … *_MAX_PORT*.  If every port in the range is busy,
-        fall back to ``0`` (OS-assigned).
-
-    The pre-check uses a quick ``socket.bind()`` probe.  There is a tiny
-    TOCTOU window between releasing the socket and libtorrent binding, but
-    in practice this is reliable enough and libtorrent will simply skip a
-    failed interface.
+    On systems where IPv6 is not available (cannot create an ``AF_INET6``
+    socket), the IPv6 check is silently skipped so that IPv4-only hosts
+    are not penalised.
     """
-    if configured_port and configured_port > 0:
-        return f'0.0.0.0:{configured_port},[::]:{configured_port}'
-
     import socket
 
-    for port in range(_DEFAULT_PORT, _MAX_PORT + 1):
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                s.bind(('0.0.0.0', port))
+    # ── IPv4 ──────────────────────────────────────────────────────────
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(('0.0.0.0', port))
+    except OSError:
+        return False
+
+    # ── IPv6 ──────────────────────────────────────────────────────────
+    try:
+        s6 = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    except OSError:
+        # Kernel / Python built without IPv6 → skip check
+        return True
+
+    try:
+        s6.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(socket, 'IPV6_V6ONLY'):
+            s6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        s6.bind(('::', port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s6.close()
+
+
+def _resolve_listen_interfaces(configured_port, role: str = 'daemon') -> str:
+    """Resolve the ``listen_interfaces`` setting for libtorrent.
+
+    Port assignment strategy (avoids daemon / client port conflicts)::
+
+        ┌──────────────────────┬────────────┬─────────────┐
+        │ configured_port      │  daemon    │  client     │
+        ├──────────────────────┼────────────┼─────────────┤
+        │ None / 0  (default)  │  6881      │  6882       │
+        │ N  (explicit)        │  N         │  N + 1      │
+        └──────────────────────┴────────────┴─────────────┘
+
+    Starting from the target port, the function probes upward through
+    *_MAX_PORT* checking **both IPv4 and IPv6** availability via
+    ``_is_port_available``.  If every port in the range is busy it falls
+    back to ``0`` (OS-assigned).
+
+    There is a tiny TOCTOU window between releasing the probe socket and
+    libtorrent binding, but in practice this is reliable enough and
+    libtorrent will simply skip a failed interface.
+    """
+    has_explicit = configured_port and configured_port > 0
+
+    if role == 'daemon':
+        start_port = configured_port if has_explicit else _DEFAULT_DAEMON_PORT
+    else:
+        start_port = (configured_port + 1) if has_explicit else _DEFAULT_CLIENT_PORT
+
+    end_port = max(start_port + (_MAX_PORT - _DEFAULT_DAEMON_PORT), _MAX_PORT) + 1
+    for port in range(start_port, end_port):
+        if _is_port_available(port):
             return f'0.0.0.0:{port},[::]:{port}'
-        except OSError:
-            continue
 
     logger.warning(
-        f"All ports {_DEFAULT_PORT}-{_MAX_PORT} occupied, "
+        f"All ports {start_port}-{end_port - 1} occupied, "
         "falling back to OS-assigned port"
     )
     return '0.0.0.0:0,[::]:0'
@@ -85,10 +130,12 @@ class P2PBatchManager:
             self.sessions: Dict[tuple, SessionContext] = {}
             if LIBTORRENT_AVAILABLE:
                 from . import get_config
-                configured_port = get_config().get('port')
+                config = get_config()
+                configured_port = config.get('port')
+                role = config.get('_role', 'client')
                 # Resolve listen interfaces BEFORE creating lt.session()
                 # so that lt.session() doesn't implicitly take 6881 before we check it.
-                listen_ifaces = _resolve_listen_interfaces(configured_port)
+                listen_ifaces = _resolve_listen_interfaces(configured_port, role=role)
                 self.lt_session = lt.session()
                 settings = self.lt_session.get_settings()
                 settings['listen_interfaces'] = listen_ifaces
