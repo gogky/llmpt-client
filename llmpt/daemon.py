@@ -8,9 +8,9 @@ This module implements a standalone daemon process that:
 4. Accepts IPC commands from download clients
 
 Lifecycle:
-    llmpt-cli daemon start   →  fork to background, return immediately
-    llmpt-cli daemon stop    →  send SIGTERM, daemon exits gracefully
-    llmpt-cli daemon status  →  query daemon via IPC
+    llmpt-cli start   →  fork to background, return immediately
+    llmpt-cli stop    →  send SIGTERM, daemon exits gracefully
+    llmpt-cli status  →  query daemon via IPC
 """
 
 import atexit
