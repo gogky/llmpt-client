@@ -23,7 +23,7 @@ import sys
 import time
 from typing import Dict, Optional, Set, Tuple
 
-from .utils import LIBTORRENT_AVAILABLE
+from .utils import LIBTORRENT_AVAILABLE, lt
 
 logger = logging.getLogger("llmpt.daemon")
 
@@ -251,6 +251,7 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
 
     # IPC message handler
     def _handle_ipc(msg: dict) -> Optional[dict]:
+        nonlocal tracker_url, tracker_client, last_scan_time
         action = msg.get("action")
 
         if action == "seed":
@@ -275,6 +276,7 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
                 "status": "ok",
                 "pid": os.getpid(),
                 "port": getattr(manager, 'listen_port', None),
+                "tracker_url": tracker_url,
                 "seeding_count": len(seeding_set),
                 "sessions": {
                     k: {
@@ -288,8 +290,36 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
                 },
             }
 
+        elif action == "update_tracker":
+            new_url = msg.get("tracker_url")
+            if not new_url:
+                return {"status": "error", "message": "tracker_url required"}
+            if new_url == tracker_url:
+                return {"status": "ok", "message": "no change needed"}
+
+            old_url = tracker_url
+            tracker_url = new_url
+            tracker_client = TrackerClient(new_url)
+            llmpt._config['tracker_url'] = new_url
+
+            # Update announce URL on all active torrent handles
+            announce_url = f"{new_url.rstrip('/')}/announce"
+            with manager._lock:
+                for ctx in manager.sessions.values():
+                    with ctx.lock:
+                        handle = ctx.handle
+                    if handle:
+                        try:
+                            if handle.is_valid():
+                                handle.replace_trackers([lt.announce_entry(announce_url)])
+                                handle.force_reannounce()
+                        except Exception as e:
+                            logger.warning(f"Failed to update tracker for {ctx.repo_id}: {e}")
+
+            logger.info(f"Tracker URL updated: {old_url} -> {new_url}")
+            return {"status": "ok", "old_tracker": old_url, "new_tracker": new_url}
+
         elif action == "scan":
-            nonlocal last_scan_time
             # Clear failure backoff and reset scan timer to trigger immediate rescan
             failed_attempts.clear()
             last_scan_time = 0.0
@@ -458,7 +488,7 @@ def _process_seedable(
 
     try:
         from .torrent_cache import resolve_torrent_data, save_torrent_to_cache
-        from .torrent_creator import create_and_register_torrent
+        from .torrent_creator import create_and_register_torrent, ensure_registered
 
         # Try to get existing torrent (local cache or tracker)
         logger.info(f"[{repo_id}] Checking for existing torrent...")
@@ -493,6 +523,9 @@ def _process_seedable(
             # match the current tracker so libtorrent announces to the right server.
             torrent_data = _rewrite_announce_url(torrent_data, tracker_client.tracker_url, repo_id)
             save_torrent_to_cache(repo_id, revision, torrent_data, repo_type=repo_type)
+            # Ensure the tracker knows about this torrent — it may only exist
+            # in local cache (e.g. created when the tracker was unreachable).
+            ensure_registered(repo_id, revision, repo_type, torrent_data, tracker_client)
 
         # Start seeding
         logger.info(f"[{repo_id}] Starting seeding task...")

@@ -156,7 +156,8 @@ class TestProcessAlerts:
         alert.params = {'info-hash': 'abc'}
         mock_lt.save_resume_data_alert = type(alert)
         mock_lt.save_resume_data_failed_alert = type('Other', (), {})
-        mock_lt.bencode.return_value = b'encoded_data'
+        # libtorrent 2.x path: write_resume_data_buf is preferred
+        mock_lt.write_resume_data_buf = MagicMock(return_value=b'encoded_data')
 
         # Populate the inbox (as dispatch_alerts would do)
         ctx.pending_alerts.append(alert)
@@ -165,6 +166,29 @@ class TestProcessAlerts:
             _process_alerts(ctx)
             m.assert_called_once_with(ctx.fastresume_path, "wb")
             m().write.assert_called_once_with(b'encoded_data')
+            mock_lt.write_resume_data_buf.assert_called_once_with(alert.params)
+
+    @patch('llmpt.monitor.lt')
+    def test_save_resume_data_alert_bencode_fallback(self, mock_lt):
+        """When write_resume_data_buf is not available (lt 1.x), fall back to bencode."""
+        ctx = make_mock_ctx()
+
+        alert = MagicMock()
+        alert.handle = ctx.handle
+        alert.params = {'info-hash': 'abc'}
+        mock_lt.save_resume_data_alert = type(alert)
+        mock_lt.save_resume_data_failed_alert = type('Other', (), {})
+        mock_lt.bencode.return_value = b'bencoded_data'
+        # Remove write_resume_data_buf to simulate libtorrent 1.x
+        del mock_lt.write_resume_data_buf
+
+        ctx.pending_alerts.append(alert)
+
+        with patch('builtins.open', mock_open()) as m:
+            _process_alerts(ctx)
+            m.assert_called_once_with(ctx.fastresume_path, "wb")
+            m().write.assert_called_once_with(b'bencoded_data')
+            mock_lt.bencode.assert_called_once_with(alert.params)
 
     @patch('llmpt.monitor.lt')
     def test_no_alerts(self, mock_lt):

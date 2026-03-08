@@ -359,6 +359,10 @@ def cmd_daemon(args):
 
         print(f"llmptd (PID: {pid}) — running")
         
+        daemon_tracker = response.get('tracker_url')
+        if daemon_tracker:
+            print(f"  Tracker: {daemon_tracker}")
+
         listen_port = response.get('port')
         if listen_port:
             print(f"  Port: {listen_port}")

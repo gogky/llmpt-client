@@ -183,7 +183,34 @@ def enable_p2p(
             else:
                 logger.debug("Could not auto-start seeding daemon")
         else:
-            logger.debug("Seeding daemon already running")
+            # Daemon is already running — check if its tracker URL matches ours.
+            # If not, update it dynamically via IPC (no restart needed).
+            try:
+                from .ipc import query_daemon
+                response = query_daemon("status")
+                if response:
+                    daemon_tracker = response.get("tracker_url")
+                    if daemon_tracker and daemon_tracker != _config['tracker_url']:
+                        logger.info(
+                            f"Daemon tracker mismatch: {daemon_tracker} != "
+                            f"{_config['tracker_url']}, updating..."
+                        )
+                        result = query_daemon(
+                            "update_tracker",
+                            tracker_url=_config['tracker_url'],
+                        )
+                        if result and result.get("status") == "ok":
+                            logger.info(
+                                f"Daemon tracker updated to {_config['tracker_url']}"
+                            )
+                        else:
+                            logger.warning("Failed to update daemon tracker URL")
+                    else:
+                        logger.debug("Seeding daemon already running (tracker OK)")
+                else:
+                    logger.debug("Seeding daemon already running (no IPC response)")
+            except Exception as e:
+                logger.debug(f"Daemon tracker check failed: {e}")
     except Exception as e:
         # Non-fatal: daemon auto-start failure should never break downloads
         logger.debug(f"Seeding daemon auto-start skipped: {e}")

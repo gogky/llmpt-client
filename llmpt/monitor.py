@@ -162,7 +162,13 @@ def _process_alerts(ctx: "SessionContext") -> None:
     for alert in alerts:
         if isinstance(alert, lt.save_resume_data_alert):
             try:
-                resume_data = lt.bencode(alert.params)
+                # libtorrent 2.x: alert.params is add_torrent_params (C++ object),
+                # use write_resume_data_buf() to serialize it.
+                # libtorrent 1.x: alert.params is a dict, use bencode().
+                if hasattr(lt, 'write_resume_data_buf'):
+                    resume_data = lt.write_resume_data_buf(alert.params)
+                else:
+                    resume_data = lt.bencode(alert.params)
                 with open(ctx.fastresume_path, "wb") as f:
                     f.write(resume_data)
                 logger.debug(f"[{ctx.repo_id}] Saved resume data to {ctx.fastresume_path}")

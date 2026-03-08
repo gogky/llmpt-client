@@ -211,6 +211,64 @@ def create_torrent(
         return None
 
 
+def ensure_registered(
+    repo_id: str,
+    revision: str,
+    repo_type: str,
+    torrent_data: bytes,
+    tracker_client: Any,
+) -> bool:
+    """
+    Ensure the torrent is registered with the tracker.
+
+    If the tracker already knows about this torrent, this is a no-op.
+    Otherwise, parse the torrent data and register it.
+
+    Args:
+        repo_id: HuggingFace repository ID.
+        revision: Git commit hash.
+        repo_type: "model", "dataset", or "space".
+        torrent_data: Raw .torrent file bytes.
+        tracker_client: TrackerClient instance.
+
+    Returns:
+        True if the torrent is (now) registered, False on failure.
+    """
+    # Check if tracker already has this torrent
+    existing = tracker_client.get_torrent_info(repo_id, revision, repo_type=repo_type)
+    if existing:
+        logger.debug(f"[{repo_id}] Torrent already registered on tracker")
+        return True
+
+    # Parse torrent to extract metadata needed for registration
+    result = _torrent_data_to_result(torrent_data, repo_id)
+    if result is None:
+        logger.warning(f"[{repo_id}] Cannot parse torrent data for registration")
+        return False
+
+    resolved_revision = result.get('commit_hash', revision) or revision
+
+    success = tracker_client.register_torrent(
+        repo_id=repo_id,
+        revision=resolved_revision,
+        repo_type=repo_type,
+        name=repo_id,
+        info_hash=result['info_hash'],
+        total_size=result['file_size'],
+        file_count=result.get('num_files', 1),
+        piece_length=result['piece_length'],
+        torrent_data=torrent_data,
+        files=result['files'],
+    )
+
+    if success:
+        logger.info(f"[{repo_id}] ✓ Torrent registered on tracker (was missing)")
+    else:
+        logger.warning(f"[{repo_id}] ✗ Failed to register torrent on tracker")
+
+    return success
+
+
 def create_and_register_torrent(
     repo_id: str,
     revision: str,
