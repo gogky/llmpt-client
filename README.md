@@ -38,8 +38,6 @@ export HF_P2P_TRACKER=http://your-tracker-server
 ```
 
 ```python
-# 只需添加一行 import，其余代码无需修改
-# import 顺序无关，huggingface_hub 可以在 llmpt 之前导入
 import llmpt
 from huggingface_hub import snapshot_download
 
@@ -49,11 +47,11 @@ snapshot_download("meta-llama/Llama-2-7b")  # 自动使用 P2P
 ### 方式二：显式启用
 
 ```python
-# import 顺序无关
-from huggingface_hub import snapshot_download
 from llmpt import enable_p2p
-
 enable_p2p(tracker_url="http://your-tracker-server")
+
+from huggingface_hub import snapshot_download
+
 snapshot_download("meta-llama/Llama-2-7b")
 ```
 
@@ -61,6 +59,8 @@ snapshot_download("meta-llama/Llama-2-7b")
 1. Monkey Patch HuggingFace 的下载函数，拦截文件请求到 P2P 网络
 2. 在后台启动**做种守护进程**，扫描本地 HF 缓存，为所有已有的模型/数据集做种
 3. 下载完成后通知守护进程，自动为新下载的模型/数据集创建 torrent 并注册到 tracker
+
+推荐在`snapshot_download("meta-llama/Llama-2-7b")`前执行 `enable_p2p()` ，但不强制要求。
 
 ### 自定义下载目录
 
@@ -72,10 +72,10 @@ snapshot_download("meta-llama/Llama-2-7b")
 这两种方式都会把存储位置透传给 P2P 下载端和后台守护进程。下载完成后，daemon 会基于对应目录创建 torrent 并开始做种；daemon 重启后，也会恢复已知的自定义目录做种任务。
 
 ```python
-from huggingface_hub import snapshot_download
 from llmpt import enable_p2p
-
 enable_p2p(tracker_url="http://your-tracker-server")
+
+from huggingface_hub import snapshot_download
 
 # 自定义 Hub cache
 snapshot_download(
@@ -167,8 +167,6 @@ HF_TOKEN=hf_xxxxx
 ```
 
 > **注意**：llmpt 在做种和下载时需要调用 HuggingFace API 解析仓库版本信息。如果未设置镜像且无法访问 `huggingface.co`，版本解析将超时失败。
-
-> **说明**：`cache_dir` 和 `local_dir` 语义不同。`cache_dir` 仍然使用 Hugging Face 的 Hub cache 结构；`local_dir` 会直接把文件写到目标目录，仅在其下的 `.cache/huggingface/` 保存元数据。更多设计细节见 [docs/custom_storage_support.md](docs/custom_storage_support.md)。
 
 ### Python API
 
