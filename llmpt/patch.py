@@ -304,6 +304,7 @@ def _patched_http_get(url: str, temp_file, **kwargs):
     tracker = getattr(_context, 'tracker', None)
     config = getattr(_context, 'config', {})
     schedule_deferred = False
+    truncated = False
 
     # Fallback: if _patched_hf_hub_download was bypassed (import-order issue),
     # try to recover context by inspecting the call stack.  The original
@@ -364,17 +365,24 @@ def _patched_http_get(url: str, temp_file, **kwargs):
             else:
                 logger.warning(f"[P2P] P2P fulfillment failed for {filename}. Falling back to HTTP.")
                 _truncate_temp_file(temp_file, filename)
+                truncated = True
 
         except Exception as e:
             logger.warning(f"[P2P] Exception in P2P intercept: {e}. Falling back to HTTP.")
             _truncate_temp_file(temp_file, filename)
+            truncated = True
 
-    # Fall back to original HTTP download if P2P failed or unavailable
-    # Pass resume_size=0 explicitly since we've truncated the file
+    # Fall back to original HTTP download if P2P failed or unavailable.
+    # Only force resume_size=0 if we actually truncated the file after a
+    # failed P2P attempt.  Otherwise, preserve the original resume_size so
+    # that HuggingFace's native resume mechanism works correctly.
     if filename:
         with _stats_lock:
             _download_stats['http'].add(filename)
-    result = _original_http_get(url, temp_file, **{**kwargs, 'resume_size': 0})
+    fallback_kwargs = {**kwargs}
+    if truncated:
+        fallback_kwargs['resume_size'] = 0
+    result = _original_http_get(url, temp_file, **fallback_kwargs)
     if schedule_deferred:
         _schedule_deferred_notification(repo_id, revision, repo_type)
     return result

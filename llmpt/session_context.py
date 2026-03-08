@@ -325,12 +325,21 @@ class SessionContext:
                 # If we have a valid index and handle, we can update the progress bar
                 if file_index is not None and self.handle and self.handle.is_valid():
                     if pbar is None and not disable_pbar and hf_tqdm:
+                        # Read current progress from libtorrent (may be non-zero if fastresume loaded)
+                        initial_progress = 0
+                        try:
+                            progresses = self.handle.file_progress()
+                            initial_progress = progresses[file_index]
+                        except Exception:
+                            pass
                         pbar = hf_tqdm(
                             total=total_size,
+                            initial=initial_progress,
                             unit='B',
                             unit_scale=True,
                             desc=f"{filename} (P2P)"
                         )
+                        last_progress = initial_progress
                     
                     try:
                         progresses = self.handle.file_progress()
@@ -343,7 +352,7 @@ class SessionContext:
                         
                         if pbar:
                             s = self.handle.status()
-                            pbar.set_postfix({"peers": s.num_peers, "dl_speed": f"{s.download_rate / 1024:.1f}KB/s"})
+                            pbar.set_postfix({"peers": s.num_peers})
                     except Exception:
                         pass
 
