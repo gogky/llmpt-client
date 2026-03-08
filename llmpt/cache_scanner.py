@@ -130,8 +130,10 @@ def _load_storage_registry() -> Dict[str, List[dict]]:
 
 def _save_storage_registry(registry: Dict[str, List[dict]]) -> None:
     os.makedirs(os.path.dirname(KNOWN_STORAGE_FILE), exist_ok=True)
-    with open(KNOWN_STORAGE_FILE, "w") as f:
+    tmp_path = KNOWN_STORAGE_FILE + ".tmp"
+    with open(tmp_path, "w") as f:
         json.dump(registry, f, indent=2, sort_keys=True)
+    os.replace(tmp_path, KNOWN_STORAGE_FILE)
 
 
 def register_seedable_storage(
@@ -335,17 +337,25 @@ def scan_seedable_sources() -> List[SeedableSource]:
         for source in seedable
         if source.storage_kind == "hub_cache"
     )
+
+    # Track which registry entries are still valid for pruning.
+    live_hub_roots: List[dict] = []
     for item in registry["hub_cache_roots"]:
         root = item.get("root")
         if not root:
             continue
         normalized_root = _normalize_path(root)
-        if normalized_root in seen_hub_roots or not os.path.isdir(normalized_root):
+        if not os.path.isdir(normalized_root):
+            logger.info(f"Pruning stale hub_cache_root from registry: {root}")
+            continue
+        live_hub_roots.append(item)
+        if normalized_root in seen_hub_roots:
             continue
         seen_hub_roots.add(normalized_root)
         seedable.extend(_scan_hf_cache_root(normalized_root))
 
     seen_local_sources = set()
+    live_local_sources: List[dict] = []
     for item in registry["local_dir_sources"]:
         local_dir = item["local_dir"]
         source_key = (
@@ -358,9 +368,15 @@ def scan_seedable_sources() -> List[SeedableSource]:
             continue
         seen_local_sources.add(source_key)
         if not os.path.isdir(local_dir):
+            logger.info(f"Pruning stale local_dir from registry: {local_dir}")
             continue
         if not _local_dir_matches_revision(local_dir, item["revision"]):
+            logger.info(
+                f"Pruning stale local_dir from registry (revision mismatch): "
+                f"{item['repo_id']}@{item['revision'][:8]}... in {local_dir}"
+            )
             continue
+        live_local_sources.append(item)
         seedable.append(
             SeedableSource(
                 repo_type=item["repo_type"],
@@ -370,6 +386,20 @@ def scan_seedable_sources() -> List[SeedableSource]:
                 storage_root=local_dir,
                 local_dir=local_dir,
             )
+        )
+
+    # Prune stale entries from the registry (atomic write).
+    if (
+        len(live_hub_roots) != len(registry["hub_cache_roots"])
+        or len(live_local_sources) != len(registry["local_dir_sources"])
+    ):
+        pruned = (
+            len(registry["hub_cache_roots"]) - len(live_hub_roots)
+            + len(registry["local_dir_sources"]) - len(live_local_sources)
+        )
+        logger.info(f"Pruned {pruned} stale entries from storage registry")
+        _save_storage_registry(
+            {"hub_cache_roots": live_hub_roots, "local_dir_sources": live_local_sources}
         )
 
     logger.info(f"Scan complete: {len(seedable)} seedable sources found")
