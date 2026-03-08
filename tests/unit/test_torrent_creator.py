@@ -112,6 +112,61 @@ class TestCreateTorrent:
 
     @patch('llmpt.torrent_creator.lt')
     @patch('llmpt.torrent_creator.LIBTORRENT_AVAILABLE', True)
+    def test_successful_local_dir_torrent_creation_uses_local_dir(self, mock_lt, tmp_path):
+        """local_dir sources should build torrents from the local_dir itself."""
+        from llmpt.torrent_creator import create_torrent
+
+        local_dir = tmp_path / "local_dir"
+        local_dir.mkdir()
+        (local_dir / "config.json").write_text('{"key": "value"}')
+        (local_dir / "model.bin").write_bytes(b'\x00' * 1000)
+
+        mock_fs = MagicMock()
+        mock_fs.total_size.return_value = 1014
+        mock_lt.file_storage.return_value = mock_fs
+
+        mock_torrent_obj = MagicMock()
+        mock_torrent_obj.generate.return_value = {'info': 'data'}
+        mock_lt.create_torrent.return_value = mock_torrent_obj
+
+        mock_files = MagicMock()
+        mock_files.num_files.return_value = 2
+        mock_files.file_path.side_effect = lambda i: [
+            "local_dir/config.json",
+            "local_dir/model.bin",
+        ][i]
+        mock_files.file_size.side_effect = lambda i: [14, 1000][i]
+
+        mock_info = MagicMock()
+        mock_info.info_hash.return_value = "abcdef1234567890"
+        mock_info.num_pieces.return_value = 1
+        mock_info.num_files.return_value = 2
+        mock_info.files.return_value = mock_files
+        mock_lt.torrent_info.return_value = mock_info
+        mock_lt.bencode.return_value = b'bencoded_torrent'
+
+        revision = "a" * 40
+        with patch('huggingface_hub.snapshot_download', return_value=str(local_dir)) as mock_snapshot_download, \
+             patch('llmpt.torrent_cache.resolve_torrent_data', return_value=None), \
+             patch('llmpt.torrent_cache.save_torrent_to_cache'):
+            tracker = MagicMock()
+            tracker.tracker_url = "http://tracker.example.com"
+            result = create_torrent(
+                "test/repo", revision, tracker, local_dir=str(local_dir)
+            )
+
+        assert result is not None
+        assert result['commit_hash'] == revision
+        mock_snapshot_download.assert_called_once_with(
+            repo_id="test/repo",
+            revision=revision,
+            repo_type=None,
+            local_files_only=True,
+            local_dir=str(local_dir),
+        )
+
+    @patch('llmpt.torrent_creator.lt')
+    @patch('llmpt.torrent_creator.LIBTORRENT_AVAILABLE', True)
     def test_snapshot_dir_not_found(self, mock_lt, tmp_path):
         """If snapshot_download returns a non-existent path, should return None."""
         from llmpt.torrent_creator import create_torrent
@@ -212,4 +267,31 @@ class TestCreateAndRegisterTorrent:
                 {'path': 'model-00001.bin', 'size': 2450},
                 {'path': 'model-00002.bin', 'size': 2450},
             ],
+        )
+
+    @patch('llmpt.torrent_creator.create_torrent')
+    def test_registration_passes_storage_args(self, mock_create):
+        from llmpt.torrent_creator import create_and_register_torrent
+
+        mock_create.return_value = None
+        tracker = MagicMock()
+        tracker.tracker_url = "http://tracker.example.com"
+
+        create_and_register_torrent(
+            "test/repo",
+            "a" * 40,
+            "model",
+            "Test Model",
+            tracker,
+            cache_dir="/tmp/custom-cache",
+            local_dir="/tmp/custom-local",
+        )
+
+        mock_create.assert_called_once_with(
+            repo_id="test/repo",
+            revision="a" * 40,
+            tracker_client=tracker,
+            repo_type="model",
+            cache_dir="/tmp/custom-cache",
+            local_dir="/tmp/custom-local",
         )

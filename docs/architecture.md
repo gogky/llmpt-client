@@ -29,34 +29,6 @@
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-## 核心流程
-
-### 下载端
-
-1. 用户调用 `enable_p2p()` 或设置 `HF_USE_P2P=1`
-2. 系统 Monkey Patch HuggingFace 的三个核心函数：
-   - `hf_hub_download` — 注入 P2P 上下文（repo_id, filename, revision 等）
-   - `http_get` — 拦截 HTTP 请求，尝试通过 P2P 下载
-   - `snapshot_download` — 下载完成后通知守护进程
-3. 同时禁用 HuggingFace 的 Xet Storage（否则 LFS 文件会绕过 http_get patch）
-4. 自动启动 WebSeed 本地反向代理（作为无 peer 时的 fallback）
-5. 自动启动做种守护进程（如果尚未运行）
-
-### 守护进程 (llmptd)
-
-1. 作为独立后台进程运行，独立于 HuggingFace 进程
-2. 定时扫描 `~/.cache/huggingface/hub/` 中所有完整的快照
-3. 为发现的模型/数据集创建 torrent 并注册到 Tracker
-4. 通过 libtorrent 持续做种
-5. 通过 Unix Socket IPC 接收来自下载端的通知
-6. 支持 seed 失败指数退避重试
-
-### Import Order 无关性
-
-`enable_p2p()` 使用栈帧回溯（stack frame inspection）作为后备方案，
-即使用户在 `enable_p2p()` 之前 import 了 `hf_hub_download`，P2P 仍然能正常工作。
-详见 [monkey_patch_import_order.md](./monkey_patch_import_order.md)。
-
 ## 项目结构
 
 ```

@@ -36,14 +36,27 @@ _download_stats = {
 # imports snapshot_download BEFORE enable_p2p(), _patched_snapshot_download
 # never runs, and this fallback fires after a 2-second quiet period.
 _deferred_lock = threading.Lock()
-_deferred_timers: dict[tuple[str, str, str], threading.Timer] = {}
-_deferred_contexts: dict[tuple[str, str, str], dict] = {}   # (repo_type, repo_id, revision) -> context
+_deferred_timers: dict[tuple[str, str, str, str, str], threading.Timer] = {}
+_deferred_contexts: dict[tuple[str, str, str, str, str], dict] = {}
 _active_wrapper_counts: dict[str, int] = {}  # repo_id -> active wrapper depth
 
 
-def _deferred_key(repo_id: str, revision: str, repo_type: str) -> tuple[str, str, str]:
-    """Build the dedupe key for deferred daemon notifications."""
-    return (repo_type or "model", repo_id, revision or "main")
+def _deferred_key(
+    repo_id: str,
+    revision: str,
+    repo_type: str,
+    cache_dir: Optional[str] = None,
+    local_dir: Optional[str] = None,
+) -> tuple[str, str, str, str, str]:
+    """Build the dedupe key for deferred daemon notifications.
+
+    The content identity is ``(repo_type, repo_id, revision)``.  Storage
+    identity is tracked separately so simultaneous downloads of the same repo
+    into different roots do not stomp each other.
+    """
+    storage_kind = "local_dir" if local_dir else "hub_cache"
+    storage_root = local_dir or cache_dir or ""
+    return (repo_type or "model", repo_id, revision or "main", storage_kind, storage_root)
 
 
 def _is_wrapper_active(repo_id: str) -> bool:
@@ -78,12 +91,12 @@ def _flush_deferred_notifications():
         
     for ctx in contexts:
         try:
-            from .ipc import notify_daemon
-            notify_daemon(
-                "seed",
+            _notify_seed_daemon(
                 repo_id=ctx['repo_id'],
                 revision=ctx['revision'],
                 repo_type=ctx['repo_type'],
+                cache_dir=ctx.get('cache_dir'),
+                local_dir=ctx.get('local_dir'),
             )
         except Exception:
             pass
@@ -141,40 +154,58 @@ def _extract_context_from_stack() -> Optional[dict]:
     """
     try:
         frame = sys._getframe(1)  # start from caller
-        for _ in range(10):       # walk up at most 10 frames
+        result = {}
+        for _ in range(20):       # walk up at most 20 frames
             frame = frame.f_back
             if frame is None:
                 break
-            if frame.f_code.co_name == 'hf_hub_download':
+            name = frame.f_code.co_name
+            if name in ('hf_hub_download', 'snapshot_download'):
                 loc = frame.f_locals
-                repo_id = loc.get('repo_id')
-                filename = loc.get('filename')
-                if not (repo_id and filename):
-                    return None
+                
+                # Extract whatever we can find from this frame
+                if 'repo_id' in loc and 'repo_id' not in result:
+                    result['repo_id'] = loc.get('repo_id')
+                if 'filename' in loc and 'filename' not in result:
+                    result['filename'] = loc.get('filename')
+                if 'repo_type' in loc and 'repo_type' not in result:
+                    result['repo_type'] = loc.get('repo_type') or 'model'
+                
+                # Revisions and commit hashes
+                rev = loc.get('commit_hash') or loc.get('revision')
+                if rev and 'revision' not in result:
+                    result['revision'] = rev
 
-                # commit_hash (40-char SHA) is resolved by the HEAD request
-                # inside hf_hub_download; prefer it over the raw `revision`.
-                revision = loc.get('commit_hash') or loc.get('revision') or 'main'
-                repo_type = loc.get('repo_type') or 'model'
+                # Subfolder resolution
+                if 'subfolder' in loc and 'subfolder' not in result:
+                    sub_val = loc.get('subfolder')
+                    if sub_val and sub_val != '':
+                        result['subfolder'] = sub_val
 
-                # Resolve subfolder exactly as huggingface_hub does
-                subfolder = loc.get('subfolder')
-                actual_filename = filename
-                if subfolder and subfolder != '':
-                    actual_filename = f"{subfolder}/{filename}"
+                # Directories
+                for dir_key in ('cache_dir', 'local_dir'):
+                    if dir_key in loc and dir_key not in result and loc[dir_key]:
+                        result[dir_key] = loc[dir_key]
+                    elif loc.get('kwargs') and dir_key in loc['kwargs'] and dir_key not in result and loc['kwargs'][dir_key]:
+                        result[dir_key] = loc['kwargs'][dir_key]
 
-                return {
-                    'repo_id': repo_id,
-                    'filename': actual_filename,
-                    'revision': revision,
-                    'repo_type': repo_type,
-                }
+        if result.get('repo_id') and result.get('filename'):
+            # Default fallbacks
+            result.setdefault('revision', 'main')
+            result.setdefault('repo_type', 'model')
+            
+            # Apply subfolder if found
+            if 'subfolder' in result:
+                result['filename'] = f"{result['subfolder']}/{result['filename']}"
+                
+            return result
+            
     except (AttributeError, ValueError):
         pass
     return None
 
 
-def _fire_deferred_notification(key: tuple[str, str, str]) -> None:
+def _fire_deferred_notification(key: tuple[str, str, str, str, str]) -> None:
     """Called by the debounce timer — sends a daemon seed notification."""
     with _deferred_lock:
         ctx = _deferred_contexts.pop(key, None)
@@ -184,12 +215,12 @@ def _fire_deferred_notification(key: tuple[str, str, str]) -> None:
         return
         
     try:
-        from .ipc import notify_daemon
-        notify_daemon(
-            "seed",
+        _notify_seed_daemon(
             repo_id=ctx['repo_id'],
             revision=ctx['revision'],
             repo_type=ctx['repo_type'],
+            cache_dir=ctx.get('cache_dir'),
+            local_dir=ctx.get('local_dir'),
         )
         logger.debug(
             f"[P2P] Deferred daemon notification sent for "
@@ -200,7 +231,7 @@ def _fire_deferred_notification(key: tuple[str, str, str]) -> None:
 
 
 def _schedule_deferred_notification(
-    repo_id: str, revision: str, repo_type: str
+    repo_id: str, revision: str, repo_type: str, cache_dir: Optional[str] = None, local_dir: Optional[str] = None
 ) -> None:
     """Schedule (or reschedule) a deferred daemon notification.
 
@@ -209,7 +240,7 @@ def _schedule_deferred_notification(
     This acts as a fallback for when _patched_snapshot_download is
     bypassed due to import-order issues.
     """
-    key = _deferred_key(repo_id, revision, repo_type)
+    key = _deferred_key(repo_id, revision, repo_type, cache_dir, local_dir)
     with _deferred_lock:
         # Cancel any existing timer for this specific repo+revision.
         timer = _deferred_timers.get(key)
@@ -220,6 +251,8 @@ def _schedule_deferred_notification(
             'repo_id': repo_id,
             'revision': revision,
             'repo_type': repo_type,
+            'cache_dir': cache_dir,
+            'local_dir': local_dir,
         }
         
         # Start a new timer
@@ -227,6 +260,28 @@ def _schedule_deferred_notification(
         new_timer.daemon = True
         new_timer.start()
         _deferred_timers[key] = new_timer
+
+
+def _notify_seed_daemon(
+    *,
+    repo_id: str,
+    revision: str,
+    repo_type: str,
+    cache_dir: Optional[str] = None,
+    local_dir: Optional[str] = None,
+) -> None:
+    from .ipc import notify_daemon
+
+    notify_kwargs: dict[str, Any] = {
+        "repo_id": repo_id,
+        "revision": revision,
+        "repo_type": repo_type,
+    }
+    if cache_dir is not None:
+        notify_kwargs["cache_dir"] = cache_dir
+    if local_dir is not None:
+        notify_kwargs["local_dir"] = local_dir
+    notify_daemon("seed", **notify_kwargs)
 
 
 def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
@@ -242,6 +297,8 @@ def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
     # fall back to the raw value — the download still works via HTTP.
     raw_revision = kwargs.get('revision', 'main')
     repo_type = kwargs.get('repo_type', 'model')
+    cache_dir = kwargs.get('cache_dir')
+    local_dir = kwargs.get('local_dir')
     try:
         revision = resolve_commit_hash(repo_id, raw_revision, repo_type=repo_type)
     except Exception as e:
@@ -263,6 +320,8 @@ def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
     prev_revision = getattr(_context, 'revision', None)
     prev_tracker = getattr(_context, 'tracker', None)
     prev_config = getattr(_context, 'config', None)
+    prev_cache_dir = getattr(_context, 'cache_dir', None)
+    prev_local_dir = getattr(_context, 'local_dir', None)
 
     # Store context for http_get to use
     _context.repo_id = repo_id
@@ -271,6 +330,8 @@ def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
     _context.revision = revision
     _context.tracker = tracker
     _context.config = _config
+    _context.cache_dir = cache_dir
+    _context.local_dir = local_dir
 
     download_succeeded = False
     try:
@@ -286,12 +347,14 @@ def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
         _context.revision = prev_revision
         _context.tracker = prev_tracker
         _context.config = prev_config
+        _context.cache_dir = prev_cache_dir
+        _context.local_dir = prev_local_dir
 
         # Fallback daemon notification: if _patched_snapshot_download is not
         # wrapping this call (import-order issue), schedule a deferred
         # notification so the daemon still learns about this download.
         if download_succeeded and not _is_wrapper_active(repo_id):
-            _schedule_deferred_notification(repo_id, revision, repo_type)
+            _schedule_deferred_notification(repo_id, revision, repo_type, cache_dir, local_dir)
 
 
 def _patched_http_get(url: str, temp_file, **kwargs):
@@ -303,6 +366,8 @@ def _patched_http_get(url: str, temp_file, **kwargs):
     revision = getattr(_context, 'revision', None)
     tracker = getattr(_context, 'tracker', None)
     config = getattr(_context, 'config', {})
+    cache_dir = getattr(_context, 'cache_dir', None)
+    local_dir = getattr(_context, 'local_dir', None)
     schedule_deferred = False
     truncated = False
 
@@ -317,6 +382,8 @@ def _patched_http_get(url: str, temp_file, **kwargs):
             filename = stack_ctx['filename']
             revision = stack_ctx['revision']
             repo_type = stack_ctx['repo_type']
+            cache_dir = stack_ctx.get('cache_dir')
+            local_dir = stack_ctx.get('local_dir')
             tracker = TrackerClient(_config['tracker_url']) if _config.get('tracker_url') else None
             config = _config
             logger.debug(
@@ -345,22 +412,27 @@ def _patched_http_get(url: str, temp_file, **kwargs):
             else:
                 effective_timeout = config.get('timeout', 300)
 
-            success = manager.register_request(
-                repo_id=repo_id,
-                revision=revision,
-                filename=filename,
-                temp_file_path=temp_file.name,
-                tracker_client=tracker,
-                timeout=effective_timeout,
-                repo_type=repo_type
-            )
+            register_kwargs = {
+                "repo_id": repo_id,
+                "revision": revision,
+                "filename": filename,
+                "temp_file_path": temp_file.name,
+                "tracker_client": tracker,
+                "timeout": effective_timeout,
+                "repo_type": repo_type,
+            }
+            if cache_dir is not None:
+                register_kwargs["cache_dir"] = cache_dir
+            if local_dir is not None:
+                register_kwargs["local_dir"] = local_dir
+            success = manager.register_request(**register_kwargs)
 
             if success:
                 logger.info(f"[P2P] Successfully delivered {filename} via P2P.")
                 with _stats_lock:
                     _download_stats['p2p'].add(filename)
                 if schedule_deferred:
-                    _schedule_deferred_notification(repo_id, revision, repo_type)
+                    _schedule_deferred_notification(repo_id, revision, repo_type, cache_dir, local_dir)
                 return  # Skip original http_get completely!
             else:
                 logger.warning(f"[P2P] P2P fulfillment failed for {filename}. Falling back to HTTP.")
@@ -384,7 +456,7 @@ def _patched_http_get(url: str, temp_file, **kwargs):
         fallback_kwargs['resume_size'] = 0
     result = _original_http_get(url, temp_file, **fallback_kwargs)
     if schedule_deferred:
-        _schedule_deferred_notification(repo_id, revision, repo_type)
+        _schedule_deferred_notification(repo_id, revision, repo_type, cache_dir, local_dir)
     return result
 
 
@@ -430,7 +502,7 @@ def _patched_snapshot_download(*args, **kwargs):
         keys_to_cancel = []
         with _deferred_lock:
             for key in list(_deferred_timers.keys()):
-                key_repo_type, key_repo_id, key_revision = key
+                key_repo_type, key_repo_id, key_revision = key[:3]
                 if (
                     key_repo_type == repo_type and
                     key_repo_id == repo_id and
@@ -445,8 +517,15 @@ def _patched_snapshot_download(*args, **kwargs):
                 _deferred_contexts.pop(key, None)
 
         # Notify the daemon (fire-and-forget — safe even if daemon isn't running)
-        from .ipc import notify_daemon
-        notify_daemon("seed", repo_id=repo_id, revision=resolved, repo_type=repo_type)
+        cache_dir = kwargs.get('cache_dir')
+        local_dir = kwargs.get('local_dir')
+        _notify_seed_daemon(
+            repo_id=repo_id,
+            revision=resolved,
+            repo_type=repo_type,
+            cache_dir=cache_dir,
+            local_dir=local_dir,
+        )
         logger.debug(f"[P2P] Notified daemon to seed {repo_id}@{resolved[:8]}...")
 
     except Exception as e:

@@ -9,6 +9,8 @@ from pathlib import Path
 from llmpt.cache_scanner import (
     _parse_repo_id,
     _is_snapshot_complete,
+    register_seedable_storage,
+    scan_seedable_sources,
     scan_hf_cache,
 )
 
@@ -188,3 +190,74 @@ class TestScanHfCache:
         })
         result = scan_hf_cache(str(tmp_path))
         assert len(result) == 2
+
+
+class TestRegisteredSeedableSources:
+    def _create_mock_cache(self, base: Path, models: dict):
+        for dir_name, revisions in models.items():
+            model_dir = base / dir_name / "snapshots"
+            model_dir.mkdir(parents=True)
+            for revision, files in revisions.items():
+                snap = model_dir / revision
+                snap.mkdir()
+                for f in files:
+                    file_path = snap / f
+                    file_path.parent.mkdir(parents=True, exist_ok=True)
+                    file_path.write_text("content")
+
+    def test_registered_custom_hub_cache_is_scanned(self, tmp_path, monkeypatch):
+        registry_file = tmp_path / "known_storage.json"
+        custom_cache = tmp_path / "custom-hub"
+        commit = "a" * 40
+        self._create_mock_cache(
+            custom_cache,
+            {"models--gpt2": {commit: ["config.json", "model.bin"]}},
+        )
+
+        monkeypatch.setattr("llmpt.cache_scanner.KNOWN_STORAGE_FILE", str(registry_file))
+        register_seedable_storage(
+            repo_id="gpt2",
+            revision=commit,
+            cache_dir=str(custom_cache),
+        )
+
+        result = scan_seedable_sources()
+        assert any(
+            item.repo_id == "gpt2"
+            and item.revision == commit
+            and item.cache_dir == str(custom_cache.resolve())
+            for item in result
+        )
+
+    def test_registered_local_dir_is_scanned(self, tmp_path, monkeypatch):
+        registry_file = tmp_path / "known_storage.json"
+        local_dir = tmp_path / "local-model"
+        commit = "b" * 40
+        model_file = local_dir / "weights.bin"
+        model_file.parent.mkdir(parents=True, exist_ok=True)
+        model_file.write_bytes(b"123")
+        metadata_path = (
+            local_dir
+            / ".cache"
+            / "huggingface"
+            / "download"
+            / "weights.bin.metadata"
+        )
+        metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        metadata_path.write_text(f"{commit}\netag\n123.0\n")
+
+        monkeypatch.setattr("llmpt.cache_scanner.KNOWN_STORAGE_FILE", str(registry_file))
+        register_seedable_storage(
+            repo_id="org/model",
+            revision=commit,
+            repo_type="model",
+            local_dir=str(local_dir),
+        )
+
+        result = scan_seedable_sources()
+        assert any(
+            item.repo_id == "org/model"
+            and item.revision == commit
+            and item.local_dir == str(local_dir.resolve())
+            for item in result
+        )

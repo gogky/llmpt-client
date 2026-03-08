@@ -11,6 +11,8 @@ HuggingFace Hub 模型/数据集的 P2P 加速下载客户端。
 - **自动做种**：下载完成后自动创建 torrent 并持续做种，回馈社区
 - **后台守护进程**：做种运行在独立的后台进程中，不影响正常使用
 - **全缓存做种**：守护进程会扫描 HF 缓存中的所有模型/数据集并自动做种
+- **自定义目录支持**：支持 `snapshot_download(..., cache_dir=...)` 和 `snapshot_download(..., local_dir=...)`
+- **冷启动恢复**：守护进程重启后可恢复已登记的自定义目录做种任务
 
 ## 安装
 
@@ -60,6 +62,34 @@ snapshot_download("meta-llama/Llama-2-7b")
 2. 在后台启动**做种守护进程**，扫描本地 HF 缓存，为所有已有的模型/数据集做种
 3. 下载完成后通知守护进程，自动为新下载的模型/数据集创建 torrent 并注册到 tracker
 
+### 自定义下载目录
+
+`llmpt` 现在支持 Hugging Face 的两种自定义存储方式：
+
+- `cache_dir=...`：使用自定义 Hub cache 根目录
+- `local_dir=...`：直接把文件展开到目标目录
+
+这两种方式都会把存储位置透传给 P2P 下载端和后台守护进程。下载完成后，daemon 会基于对应目录创建 torrent 并开始做种；daemon 重启后，也会恢复已知的自定义目录做种任务。
+
+```python
+from huggingface_hub import snapshot_download
+from llmpt import enable_p2p
+
+enable_p2p(tracker_url="http://your-tracker-server")
+
+# 自定义 Hub cache
+snapshot_download(
+    repo_id="gpt2",
+    cache_dir="/data/hf-cache",
+)
+
+# 直接展开到目标目录
+snapshot_download(
+    repo_id="gpt2",
+    local_dir="/data/models/gpt2",
+)
+```
+
 ## CLI 工具
 
 安装后可使用 `llmpt-cli` 命令行工具：
@@ -97,6 +127,8 @@ $  # ← 立刻返回，终端可以关掉
 
 守护进程的核心功能：
 - **自动扫描** `~/.cache/huggingface/hub/` 中所有完整的模型/数据集快照
+- **扫描自定义 cache_dir**：恢复已登记的自定义 Hub cache 根目录
+- **恢复 local_dir 做种**：基于本地 registry 和 `local_dir/.cache/huggingface/download/*.metadata` 重建做种任务
 - **自动创建 torrent**：如果 tracker 上没有某模型的 torrent，自动创建并注册
 - **持续做种**：为所有已发现的模型/数据集提供 P2P 上传
 - **接收通知**：下载端下载完成后会通过 IPC 立即通知守护进程
@@ -135,6 +167,8 @@ HF_TOKEN=hf_xxxxx
 ```
 
 > **注意**：llmpt 在做种和下载时需要调用 HuggingFace API 解析仓库版本信息。如果未设置镜像且无法访问 `huggingface.co`，版本解析将超时失败。
+
+> **说明**：`cache_dir` 和 `local_dir` 语义不同。`cache_dir` 仍然使用 Hugging Face 的 Hub cache 结构；`local_dir` 会直接把文件写到目标目录，仅在其下的 `.cache/huggingface/` 保存元数据。更多设计细节见 [docs/custom_storage_support.md](docs/custom_storage_support.md)。
 
 ### Python API
 

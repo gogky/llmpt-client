@@ -3,12 +3,14 @@ Torrent creation utilities.
 """
 
 import logging
+import re
 from pathlib import Path
 from typing import Optional, Any
 
 from .utils import lt, LIBTORRENT_AVAILABLE, get_optimal_piece_length, format_bytes, strip_torrent_root
 
 logger = logging.getLogger('llmpt.torrent_creator')
+_COMMIT_HASH_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _torrent_data_to_result(torrent_data: bytes, repo_id: str) -> Optional[dict]:
@@ -57,6 +59,8 @@ def create_torrent(
     tracker_client: Any,
     *,
     repo_type: str = "model",
+    cache_dir: Optional[str] = None,
+    local_dir: Optional[str] = None,
 ) -> Optional[dict]:
     """
     Create a torrent file for an entire HuggingFace repository snapshot.
@@ -108,17 +112,25 @@ def create_torrent(
         # monkey patch, trying to download via P2P with no peers → 300s timeout.
         logger.info(f"Resolving HF snapshot for {repo_id}@{revision}")
         
-        snapshot_path = snapshot_download(
-            repo_id=repo_id, 
-            revision=revision, 
-            repo_type=repo_type if repo_type != "model" else None,
-            local_files_only=True,
-        )
+        snapshot_kwargs = {
+            "repo_id": repo_id,
+            "revision": revision,
+            "repo_type": repo_type if repo_type != "model" else None,
+            "local_files_only": True,
+        }
+        if cache_dir is not None:
+            snapshot_kwargs["cache_dir"] = cache_dir
+        if local_dir is not None:
+            snapshot_kwargs["local_dir"] = local_dir
+
+        snapshot_path = snapshot_download(**snapshot_kwargs)
         file_path = Path(snapshot_path)
         
         if not file_path.exists() or not file_path.is_dir():
             logger.error(f"Snapshot directory not found or valid: {file_path}")
             return None
+
+        commit_hash = revision if _COMMIT_HASH_RE.match(revision) else file_path.name
 
         # Create file storage
         fs = lt.file_storage()
@@ -202,7 +214,7 @@ def create_torrent(
             'num_pieces': info.num_pieces(),
             'num_files': info.num_files(),
             'torrent_data': torrent_data,
-            'commit_hash': file_path.name,
+            'commit_hash': commit_hash,
             'files': file_list,
         }
 
@@ -275,6 +287,9 @@ def create_and_register_torrent(
     repo_type: str,
     name: str,
     tracker_client: Any,
+    *,
+    cache_dir: Optional[str] = None,
+    local_dir: Optional[str] = None,
 ) -> Optional[dict]:
     """
     Create torrent and register it with the tracker.
@@ -295,6 +310,8 @@ def create_and_register_torrent(
         revision=revision,
         tracker_client=tracker_client,
         repo_type=repo_type,
+        cache_dir=cache_dir,
+        local_dir=local_dir,
     )
 
     if not torrent_info:

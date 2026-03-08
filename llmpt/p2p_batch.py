@@ -6,6 +6,7 @@ HTTP download requests into a single, efficient BitTorrent session with
 dynamic file prioritization.
 """
 
+import os
 import threading
 import logging
 from typing import TYPE_CHECKING, Dict, Any, Optional
@@ -28,6 +29,18 @@ logger = logging.getLogger(__name__)
 _DEFAULT_DAEMON_PORT = 6881
 _DEFAULT_CLIENT_PORT = 6882
 _MAX_PORT = 6999
+
+
+def _storage_identity(
+    cache_dir: Optional[str] = None,
+    local_dir: Optional[str] = None,
+) -> tuple[str, str]:
+    """Return a normalized storage identity for session-level deduping."""
+    if local_dir:
+        return ("local_dir", os.path.realpath(os.path.abspath(os.path.expanduser(local_dir))))
+    if cache_dir:
+        return ("hub_cache", os.path.realpath(os.path.abspath(os.path.expanduser(cache_dir))))
+    return ("hub_cache", "")
 
 
 def _is_port_available(port: int) -> bool:
@@ -183,7 +196,7 @@ class P2PBatchManager:
                 # like listen_succeeded_alert) are intentionally dropped here;
                 # they are informational and not required for correctness.
 
-    def register_seeding_task(self, repo_id: str, revision: str, tracker_client: 'TrackerClient', torrent_data: Optional[bytes] = None, *, repo_type: str = 'model') -> bool:
+    def register_seeding_task(self, repo_id: str, revision: str, tracker_client: 'TrackerClient', torrent_data: Optional[bytes] = None, *, repo_type: str = 'model', cache_dir: Optional[str] = None, local_dir: Optional[str] = None) -> bool:
         """
         Register a repository to be tracked for background seeding.
         This behaves like a download but without any specific HTTP interception blocks.
@@ -191,7 +204,8 @@ class P2PBatchManager:
         if not LIBTORRENT_AVAILABLE:
             return False
 
-        repo_key = (repo_type, repo_id, revision)
+        storage_kind, storage_root = _storage_identity(cache_dir=cache_dir, local_dir=local_dir)
+        repo_key = (repo_type, repo_id, revision, storage_kind, storage_root)
         with self._lock:
             if repo_key not in self.sessions:
                 self.sessions[repo_key] = SessionContext(
@@ -203,6 +217,8 @@ class P2PBatchManager:
                     session_mode='full_seed',
                     timeout=0,  # unused: seeding path never calls download_file()
                     torrent_data=torrent_data,
+                    cache_dir=cache_dir,
+                    local_dir=local_dir,
                 )
             session_ctx = self.sessions[repo_key]
             
@@ -227,7 +243,9 @@ class P2PBatchManager:
         tracker_client: 'TrackerClient',
         timeout: int = 300,
         *,
-        repo_type: str = 'model'
+        repo_type: str = 'model',
+        cache_dir: Optional[str] = None,
+        local_dir: Optional[str] = None,
     ) -> bool:
         """
         Register a file download request.
@@ -247,7 +265,8 @@ class P2PBatchManager:
         if not LIBTORRENT_AVAILABLE:
             return False
 
-        repo_key = (repo_type, repo_id, revision)
+        storage_kind, storage_root = _storage_identity(cache_dir=cache_dir, local_dir=local_dir)
+        repo_key = (repo_type, repo_id, revision, storage_kind, storage_root)
         
         with self._lock:
             if repo_key not in self.sessions:
@@ -261,6 +280,8 @@ class P2PBatchManager:
                     lt_session=self.lt_session,
                     session_mode='on_demand',
                     timeout=timeout,
+                    cache_dir=cache_dir,
+                    local_dir=local_dir,
                 )
             session_ctx = self.sessions[repo_key]
         
@@ -295,18 +316,21 @@ class P2PBatchManager:
                 pass
         return ctx.worker_thread
 
-    def remove_session(self, repo_id: str, revision: str, *, repo_type: str = 'model') -> bool:
+    def remove_session(self, repo_id: str, revision: str, *, repo_type: str = 'model', cache_dir: Optional[str] = None, local_dir: Optional[str] = None) -> bool:
         """Remove a single session (stop seeding a specific repo).
 
         Args:
             repo_id: HuggingFace repository ID.
             revision: Revision string.
             repo_type: Repository type.
+            cache_dir: Optional cache directory.
+            local_dir: Optional local directory.
 
         Returns:
             True if the session was found and removed, False otherwise.
         """
-        repo_key = (repo_type, repo_id, revision)
+        storage_kind, storage_root = _storage_identity(cache_dir=cache_dir, local_dir=local_dir)
+        repo_key = (repo_type, repo_id, revision, storage_kind, storage_root)
         worker = None
 
         with self._lock:
@@ -349,14 +373,18 @@ class P2PBatchManager:
         """
         status = {}
         with self._lock:
-            for (repo_type, repo_id, revision), ctx in self.sessions.items():
+            for (repo_type, repo_id, revision, storage_kind, storage_root), ctx in self.sessions.items():
                 if not ctx.handle or not ctx.handle.is_valid():
                     continue
                 s = ctx.handle.status()
-                status[f"{repo_type}:{repo_id}@{revision}"] = {
+                # Represent the session uniquely
+                key_suffix = f" ({storage_kind}={storage_root})" if storage_root else ""
+                status[f"{repo_type}:{repo_id}@{revision}{key_suffix}"] = {
                     'repo_type': repo_type,
                     'repo_id': repo_id,
                     'revision': revision,
+                    'cache_dir': ctx.cache_dir,
+                    'local_dir': ctx.local_dir,
                     'uploaded': s.total_upload,
                     'peers': s.num_peers,
                     'upload_rate': s.upload_rate,
@@ -375,4 +403,3 @@ class P2PBatchManager:
         """
         count = self.remove_all_sessions()
         logger.info(f"P2PBatchManager shutdown complete ({count} sessions removed).")
-

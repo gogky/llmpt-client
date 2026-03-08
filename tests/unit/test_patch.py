@@ -107,3 +107,43 @@ def test_p2p_interception_flow():
             patch_module._context.revision = None
             patch_module._context.tracker = None
             patch_module._context.config = None
+
+
+def test_snapshot_download_notification_handles_storage_key_shape():
+    config = {'tracker_url': 'http://test', 'timeout': 300}
+    apply_patch(config)
+
+    import llmpt.patch as patch_module
+
+    with patch('llmpt.patch._original_snapshot_download', return_value="/tmp/local"), \
+         patch('llmpt.utils.resolve_commit_hash', return_value="a" * 40), \
+         patch('llmpt.ipc.notify_daemon') as notify_daemon:
+
+        key = patch_module._deferred_key(
+            repo_id="demo/repo",
+            revision="main",
+            repo_type="model",
+            local_dir="/tmp/model",
+        )
+        patch_module._deferred_timers[key] = MagicMock()
+        patch_module._deferred_contexts[key] = {
+            "repo_id": "demo/repo",
+            "revision": "main",
+            "repo_type": "model",
+            "local_dir": "/tmp/model",
+        }
+
+        result = huggingface_hub.snapshot_download(
+            repo_id="demo/repo",
+            revision="main",
+            local_dir="/tmp/model",
+        )
+
+        assert result == "/tmp/local"
+        notify_daemon.assert_called_once_with(
+            "seed",
+            repo_id="demo/repo",
+            revision="a" * 40,
+            repo_type="model",
+            local_dir="/tmp/model",
+        )

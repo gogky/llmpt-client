@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # ── HF cache resolution ──────────────────────────────────────────────────────
 
-def resolve_hf_blob(repo_id: str, filename: str, revision: str, *, repo_type: str = "model") -> Optional[str]:
+def resolve_hf_blob(repo_id: str, filename: str, revision: str, *, repo_type: str = "model", cache_dir: Optional[str] = None, local_dir: Optional[str] = None) -> Optional[str]:
     """Look up a file in the local HuggingFace cache and return its real path.
 
     Returns:
@@ -26,13 +26,23 @@ def resolve_hf_blob(repo_id: str, filename: str, revision: str, *, repo_type: st
         the file is not in cache.
     """
     try:
+        if local_dir:
+            # For local_dir, files are stored directly in the local folder, no blob mapping
+            local_path = os.path.join(local_dir, filename)
+            if os.path.exists(local_path):
+                return os.path.realpath(local_path)
+            # If not found directly, maybe it hasn't been moved yet. We fall through to cache.
+            
         from huggingface_hub import try_to_load_from_cache
-        local_path = try_to_load_from_cache(
-            repo_id=repo_id,
-            filename=filename,
-            revision=revision,
-            repo_type=repo_type if repo_type != "model" else None,
-        )
+        cache_lookup_kwargs = {
+            "repo_id": repo_id,
+            "filename": filename,
+            "revision": revision,
+            "repo_type": repo_type if repo_type != "model" else None,
+        }
+        if cache_dir is not None:
+            cache_lookup_kwargs["cache_dir"] = cache_dir
+        local_path = try_to_load_from_cache(**cache_lookup_kwargs)
         if local_path and isinstance(local_path, str):
             return os.path.realpath(local_path)
     except Exception as e:
@@ -64,6 +74,8 @@ def hardlink_files_for_seeding(
     revision: str,
     *,
     repo_type: str = "model",
+    cache_dir: Optional[str] = None,
+    local_dir: Optional[str] = None,
 ) -> Tuple[List[str], int]:
     """Create hardlinks at paths libtorrent expects, pointing to HF blobs.
 
@@ -99,7 +111,7 @@ def hardlink_files_for_seeding(
             continue
 
         # Resolve the HF cache blob path
-        real_path = resolve_hf_blob(repo_id, target_norm, revision, repo_type=repo_type)
+        real_path = resolve_hf_blob(repo_id, target_norm, revision, repo_type=repo_type, cache_dir=cache_dir, local_dir=local_dir)
         if not real_path:
             logger.warning(f"[{repo_id}] Cache miss for seeding [{file_index}]: {target_norm} (revision={revision})")
             continue
@@ -130,6 +142,8 @@ def rename_files_for_seeding(
     revision: str,
     *,
     repo_type: str = "model",
+    cache_dir: Optional[str] = None,
+    local_dir: Optional[str] = None,
 ) -> int:
     """Map files via rename_file() and trigger a force_recheck().
 
@@ -165,7 +179,7 @@ def rename_files_for_seeding(
             handle.rename_file(file_index, pad_file_path)
             continue
 
-        real_path = resolve_hf_blob(repo_id, target_norm, revision, repo_type=repo_type)
+        real_path = resolve_hf_blob(repo_id, target_norm, revision, repo_type=repo_type, cache_dir=cache_dir, local_dir=local_dir)
         if real_path:
             handle.rename_file(file_index, real_path)
             mapped_count += 1

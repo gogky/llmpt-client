@@ -152,7 +152,13 @@ class IPCServer:
 # ---------------------------------------------------------------------------
 
 
-def notify_daemon(action: str, **kwargs) -> bool:
+def notify_daemon(
+    action: str, 
+    *, 
+    cache_dir: Optional[str] = None, 
+    local_dir: Optional[str] = None, 
+    **kwargs
+) -> bool:
     """Send a fire-and-forget message to the daemon.
 
     Returns True if the message was sent successfully, False otherwise.
@@ -160,6 +166,11 @@ def notify_daemon(action: str, **kwargs) -> bool:
     running.
     """
     msg: Dict[str, Any] = {"action": action, **kwargs}
+    if cache_dir is not None:
+        msg["cache_dir"] = cache_dir
+    if local_dir is not None:
+        msg["local_dir"] = local_dir
+        
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(2)

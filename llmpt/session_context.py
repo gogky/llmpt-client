@@ -39,6 +39,8 @@ class SessionContext:
         torrent_data: Optional[bytes] = None,
         *,
         repo_type: str = 'model',
+        cache_dir: Optional[str] = None,
+        local_dir: Optional[str] = None,
     ) -> None:
         if session_mode not in ('on_demand', 'full_seed'):
             raise ValueError("session_mode must be 'on_demand' or 'full_seed'")
@@ -50,6 +52,8 @@ class SessionContext:
         self.lt_session = lt_session
         self.timeout = timeout
         self.torrent_data = torrent_data
+        self.cache_dir = cache_dir
+        self.local_dir = local_dir
         
         self.handle = None
         self.is_valid = True
@@ -98,7 +102,12 @@ class SessionContext:
 
         # 2. Build params and add torrent
         try:
-            self.temp_dir = os.path.expanduser("~/.cache/huggingface/hub/p2p_root")
+            if self.local_dir:
+                self.temp_dir = os.path.join(self.local_dir, ".cache", "huggingface", "p2p_root")
+            elif self.cache_dir:
+                self.temp_dir = os.path.join(self.cache_dir, "p2p_root")
+            else:
+                self.temp_dir = os.path.expanduser("~/.cache/huggingface/hub/p2p_root")
             os.makedirs(self.temp_dir, exist_ok=True)
 
             params, info = build_add_torrent_params(
@@ -433,7 +442,7 @@ class SessionContext:
         try:
             hardlinks, mapped_count = hardlink_files_for_seeding(
                 self.torrent_info_obj, self.temp_dir, self.repo_id, self.revision,
-                repo_type=self.repo_type,
+                repo_type=self.repo_type, cache_dir=self.cache_dir, local_dir=self.local_dir
             )
             self.seeding_hardlinks = hardlinks
 
@@ -454,7 +463,7 @@ class SessionContext:
             rename_files_for_seeding(
                 self.handle, self.torrent_info_obj,
                 self.temp_dir, self.repo_id, self.revision,
-                repo_type=self.repo_type,
+                repo_type=self.repo_type, cache_dir=self.cache_dir, local_dir=self.local_dir
             )
             return True
 

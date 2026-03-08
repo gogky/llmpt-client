@@ -21,11 +21,13 @@ Cache layout::
         └── ...
 """
 
+from dataclasses import dataclass
+import json
 import logging
 import os
 import re
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger("llmpt.cache_scanner")
 
@@ -45,6 +47,144 @@ HF_HUB_CACHE = _resolve_hf_hub_cache()
 
 # 40-char lowercase hex commit hash
 _COMMIT_HASH_RE = re.compile(r"^[0-9a-f]{40}$")
+
+# Persistent registry for non-default storage locations that should survive
+# daemon restarts.
+KNOWN_STORAGE_FILE = os.path.expanduser("~/.cache/llmpt/known_storage.json")
+
+
+@dataclass(frozen=True)
+class SeedableSource:
+    repo_type: str
+    repo_id: str
+    revision: str
+    storage_kind: str
+    storage_root: str
+    cache_dir: Optional[str] = None
+    local_dir: Optional[str] = None
+
+
+def _normalize_path(path: str) -> str:
+    return os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+
+
+def _default_registry() -> Dict[str, List[dict]]:
+    return {"hub_cache_roots": [], "local_dir_sources": []}
+
+
+def _load_storage_registry() -> Dict[str, List[dict]]:
+    """Load the persistent storage registry.
+
+    Backward compatibility:
+    - Older versions stored a bare JSON list of hub cache roots.
+    """
+    if not os.path.exists(KNOWN_STORAGE_FILE):
+        return _default_registry()
+
+    try:
+        with open(KNOWN_STORAGE_FILE, "r") as f:
+            payload = json.load(f)
+    except Exception as e:
+        logger.warning(f"Failed to load storage registry: {e}")
+        return _default_registry()
+
+    if isinstance(payload, list):
+        # Legacy schema: just a list of custom hub cache roots.
+        return {
+            "hub_cache_roots": [
+                {"root": _normalize_path(root)}
+                for root in payload
+                if isinstance(root, str)
+            ],
+            "local_dir_sources": [],
+        }
+
+    if not isinstance(payload, dict):
+        return _default_registry()
+
+    registry = _default_registry()
+    for item in payload.get("hub_cache_roots", []):
+        if isinstance(item, str):
+            registry["hub_cache_roots"].append({"root": _normalize_path(item)})
+        elif isinstance(item, dict) and item.get("root"):
+            registry["hub_cache_roots"].append({"root": _normalize_path(item["root"])})
+
+    for item in payload.get("local_dir_sources", []):
+        if not isinstance(item, dict):
+            continue
+        local_dir = item.get("local_dir")
+        repo_id = item.get("repo_id")
+        revision = item.get("revision")
+        if not (local_dir and repo_id and revision):
+            continue
+        registry["local_dir_sources"].append(
+            {
+                "repo_type": item.get("repo_type", "model"),
+                "repo_id": repo_id,
+                "revision": revision,
+                "local_dir": _normalize_path(local_dir),
+            }
+        )
+    return registry
+
+
+def _save_storage_registry(registry: Dict[str, List[dict]]) -> None:
+    os.makedirs(os.path.dirname(KNOWN_STORAGE_FILE), exist_ok=True)
+    with open(KNOWN_STORAGE_FILE, "w") as f:
+        json.dump(registry, f, indent=2, sort_keys=True)
+
+
+def register_seedable_storage(
+    repo_id: str,
+    revision: str,
+    *,
+    repo_type: str = "model",
+    cache_dir: Optional[str] = None,
+    local_dir: Optional[str] = None,
+) -> None:
+    """Persist non-default storage locations needed for daemon cold starts."""
+    if not cache_dir and not local_dir:
+        return
+
+    try:
+        registry = _load_storage_registry()
+
+        if cache_dir:
+            normalized_cache_dir = _normalize_path(cache_dir)
+            roots = {
+                item["root"]
+                for item in registry["hub_cache_roots"]
+                if item.get("root")
+            }
+            if normalized_cache_dir not in roots:
+                registry["hub_cache_roots"].append({"root": normalized_cache_dir})
+
+        if local_dir:
+            normalized_local_dir = _normalize_path(local_dir)
+            local_entry = {
+                "repo_type": repo_type or "model",
+                "repo_id": repo_id,
+                "revision": revision,
+                "local_dir": normalized_local_dir,
+            }
+            entries = [
+                item
+                for item in registry["local_dir_sources"]
+                if not (
+                    item.get("repo_type") == local_entry["repo_type"]
+                    and item.get("repo_id") == local_entry["repo_id"]
+                    and item.get("revision") == local_entry["revision"]
+                    and item.get("local_dir") == local_entry["local_dir"]
+                )
+            ]
+            entries.append(local_entry)
+            registry["local_dir_sources"] = entries
+
+        _save_storage_registry(registry)
+    except Exception as e:
+        logger.warning(
+            f"Failed to register seedable storage for {repo_id}@{revision}: {e}"
+        )
 
 
 def _parse_repo_id(dirname: str) -> Optional[str]:
@@ -115,25 +255,14 @@ def _is_snapshot_complete(snapshot_dir: Path) -> bool:
     return True
 
 
-def scan_hf_cache(
-    cache_dir: Optional[str] = None,
-) -> List[Tuple[str, str, str]]:
-    """Scan the HuggingFace cache and return seedable (repo_type, repo_id, revision) pairs.
-
-    Args:
-        cache_dir: Path to the HF hub cache directory.  Defaults to
-                   ``~/.cache/huggingface/hub`` (or ``$HF_HOME``).
-
-    Returns:
-        List of ``(repo_type, repo_id, commit_hash)`` tuples for all complete snapshots.
-    """
+def _scan_hf_cache_root(cache_dir: Optional[str]) -> List[SeedableSource]:
+    """Scan one HF hub-style cache root and return structured seedable sources."""
     hub_dir = Path(cache_dir or HF_HUB_CACHE)
     if not hub_dir.exists():
         logger.info(f"HF cache directory not found: {hub_dir}")
         return []
 
-    seedable: List[Tuple[str, str, str]] = []
-
+    seedable: List[SeedableSource] = []
     for model_dir in sorted(hub_dir.iterdir()):
         if not model_dir.is_dir():
             continue
@@ -151,20 +280,114 @@ def scan_hf_cache(
             if not snapshot.is_dir():
                 continue
 
-            # Only consider 40-char commit hash directories
             if not _COMMIT_HASH_RE.match(snapshot.name):
-                logger.debug(
-                    f"Skipping non-commit-hash snapshot dir: {snapshot.name}"
-                )
+                logger.debug(f"Skipping non-commit-hash snapshot dir: {snapshot.name}")
                 continue
 
             if _is_snapshot_complete(snapshot):
-                seedable.append((repo_type, repo_id, snapshot.name))
-                logger.debug(f"Seedable: {repo_id}@{snapshot.name[:8]}...")
+                seedable.append(
+                    SeedableSource(
+                        repo_type=repo_type,
+                        repo_id=repo_id,
+                        revision=snapshot.name,
+                        storage_kind="hub_cache",
+                        storage_root=str(hub_dir),
+                        cache_dir=str(hub_dir),
+                    )
+                )
             else:
                 logger.debug(
                     f"Incomplete snapshot, skipping: {repo_id}@{snapshot.name[:8]}..."
                 )
-
-    logger.info(f"Scan complete: {len(seedable)} seedable models found")
     return seedable
+
+
+def _local_dir_matches_revision(local_dir: str, revision: str) -> bool:
+    """Return True when the local_dir still has metadata for the requested revision."""
+    metadata_root = Path(local_dir) / ".cache" / "huggingface" / "download"
+    if not metadata_root.exists():
+        return False
+
+    for metadata_path in metadata_root.rglob("*.metadata"):
+        try:
+            with metadata_path.open("r") as f:
+                commit_hash = f.readline().strip()
+            if commit_hash != revision:
+                continue
+
+            relative = metadata_path.relative_to(metadata_root)
+            file_relative = Path(str(relative)[: -len(".metadata")])
+            if (Path(local_dir) / file_relative).exists():
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def scan_seedable_sources() -> List[SeedableSource]:
+    """Scan default/custom hub caches plus registered local_dir sources."""
+    seedable = _scan_hf_cache_root(None)
+    registry = _load_storage_registry()
+
+    seen_hub_roots = {_normalize_path(HF_HUB_CACHE)}
+    seen_hub_roots.update(
+        _normalize_path(source.storage_root)
+        for source in seedable
+        if source.storage_kind == "hub_cache"
+    )
+    for item in registry["hub_cache_roots"]:
+        root = item.get("root")
+        if not root:
+            continue
+        normalized_root = _normalize_path(root)
+        if normalized_root in seen_hub_roots or not os.path.isdir(normalized_root):
+            continue
+        seen_hub_roots.add(normalized_root)
+        seedable.extend(_scan_hf_cache_root(normalized_root))
+
+    seen_local_sources = set()
+    for item in registry["local_dir_sources"]:
+        local_dir = item["local_dir"]
+        source_key = (
+            item["repo_type"],
+            item["repo_id"],
+            item["revision"],
+            local_dir,
+        )
+        if source_key in seen_local_sources:
+            continue
+        seen_local_sources.add(source_key)
+        if not os.path.isdir(local_dir):
+            continue
+        if not _local_dir_matches_revision(local_dir, item["revision"]):
+            continue
+        seedable.append(
+            SeedableSource(
+                repo_type=item["repo_type"],
+                repo_id=item["repo_id"],
+                revision=item["revision"],
+                storage_kind="local_dir",
+                storage_root=local_dir,
+                local_dir=local_dir,
+            )
+        )
+
+    logger.info(f"Scan complete: {len(seedable)} seedable sources found")
+    return seedable
+
+
+def scan_hf_cache(
+    cache_dir: Optional[str] = None,
+) -> List[Tuple[str, str, str]]:
+    """Scan the HuggingFace cache and return seedable (repo_type, repo_id, revision) pairs.
+
+    Args:
+        cache_dir: Path to the HF hub cache directory.  Defaults to
+                   ``~/.cache/huggingface/hub`` (or ``$HF_HOME``).
+
+    Returns:
+        List of ``(repo_type, repo_id, commit_hash)`` tuples for all complete snapshots.
+    """
+    sources = _scan_hf_cache_root(cache_dir)
+    logger.info(f"Scan complete: {len(sources)} seedable models found")
+    return [(item.repo_type, item.repo_id, item.revision) for item in sources]

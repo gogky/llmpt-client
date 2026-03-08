@@ -38,6 +38,9 @@ services:
       python -m pytest
       tests/e2e/test_daemon_bootstrap.py::test_daemon_cold_start_bootstrap
       tests/e2e/test_daemon_bootstrap.py::test_daemon_dataset_bootstrap
+      tests/e2e/test_daemon_bootstrap.py::test_daemon_cache_dir_bootstrap
+      tests/e2e/test_daemon_bootstrap.py::test_daemon_local_dir_bootstrap
+      tests/e2e/test_daemon_bootstrap.py::test_daemon_local_dir_cold_restart_bootstrap
       --run-integration -v -s --log-cli-level=INFO
 
   # ── Second User: downloads via P2P from first-user's daemon ──────────
@@ -63,4 +66,7 @@ services:
       python -m pytest
       tests/e2e/test_daemon_bootstrap.py::test_daemon_p2p_download_after_bootstrap
       tests/e2e/test_daemon_bootstrap.py::test_daemon_p2p_dataset_download_after_bootstrap
+      tests/e2e/test_daemon_bootstrap.py::test_daemon_p2p_download_after_cache_dir_bootstrap
+      tests/e2e/test_daemon_bootstrap.py::test_daemon_p2p_download_after_local_dir_bootstrap
+      tests/e2e/test_daemon_bootstrap.py::test_daemon_p2p_download_after_local_dir_cold_restart_bootstrap
       --run-integration -v -s --log-cli-level=INFO

@@ -262,15 +262,28 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
             repo_id = msg.get("repo_id")
             revision = msg.get("revision")
             repo_type = msg.get("repo_type", "model")
+            cache_dir = msg.get("cache_dir")
+            local_dir = msg.get("local_dir")
             if repo_id and revision:
                 key = (repo_type, repo_id, revision)
                 if key not in seeding_set:
                     logger.info(f"IPC: seed request for {repo_id}@{revision[:8]}...")
                     # Explicit seed requests should not wait for backoff.
                     failed_attempts.pop(key, None)
+                    
+                    from llmpt.cache_scanner import register_seedable_storage
+                    register_seedable_storage(
+                        repo_id=repo_id,
+                        revision=revision,
+                        repo_type=repo_type,
+                        cache_dir=cache_dir,
+                        local_dir=local_dir,
+                    )
+                        
                     _process_seedable(
                         repo_id, revision, tracker_client, manager,
                         seeding_set, failed_attempts, repo_type=repo_type,
+                        cache_dir=cache_dir, local_dir=local_dir,
                     )
                 return {"status": "ok"}
 
@@ -423,13 +436,19 @@ def _scan_and_seed(
     failed_attempts: Dict[Tuple[str, str, str], Dict[str, object]],
 ) -> None:
     """Scan HF cache and start seeding any new models found."""
-    from llmpt.cache_scanner import scan_hf_cache
+    from llmpt.cache_scanner import scan_seedable_sources
 
-    seedable = scan_hf_cache()
+    seedable = scan_seedable_sources()
     new_count = 0
     now = time.time()
 
-    for repo_type, repo_id, revision in seedable:
+    for item in seedable:
+        repo_type = item.repo_type
+        repo_id = item.repo_id
+        revision = item.revision
+        cache_dir = item.cache_dir
+        local_dir = item.local_dir
+
         key = (repo_type, repo_id, revision)
         if key in seeding_set:
             continue
@@ -443,6 +462,7 @@ def _scan_and_seed(
         _process_seedable(
             repo_id, revision, tracker_client, manager,
             seeding_set, failed_attempts, repo_type=repo_type,
+            cache_dir=cache_dir, local_dir=local_dir
         )
         new_count += 1
 
@@ -483,7 +503,9 @@ def _process_seedable(
     seeding_set: Set[Tuple[str, str, str]],
     failed_attempts: Dict[Tuple[str, str, str], Dict[str, object]],
     *,
-    repo_type: str = "model"
+    repo_type: str = "model",
+    cache_dir: Optional[str] = None,
+    local_dir: Optional[str] = None,
 ) -> bool:
     """Process a single seedable model: create torrent if needed, start seeding."""
     key = (repo_type, repo_id, revision)
@@ -509,6 +531,8 @@ def _process_seedable(
                 repo_type=repo_type,
                 name=repo_id,
                 tracker_client=tracker_client,
+                cache_dir=cache_dir,
+                local_dir=local_dir,
             )
             if torrent_info:
                 torrent_data = torrent_info.get("torrent_data")
@@ -539,6 +563,8 @@ def _process_seedable(
             repo_type=repo_type,
             tracker_client=tracker_client,
             torrent_data=torrent_data,
+            cache_dir=cache_dir,
+            local_dir=local_dir,
         )
 
         if success:
