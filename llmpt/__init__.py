@@ -38,6 +38,7 @@ _config = {
     'timeout': 300,  # 5 minutes
     'port': None,  # None = use default 6881 with auto-fallback; set int to override
     'hf_token': None,  # HuggingFace token for WebSeed proxy (private/gated repos)
+    'verbose': False,  # Print P2P summary after snapshot_download
 }
 _webseed_proxy = None  # WebSeedProxy instance (created in enable_p2p)
 
@@ -93,6 +94,7 @@ def enable_p2p(
     port: Optional[int] = None,
     hf_token: Optional[str] = None,
     webseed: bool = True,
+    verbose: bool = False,
 ) -> None:
     """
     Enable P2P-accelerated downloads for HuggingFace Hub.
@@ -106,6 +108,8 @@ def enable_p2p(
         hf_token: HuggingFace token for WebSeed proxy (private/gated repos).
         webseed: Whether to enable the WebSeed proxy. Defaults to True.
                  Set to False to disable WebSeed (useful for debugging).
+        verbose: Whether to print P2P acceleration summary after snapshot_download.
+                 Defaults to False. Can also be enabled via HF_P2P_VERBOSE=1 env var.
 
     Example:
         >>> from huggingface_hub import snapshot_download  # Import order doesn't matter
@@ -135,6 +139,7 @@ def enable_p2p(
     _config['timeout'] = timeout
     _config['hf_token'] = hf_token
     _config['webseed'] = webseed
+    _config['verbose'] = verbose or os.getenv('HF_P2P_VERBOSE', '').lower() in ('1', 'true', 'yes')
     if port is not None:
         _config['port'] = port
     elif os.getenv('HF_P2P_PORT'):
@@ -330,7 +335,14 @@ def shutdown() -> None:
 
 
 def _cleanup_on_exit():
-    """atexit callback — delegates to shutdown()."""
+    """atexit callback — delegates to shutdown().
+
+    Flushes deferred notifications (verbose summary, daemon seed) BEFORE
+    shutting down P2PBatchManager.  If shutdown() runs first, it clears
+    all sessions, making get_repo_p2p_stats() return empty stats.
+    """
     if _patched:
+        from .patch import _flush_deferred_notifications
+        _flush_deferred_notifications()
         shutdown()
 

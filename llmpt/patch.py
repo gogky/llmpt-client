@@ -6,6 +6,7 @@ This module patches huggingface_hub's download functions to enable P2P accelerat
 
 import sys
 import atexit
+import time
 import threading
 import logging
 from typing import Optional, Any
@@ -39,6 +40,7 @@ _deferred_lock = threading.Lock()
 _deferred_timers: dict[tuple[str, str, str, str, str], threading.Timer] = {}
 _deferred_contexts: dict[tuple[str, str, str, str, str], dict] = {}
 _active_wrapper_counts: dict[str, int] = {}  # repo_id -> active wrapper depth
+_active_download_counts: dict[str, int] = {}  # repo_id -> in-flight hf_hub_download calls
 
 
 def _deferred_key(
@@ -81,15 +83,32 @@ def _exit_wrapper(repo_id: str) -> None:
             _active_wrapper_counts[repo_id] = depth - 1
 
 def _flush_deferred_notifications():
-    """Flush pending deferred notifications on process exit."""
+    """Flush pending deferred notifications on process exit.
+
+    The deferred timer threads are daemon threads, so they get killed
+    when the main thread exits.  This atexit handler ensures that the
+    verbose summary and daemon notifications fire even if the process
+    exits within the 2-second debounce window.
+    """
     with _deferred_lock:
         contexts = list(_deferred_contexts.values())
         for timer in _deferred_timers.values():
             timer.cancel()
         _deferred_timers.clear()
         _deferred_contexts.clear()
-        
+
     for ctx in contexts:
+        # Print verbose summary if enabled
+        if _config.get('verbose'):
+            elapsed = time.time() - ctx.get('start_time', time.time())
+            _print_p2p_summary(
+                stats=get_download_stats(),
+                elapsed=elapsed,
+                repo_id=ctx['repo_id'],
+                resolved_revision=ctx['revision'],
+                repo_type=ctx['repo_type'],
+            )
+
         try:
             _notify_seed_daemon(
                 repo_id=ctx['repo_id'],
@@ -211,14 +230,51 @@ def _extract_context_from_stack() -> Optional[dict]:
 
 
 def _fire_deferred_notification(key: tuple[str, str, str, str, str]) -> None:
-    """Called by the debounce timer — sends a daemon seed notification."""
+    """Called by the debounce timer — sends a daemon seed notification.
+
+    Also prints a P2P summary when verbose mode is enabled.  This is the
+    fallback path for when ``_patched_snapshot_download`` was bypassed
+    due to the user importing ``snapshot_download`` before calling
+    ``enable_p2p()``.
+
+    If downloads are still in progress for this repo, the timer is
+    rescheduled instead of firing immediately.
+    """
     with _deferred_lock:
-        ctx = _deferred_contexts.pop(key, None)
+        ctx = _deferred_contexts.get(key)
+        if ctx is None:
+            _deferred_timers.pop(key, None)
+            return
+
+        # If downloads are still in-flight, reschedule and wait.
+        repo_id = ctx['repo_id']
+        if _active_download_counts.get(repo_id, 0) > 0:
+            old_timer = _deferred_timers.pop(key, None)
+            if old_timer is not None:
+                old_timer.cancel()
+            new_timer = threading.Timer(
+                2.0, _fire_deferred_notification, args=[key]
+            )
+            new_timer.daemon = True
+            new_timer.start()
+            _deferred_timers[key] = new_timer
+            return
+
+        # All downloads done — pop context and proceed.
+        _deferred_contexts.pop(key, None)
         _deferred_timers.pop(key, None)
-        
-    if ctx is None:
-        return
-        
+
+    # Print verbose summary if enabled (import-order bypass fallback)
+    if _config.get('verbose'):
+        elapsed = time.time() - ctx.get('start_time', time.time())
+        _print_p2p_summary(
+            stats=get_download_stats(),
+            elapsed=elapsed,
+            repo_id=ctx['repo_id'],
+            resolved_revision=ctx['revision'],
+            repo_type=ctx['repo_type'],
+        )
+
     try:
         _notify_seed_daemon(
             repo_id=ctx['repo_id'],
@@ -251,13 +307,16 @@ def _schedule_deferred_notification(
         timer = _deferred_timers.get(key)
         if timer is not None:
             timer.cancel()
-            
+
+        # Preserve start_time from the first schedule (for elapsed calculation)
+        existing = _deferred_contexts.get(key)
         _deferred_contexts[key] = {
             'repo_id': repo_id,
             'revision': revision,
             'repo_type': repo_type,
             'cache_dir': cache_dir,
             'local_dir': local_dir,
+            'start_time': existing['start_time'] if existing else time.time(),
         }
         
         # Start a new timer
@@ -293,6 +352,10 @@ def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
     """Patched version of hf_hub_download that injects P2P context."""
     from .tracker_client import TrackerClient
     from .utils import resolve_commit_hash
+
+    # Track active downloads so the deferred summary waits for all to finish.
+    with _deferred_lock:
+        _active_download_counts[repo_id] = _active_download_counts.get(repo_id, 0) + 1
 
     # Query tracker for torrent info
     tracker = TrackerClient(_config['tracker_url'])
@@ -354,6 +417,14 @@ def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
         _context.config = prev_config
         _context.cache_dir = prev_cache_dir
         _context.local_dir = prev_local_dir
+
+        # Decrement active download counter.
+        with _deferred_lock:
+            count = _active_download_counts.get(repo_id, 0)
+            if count <= 1:
+                _active_download_counts.pop(repo_id, None)
+            else:
+                _active_download_counts[repo_id] = count - 1
 
         # Fallback daemon notification: if _patched_snapshot_download is not
         # wrapping this call (import-order issue), schedule a deferred
@@ -466,12 +537,104 @@ def _patched_http_get(url: str, temp_file, **kwargs):
     return result
 
 
+def _format_bytes(n: int) -> str:
+    """Format byte count to human-readable string."""
+    for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
+        if abs(n) < 1024:
+            if unit == 'B':
+                return f"{int(n)} {unit}"
+            return f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} PB"
+
+
+def _print_p2p_summary(
+    stats: dict,
+    elapsed: float,
+    repo_id: str,
+    resolved_revision: str,
+    repo_type: str,
+) -> None:
+    """Print a P2P acceleration summary after snapshot_download completes.
+
+    Only called when config['verbose'] is True.
+    """
+    p2p_files = stats.get('p2p', set())
+    http_files = stats.get('http', set())
+    total_files = len(p2p_files) + len(http_files)
+
+    if total_files == 0:
+        return
+
+    # Collect byte-level stats from the P2P session
+    try:
+        from .p2p_batch import P2PBatchManager
+        manager = P2PBatchManager()
+        session_stats = manager.get_repo_p2p_stats(
+            repo_id, resolved_revision, repo_type
+        )
+    except Exception:
+        session_stats = {}
+
+    sep = '-' * 56
+    lines = [
+        '',
+        sep,
+        f'  P2P Download Summary: {repo_id}',
+        sep,
+        f'  Files:     {len(p2p_files)}/{total_files} via P2P, '
+        f'{len(http_files)}/{total_files} via HTTP fallback',
+        f'  Time:      {elapsed:.1f}s',
+    ]
+
+    peer_bytes = session_stats.get('peer_download', 0)
+    webseed_bytes = session_stats.get('webseed_download', 0)
+    total_bytes = peer_bytes + webseed_bytes
+
+    if total_bytes > 0:
+        lines.append('')
+        lines.append('  Data Sources:')
+        if peer_bytes > 0:
+            ratio = peer_bytes / total_bytes * 100
+            lines.append(
+                f'    From P2P peers:  {_format_bytes(peer_bytes)} ({ratio:.1f}%)'
+            )
+        if webseed_bytes > 0:
+            ratio = webseed_bytes / total_bytes * 100
+            lines.append(
+                f'    From WebSeed:    {_format_bytes(webseed_bytes)} ({ratio:.1f}%)'
+            )
+        if peer_bytes > 0:
+            lines.append('')
+            lines.append(
+                f'  Bandwidth saved: {_format_bytes(peer_bytes)} from server'
+            )
+
+    max_peers = session_stats.get('max_p2p_peers', 0)
+    if max_peers > 0:
+        lines.append(f'  Peers:     {max_peers}')
+
+    lines.append(sep)
+    lines.append('')
+
+    output = '\n'.join(lines)
+    try:
+        from tqdm import tqdm as _tqdm
+        _tqdm.write(output)
+    except ImportError:
+        print(output)
+
+
 def _patched_snapshot_download(*args, **kwargs):
     """Patched snapshot_download that notifies the daemon after completion.
 
     After the original snapshot_download finishes (all files downloaded),
     we notify the seeding daemon so it can create a .torrent (if needed)
     and start seeding the model for future downloaders.
+
+    When verbose mode is enabled, prints a P2P acceleration summary
+    showing file counts, data source breakdown (peer vs WebSeed),
+    and bandwidth savings.
     """
     repo_id = args[0] if args else kwargs.get('repo_id')
 
@@ -480,12 +643,15 @@ def _patched_snapshot_download(*args, **kwargs):
 
     # Reset stats to track which files went through HTTP vs P2P in this batch
     reset_download_stats()
+    start_time = time.time()
 
     try:
         result = _original_snapshot_download(*args, **kwargs)
     finally:
         if repo_id:
             _exit_wrapper(repo_id)
+
+    elapsed = time.time() - start_time
 
     # After download completes, notify the daemon
     try:
@@ -502,6 +668,16 @@ def _patched_snapshot_download(*args, **kwargs):
             resolved = resolve_commit_hash(repo_id, revision, repo_type=repo_type)
         except Exception:
             resolved = revision
+
+        # Print P2P summary if verbose is enabled
+        if _config.get('verbose'):
+            _print_p2p_summary(
+                stats=get_download_stats(),
+                elapsed=elapsed,
+                repo_id=repo_id,
+                resolved_revision=resolved,
+                repo_type=repo_type,
+            )
 
         # Cancel any deferred notification for this exact snapshot identity —
         # we handle it here directly.
@@ -617,6 +793,7 @@ def remove_patch() -> None:
             _deferred_timers.clear()
             _deferred_contexts.clear()
             _active_wrapper_counts.clear()
+            _active_download_counts.clear()
 
         logger.debug("Monkey patch removed successfully")
     except ImportError:

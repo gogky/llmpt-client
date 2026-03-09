@@ -82,6 +82,12 @@ class SessionContext:
         self._has_webseed = False   # set during _init_torrent if WebSeed proxy is active
         self._peer_ready = threading.Event()  # signals that ≥1 peer is connected (test warmup)
 
+        # Accumulated P2P transfer stats (sampled during download, survives peer disconnection)
+        self._stats_lock = threading.Lock()
+        self._acc_peer_download: int = 0
+        self._acc_webseed_download: int = 0
+        self._acc_peak_p2p_peers: int = 0
+
     def _init_torrent(self, initial_filename: str = None) -> bool:
         """Initialize the libtorrent handle if not already done."""
         if self.handle is not None:
@@ -380,7 +386,9 @@ class SessionContext:
                                 pbar.update(current_progress - last_progress)
                             last_progress = current_progress
                         
-                        
+                        # Sample peer stats while peers are still connected
+                        self._snapshot_peer_stats()
+
                         if hasattr(pbar, 'set_postfix'):
                             s = self.handle.status()
                             pbar.set_postfix({"peers": s.num_peers})
@@ -400,6 +408,110 @@ class SessionContext:
         else:
             logger.warning(f"[{self.repo_id}] P2P download of {filename} TIMEOUT after {self.timeout}s.")
             return False
+
+    def _snapshot_peer_stats(self) -> None:
+        """Sample current peer stats and update the accumulated high-water marks.
+
+        ``get_peer_info()`` only returns *currently connected* peers.  Once a
+        peer (including WebSeed) disconnects, its ``total_download`` is lost.
+        By sampling periodically during the download and keeping the highest
+        values seen, we preserve an accurate breakdown for the post-download
+        summary.
+        """
+        try:
+            with self.lock:
+                handle = self.handle
+            if not handle or not handle.is_valid():
+                return
+
+            peers = handle.get_peer_info()
+            web_seed_flag = getattr(lt.peer_info, 'web_seed', None)
+
+            peer_dl = 0
+            webseed_dl = 0
+            p2p_peers = 0
+
+            for peer in peers:
+                dl = getattr(peer, 'total_download', 0)
+                if web_seed_flag is not None and (peer.flags & web_seed_flag):
+                    webseed_dl += dl
+                else:
+                    peer_dl += dl
+                    p2p_peers += 1
+
+            with self._stats_lock:
+                self._acc_peer_download = max(self._acc_peer_download, peer_dl)
+                self._acc_webseed_download = max(self._acc_webseed_download, webseed_dl)
+                self._acc_peak_p2p_peers = max(self._acc_peak_p2p_peers, p2p_peers)
+        except Exception:
+            pass
+
+    def get_p2p_stats(self) -> dict:
+        """Collect P2P transfer statistics from the current session.
+
+        Distinguishes between bytes received from true P2P peers vs WebSeed
+        (HTTP) sources.  Prefers live ``get_peer_info()`` data when available,
+        but falls back to the accumulated high-water marks captured during the
+        download (peers may have already disconnected by the time this is called).
+
+        Returns:
+            Dictionary with peer_download, webseed_download, total_payload_download,
+            num_p2p_peers, num_webseeds, num_peers, num_seeds.
+            Empty dict if handle is invalid and no accumulated data exists.
+        """
+        with self.lock:
+            handle = self.handle
+
+        # Try live data first
+        peer_download = 0
+        webseed_download = 0
+        num_p2p_peers = 0
+        num_webseeds = 0
+        total_payload_download = 0
+        num_peers = 0
+        num_seeds = 0
+
+        if handle and handle.is_valid():
+            try:
+                s = handle.status()
+                total_payload_download = s.total_payload_download
+                num_peers = s.num_peers
+                num_seeds = s.num_seeds
+                peers = handle.get_peer_info()
+
+                web_seed_flag = getattr(lt.peer_info, 'web_seed', None)
+
+                for peer in peers:
+                    dl = getattr(peer, 'total_download', 0)
+                    if web_seed_flag is not None and (peer.flags & web_seed_flag):
+                        webseed_download += dl
+                        num_webseeds += 1
+                    else:
+                        peer_download += dl
+                        num_p2p_peers += 1
+            except Exception as e:
+                logger.debug(f"[{self.repo_id}] Failed to collect live P2P stats: {e}")
+
+        # Fall back to accumulated high-water marks if live data is empty
+        # (peers disconnected after download completed)
+        if peer_download == 0 and webseed_download == 0:
+            with self._stats_lock:
+                peer_download = self._acc_peer_download
+                webseed_download = self._acc_webseed_download
+                num_p2p_peers = self._acc_peak_p2p_peers
+
+        if peer_download == 0 and webseed_download == 0 and total_payload_download == 0:
+            return {}
+
+        return {
+            'total_payload_download': total_payload_download,
+            'peer_download': peer_download,
+            'webseed_download': webseed_download,
+            'num_p2p_peers': num_p2p_peers,
+            'num_webseeds': num_webseeds,
+            'num_peers': num_peers,
+            'num_seeds': num_seeds,
+        }
 
     def _get_lt_disk_path(self, file_index: int) -> str:
         """Return the absolute disk path where libtorrent stores a file by default."""

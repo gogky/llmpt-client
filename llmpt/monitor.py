@@ -59,6 +59,9 @@ def run_monitor_loop(ctx: "SessionContext") -> None:
                     last_diag_time = now
                     _log_diagnostics(ctx)
 
+                # --- Sample peer stats every tick for verbose summary ---
+                ctx._snapshot_peer_stats()
+
                 # --- Periodic peer reconnection for test environments (every 10 s) ---
                 if now - last_peer_retry_time > 10:
                     last_peer_retry_time = now

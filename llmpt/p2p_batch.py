@@ -394,6 +394,53 @@ class P2PBatchManager:
                 }
         return status
 
+    def get_repo_p2p_stats(
+        self, repo_id: str, revision: str, repo_type: str = 'model'
+    ) -> Dict[str, Any]:
+        """Aggregate P2P stats across all sessions matching the given repo.
+
+        Iterates over all active sessions whose repo identity matches and
+        collects byte-level breakdowns (peer vs WebSeed) via
+        ``SessionContext.get_p2p_stats()``.
+
+        Args:
+            repo_id: HuggingFace repository ID.
+            revision: Resolved revision (commit hash).
+            repo_type: Repository type.
+
+        Returns:
+            Aggregated stats dict with peer_download, webseed_download,
+            total_payload_download, max_p2p_peers.
+        """
+        total_peer_download = 0
+        total_webseed_download = 0
+        total_payload_download = 0
+        max_p2p_peers = 0
+
+        with self._lock:
+            for key, ctx in self.sessions.items():
+                key_repo_type, key_repo_id, key_revision = key[:3]
+                if (
+                    key_repo_type == repo_type
+                    and key_repo_id == repo_id
+                    and key_revision == revision
+                ):
+                    stats = ctx.get_p2p_stats()
+                    if stats:
+                        total_peer_download += stats.get('peer_download', 0)
+                        total_webseed_download += stats.get('webseed_download', 0)
+                        total_payload_download += stats.get('total_payload_download', 0)
+                        max_p2p_peers = max(
+                            max_p2p_peers, stats.get('num_p2p_peers', 0)
+                        )
+
+        return {
+            'peer_download': total_peer_download,
+            'webseed_download': total_webseed_download,
+            'total_payload_download': total_payload_download,
+            'max_p2p_peers': max_p2p_peers,
+        }
+
     def shutdown(self) -> None:
         """Gracefully shut down all sessions and release resources.
 
