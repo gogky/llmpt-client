@@ -82,7 +82,7 @@ class SessionContext:
         self._has_webseed = False   # set during _init_torrent if WebSeed proxy is active
         self._peer_ready = threading.Event()  # signals that ≥1 peer is connected (test warmup)
 
-    def _init_torrent(self) -> bool:
+    def _init_torrent(self, initial_filename: str = None) -> bool:
         """Initialize the libtorrent handle if not already done."""
         if self.handle is not None:
             return True
@@ -117,6 +117,34 @@ class SessionContext:
                 fastresume_path=self.fastresume_path,
                 repo_id=self.repo_id,
             )
+            
+            if self.session_mode == 'on_demand' and info is not None:
+                from .utils import strip_torrent_root
+                priorities = [0] * info.num_files()
+                if initial_filename:
+                    files = info.files()
+                    for i in range(info.num_files()):
+                        if strip_torrent_root(files.file_path(i).replace('\\', '/')) == initial_filename:
+                            priorities[i] = 1
+                            break
+                # Also prioritize overlapping
+                if initial_filename:
+                    s_idx = priorities.index(1) if 1 in priorities else -1
+                    if s_idx >= 0:
+                        files = info.files()
+                        plen = info.piece_length()
+                        s_off = files.file_offset(s_idx)
+                        e_off = s_off + files.file_size(s_idx) - 1
+                        sp = s_off // plen
+                        ep = e_off // plen
+                        for i in range(info.num_files()):
+                            if i != s_idx and files.file_size(i) > 0:
+                                fs = files.file_offset(i)
+                                fe = fs + files.file_size(i) - 1
+                                if fs // plen <= ep and fe // plen >= sp:
+                                    priorities[i] = 1
+                params.file_priorities = priorities
+
             self.handle = self.lt_session.add_torrent(params)
 
             # 3. Add WebSeed URL if proxy is running
@@ -139,11 +167,8 @@ class SessionContext:
             self.worker_thread = threading.Thread(target=run_monitor_loop, args=(self,), daemon=True)
             self.worker_thread.start()
 
-            # Initialize all file priorities to 0 (don't download) for on-demand sessions.
-            # Pure full_seed sessions keep default priority so seed_mode works.
+            # File priorities are set in add_torrent_params now.
             num_files = self.torrent_info_obj.num_files()
-            if self.session_mode == 'on_demand':
-                self.handle.prioritize_files([0] * num_files)
 
             logger.info(f"[{self.repo_id}] P2P session initialized. {num_files} files available.")
             return True
@@ -221,7 +246,7 @@ class SessionContext:
         logger.warning(f"[{self.repo_id}] Peer warmup timed out after {warmup_timeout}s. Proceeding anyway.")
         self._peer_ready.set()  # unblock all waiting threads
 
-    def download_file(self, filename: str, destination: str) -> bool:
+    def download_file(self, filename: str, destination: str, tqdm_class=None) -> bool:
         """
         Request download of a specific file and block until done.
         
@@ -236,7 +261,7 @@ class SessionContext:
             # Initialize torrent, but don't abort file tracking just because it timed out!
             # A timeout (Returns False) means we still have a valid handle in the background 
             # trying to get metadata, so we MUST track the file for fastresume mapping!
-            init_success = self._init_torrent()
+            init_success = self._init_torrent(filename)
             if not init_success and not self.is_valid:
                 return False
             
@@ -256,6 +281,30 @@ class SessionContext:
                     # copy the data to `destination` once the file is complete.
                     logger.info(f"[{self.repo_id}] Requesting file {filename} (Index {file_index}). Priority -> 1. Destination: {destination}")
                     self.handle.file_priority(file_index, 1)
+
+                    # Fix libtorrent v2 WebSeed / partfile EOF bug:
+                    # If this file shares boundaries with neighboring files (which are priority 0),
+                    # WebSeed downloads will trigger partfile writes and often fail with "End of file".
+                    # We must also download any files that share a piece with this file.
+                    overlapping = []
+                    if self.torrent_info_obj:
+                        ti = self.torrent_info_obj
+                        piece_len = ti.piece_length()
+                        files = ti.files()
+                        s_off = files.file_offset(file_index)
+                        e_off = s_off + files.file_size(file_index) - 1
+                        s_piece = s_off // piece_len
+                        e_piece = e_off // piece_len
+                        for i in range(files.num_files()):
+                            if i == file_index or files.file_size(i) == 0: continue
+                            fs = files.file_offset(i)
+                            fe = fs + files.file_size(i) - 1
+                            if fs // piece_len <= e_piece and fe // piece_len >= s_piece:
+                                overlapping.append(i)
+
+                    for idx in overlapping:
+                        logger.debug(f"[{self.repo_id}] Also prioritizing overlapping file index {idx} to avoid partfile EOF")
+                        self.handle.file_priority(idx, 1)
                     
                     # If the torrent is already finished, data is already at the default path.
                     # Try to deliver it immediately.
@@ -303,11 +352,12 @@ class SessionContext:
         
         # Use huggingface_hub's tqdm to integrate with native HF progress bars
         try:
-            from huggingface_hub.utils import tqdm as hf_tqdm, are_progress_bars_disabled
+            from huggingface_hub.utils import tqdm as hf_tqdm_lib, are_progress_bars_disabled
             disable_pbar = are_progress_bars_disabled()
+            hf_tqdm = tqdm_class or hf_tqdm_lib
         except ImportError:
             # Fallback if huggingface_hub is not available (shouldn't happen in our context)
-            hf_tqdm = None
+            hf_tqdm = tqdm_class
             disable_pbar = True
 
         pbar = None
@@ -359,7 +409,8 @@ class SessionContext:
                                 pbar.update(current_progress - last_progress)
                             last_progress = current_progress
                         
-                        if pbar:
+                        
+                        if hasattr(pbar, 'set_postfix'):
                             s = self.handle.status()
                             pbar.set_postfix({"peers": s.num_peers})
                     except Exception:
@@ -369,7 +420,8 @@ class SessionContext:
             if pbar is not None:
                 if event.is_set() and last_progress < total_size:
                     pbar.update(total_size - last_progress)
-                pbar.close()
+                if hasattr(pbar, 'close'):
+                    pbar.close()
 
         if event.is_set():
             logger.info(f"[{self.repo_id}] P2P download of {filename} SUCCESS.")

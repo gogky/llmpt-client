@@ -246,6 +246,7 @@ class P2PBatchManager:
         repo_type: str = 'model',
         cache_dir: Optional[str] = None,
         local_dir: Optional[str] = None,
+        tqdm_class: Optional[Any] = None,
     ) -> bool:
         """
         Register a file download request.
@@ -286,7 +287,7 @@ class P2PBatchManager:
             session_ctx = self.sessions[repo_key]
         
         # Register the file with the session context and wait for it
-        return session_ctx.download_file(filename, temp_file_path)
+        return session_ctx.download_file(filename, temp_file_path, tqdm_class=tqdm_class)
 
     # ── Session lifecycle management ──────────────────────────────────────
 

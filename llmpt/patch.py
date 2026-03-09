@@ -160,7 +160,12 @@ def _extract_context_from_stack() -> Optional[dict]:
             if frame is None:
                 break
             name = frame.f_code.co_name
-            if name in ('hf_hub_download', 'snapshot_download'):
+            if name in (
+                'hf_hub_download',
+                'snapshot_download',
+                '_hf_hub_download_to_cache_dir',
+                '_hf_hub_download_to_local_dir'
+            ):
                 loc = frame.f_locals
                 
                 # Extract whatever we can find from this frame
@@ -420,6 +425,7 @@ def _patched_http_get(url: str, temp_file, **kwargs):
                 "tracker_client": tracker,
                 "timeout": effective_timeout,
                 "repo_type": repo_type,
+                "tqdm_class": kwargs.get("tqdm_class"),
             }
             if cache_dir is not None:
                 register_kwargs["cache_dir"] = cache_dir
