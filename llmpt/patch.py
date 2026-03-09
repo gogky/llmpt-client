@@ -17,6 +17,7 @@ logger = logging.getLogger('llmpt.patch')
 _original_hf_hub_download = None
 _original_http_get = None
 _original_snapshot_download = None
+_original_snapshot_hf_tqdm = None
 
 # Patching configuration (set by apply_patch)
 _config = {}
@@ -41,6 +42,8 @@ _deferred_timers: dict[tuple[str, str, str, str, str], threading.Timer] = {}
 _deferred_contexts: dict[tuple[str, str, str, str, str], dict] = {}
 _active_wrapper_counts: dict[str, int] = {}  # repo_id -> active wrapper depth
 _active_download_counts: dict[str, int] = {}  # repo_id -> in-flight hf_hub_download calls
+_SNAPSHOT_PROGRESS_BAR_NAME = "huggingface_hub.snapshot_download"
+_SNAPSHOT_PROGRESS_UPDATE_INTERVAL = 0.25
 
 
 def _deferred_key(
@@ -157,6 +160,202 @@ def _truncate_temp_file(temp_file, filename: str) -> None:
         logger.warning(f"[P2P] Could not truncate temp_file for {filename}: {e}")
 
 
+def _format_snapshot_p2p_postfix(stats: Optional[dict]) -> str:
+    """Format live repo-level P2P stats for the snapshot progress bar."""
+    stats = stats or {}
+    peer_bytes = int(stats.get('peer_download', 0) or 0)
+    webseed_bytes = int(stats.get('webseed_download', 0) or 0)
+    peers = int(stats.get('active_p2p_peers', stats.get('max_p2p_peers', 0)) or 0)
+    return (
+        f"P2P {_format_bytes(peer_bytes)} | "
+        f"WebSeed {_format_bytes(webseed_bytes)} | "
+        f"Active peers {peers}"
+    )
+
+
+class _SnapshotProgressReporter:
+    """Periodically updates snapshot_download's shared progress bar postfix."""
+
+    def __init__(self, progress_bar: Any, repo_id: str, revision: str, repo_type: str) -> None:
+        self.progress_bar = progress_bar
+        self.repo_id = repo_id
+        self.revision = revision
+        self.repo_type = repo_type
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        if self._thread is not None or not self.repo_id:
+            return
+        self._thread = threading.Thread(
+            target=self._run,
+            name="llmpt-snapshot-progress",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        thread = self._thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=1.0)
+        self._thread = None
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            self._update_once()
+            self._stop_event.wait(_SNAPSHOT_PROGRESS_UPDATE_INTERVAL)
+        self._update_once()
+
+    def _update_once(self) -> None:
+        try:
+            from .p2p_batch import P2PBatchManager
+
+            stats = P2PBatchManager().get_repo_p2p_stats(
+                self.repo_id,
+                self.revision,
+                self.repo_type,
+            )
+            postfix = _format_snapshot_p2p_postfix(stats)
+            if hasattr(self.progress_bar, 'set_postfix_str'):
+                self.progress_bar.set_postfix_str(postfix, refresh=False)
+        except Exception as e:
+            logger.debug(f"[P2P] Live snapshot progress update failed: {e}")
+
+
+def _wrap_snapshot_tqdm_class(
+    base_tqdm_class: Any,
+    repo_id: str,
+    revision: str,
+    repo_type: str,
+):
+    """Wrap a tqdm class so snapshot_download's shared bar shows live P2P stats."""
+
+    class SnapshotTqdmProxy:
+        _lock = getattr(base_tqdm_class, '_lock', None)
+
+        @classmethod
+        def get_lock(cls):
+            return getattr(cls, '_lock', None) or base_tqdm_class.get_lock()
+
+        @classmethod
+        def set_lock(cls, lock):
+            cls._lock = lock
+            return base_tqdm_class.set_lock(lock)
+
+        def __init__(self, *args, **kwargs):
+            object.__setattr__(self, '_llmpt_inner', base_tqdm_class(*args, **kwargs))
+            object.__setattr__(self, '_llmpt_reporter', None)
+
+            is_snapshot_bar = kwargs.get('name') == _SNAPSHOT_PROGRESS_BAR_NAME
+            is_disabled = getattr(self._llmpt_inner, 'disable', False)
+            if is_snapshot_bar and not is_disabled:
+                reporter = _SnapshotProgressReporter(
+                    progress_bar=self._llmpt_inner,
+                    repo_id=repo_id,
+                    revision=revision,
+                    repo_type=repo_type,
+                )
+                object.__setattr__(self, '_llmpt_reporter', reporter)
+                reporter.start()
+
+        def __getattr__(self, name):
+            return getattr(self._llmpt_inner, name)
+
+        def __setattr__(self, name, value):
+            if name.startswith('_llmpt_'):
+                object.__setattr__(self, name, value)
+            else:
+                setattr(self._llmpt_inner, name, value)
+
+        def __enter__(self):
+            entered = self._llmpt_inner.__enter__()
+            return self if entered is self._llmpt_inner else entered
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return self._llmpt_inner.__exit__(exc_type, exc_value, traceback)
+
+        def __iter__(self):
+            return iter(self._llmpt_inner)
+
+        def close(self):
+            reporter = self._llmpt_reporter
+            if reporter is not None:
+                reporter.stop()
+                object.__setattr__(self, '_llmpt_reporter', None)
+            close_fn = getattr(self._llmpt_inner, 'close', None)
+            if close_fn is not None:
+                return close_fn()
+
+    SnapshotTqdmProxy.__name__ = "SnapshotTqdmProxy"
+    return SnapshotTqdmProxy
+
+
+def _wrap_snapshot_tqdm_class_auto(base_tqdm_class: Any):
+    """Wrap hf_tqdm so old snapshot_download references still get live P2P stats."""
+
+    class SnapshotAutoTqdmProxy:
+        _lock = getattr(base_tqdm_class, '_lock', None)
+
+        @classmethod
+        def get_lock(cls):
+            return getattr(cls, '_lock', None) or base_tqdm_class.get_lock()
+
+        @classmethod
+        def set_lock(cls, lock):
+            cls._lock = lock
+            return base_tqdm_class.set_lock(lock)
+
+        def __init__(self, *args, **kwargs):
+            object.__setattr__(self, '_llmpt_inner', base_tqdm_class(*args, **kwargs))
+            object.__setattr__(self, '_llmpt_reporter', None)
+
+            is_snapshot_bar = kwargs.get('name') == _SNAPSHOT_PROGRESS_BAR_NAME
+            is_disabled = getattr(self._llmpt_inner, 'disable', False)
+            if is_snapshot_bar and not is_disabled:
+                ctx = _extract_snapshot_context_from_stack()
+                if ctx is not None:
+                    reporter = _SnapshotProgressReporter(
+                        progress_bar=self._llmpt_inner,
+                        repo_id=ctx['repo_id'],
+                        revision=ctx['revision'],
+                        repo_type=ctx['repo_type'],
+                    )
+                    object.__setattr__(self, '_llmpt_reporter', reporter)
+                    reporter.start()
+
+        def __getattr__(self, name):
+            return getattr(self._llmpt_inner, name)
+
+        def __setattr__(self, name, value):
+            if name.startswith('_llmpt_'):
+                object.__setattr__(self, name, value)
+            else:
+                setattr(self._llmpt_inner, name, value)
+
+        def __enter__(self):
+            entered = self._llmpt_inner.__enter__()
+            return self if entered is self._llmpt_inner else entered
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return self._llmpt_inner.__exit__(exc_type, exc_value, traceback)
+
+        def __iter__(self):
+            return iter(self._llmpt_inner)
+
+        def close(self):
+            reporter = self._llmpt_reporter
+            if reporter is not None:
+                reporter.stop()
+                object.__setattr__(self, '_llmpt_reporter', None)
+            close_fn = getattr(self._llmpt_inner, 'close', None)
+            if close_fn is not None:
+                return close_fn()
+
+    SnapshotAutoTqdmProxy.__name__ = "SnapshotAutoTqdmProxy"
+    return SnapshotAutoTqdmProxy
+
+
 def _extract_context_from_stack() -> Optional[dict]:
     """Walk the call stack to extract download context from hf_hub_download.
 
@@ -224,6 +423,36 @@ def _extract_context_from_stack() -> Optional[dict]:
                 
             return result
             
+    except (AttributeError, ValueError):
+        pass
+    return None
+
+
+def _extract_snapshot_context_from_stack() -> Optional[dict]:
+    """Walk the call stack to recover snapshot_download context."""
+    try:
+        frame = sys._getframe(1)
+        result = {}
+        for _ in range(20):
+            frame = frame.f_back
+            if frame is None:
+                break
+            if frame.f_code.co_name != 'snapshot_download':
+                continue
+
+            loc = frame.f_locals
+            if 'repo_id' in loc and 'repo_id' not in result:
+                result['repo_id'] = loc.get('repo_id')
+
+            revision = loc.get('commit_hash') or loc.get('revision')
+            if revision and 'revision' not in result:
+                result['revision'] = revision
+
+            if 'repo_type' not in result:
+                result['repo_type'] = loc.get('repo_type') or 'model'
+
+            if result.get('repo_id') and result.get('revision'):
+                return result
     except (AttributeError, ValueError):
         pass
     return None
@@ -437,7 +666,7 @@ def _patched_http_get(url: str, temp_file, **kwargs):
     """Patched version of http_get that uses P2P batch manager when available."""
     # Check if we have P2P context (injected by patched hf_hub_download)
     repo_id = getattr(_context, 'repo_id', None)
-    repo_type = getattr(_context, 'repo_type', 'model')
+    repo_type = getattr(_context, 'repo_type', None) or 'model'
     filename = getattr(_context, 'filename', None)
     revision = getattr(_context, 'revision', None)
     tracker = getattr(_context, 'tracker', None)
@@ -539,13 +768,17 @@ def _patched_http_get(url: str, temp_file, **kwargs):
 
 def _format_bytes(n: int) -> str:
     """Format byte count to human-readable string."""
-    for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
-        if abs(n) < 1024:
-            if unit == 'B':
-                return f"{int(n)} {unit}"
-            return f"{n:.1f} {unit}"
-        n /= 1024
-    return f"{n:.1f} PB"
+    try:
+        from tqdm import tqdm as _tqdm
+        formatted = _tqdm.format_sizeof(float(n), divisor=1000)
+    except Exception:
+        formatted = f"{n}B"
+
+    if formatted == "0.00":
+        return "0 B"
+    if formatted.endswith("B"):
+        return formatted
+    return f"{formatted}B"
 
 
 def _print_p2p_summary(
@@ -612,7 +845,7 @@ def _print_p2p_summary(
 
     max_peers = session_stats.get('max_p2p_peers', 0)
     if max_peers > 0:
-        lines.append(f'  Peers:     {max_peers}')
+        lines.append(f'  Peak peers: {max_peers}')
 
     lines.append(sep)
     lines.append('')
@@ -637,6 +870,33 @@ def _patched_snapshot_download(*args, **kwargs):
     and bandwidth savings.
     """
     repo_id = args[0] if args else kwargs.get('repo_id')
+    repo_type = kwargs.get('repo_type') or 'model'
+    revision = kwargs.get('revision', 'main')
+    resolved = revision
+
+    if repo_id:
+        try:
+            from huggingface_hub.utils import tqdm as hf_tqdm_lib
+        except ImportError:
+            hf_tqdm_lib = None
+
+        try:
+            from .utils import resolve_commit_hash
+            resolved = resolve_commit_hash(repo_id, revision, repo_type=repo_type)
+        except Exception:
+            resolved = revision
+
+        base_tqdm_class = kwargs.get('tqdm_class') or hf_tqdm_lib
+        if base_tqdm_class is not None and not kwargs.get('dry_run', False):
+            kwargs = {
+                **kwargs,
+                'tqdm_class': _wrap_snapshot_tqdm_class(
+                    base_tqdm_class=base_tqdm_class,
+                    repo_id=repo_id,
+                    revision=resolved,
+                    repo_type=repo_type,
+                ),
+            }
 
     if repo_id:
         _enter_wrapper(repo_id)
@@ -657,17 +917,10 @@ def _patched_snapshot_download(*args, **kwargs):
     try:
         repo_id = args[0] if args else kwargs.get('repo_id')
         revision = kwargs.get('revision', 'main')
-        repo_type = kwargs.get('repo_type', 'model')
+        repo_type = kwargs.get('repo_type') or 'model'
 
         if not repo_id:
             return result
-
-        # Resolve revision to commit hash for the daemon
-        from .utils import resolve_commit_hash
-        try:
-            resolved = resolve_commit_hash(repo_id, revision, repo_type=repo_type)
-        except Exception:
-            resolved = revision
 
         # Print P2P summary if verbose is enabled
         if _config.get('verbose'):
@@ -724,7 +977,7 @@ def apply_patch(config: dict) -> None:
     Args:
         config: Configuration dictionary containing tracker_url, etc.
     """
-    global _original_hf_hub_download, _original_http_get, _original_snapshot_download, _config
+    global _original_hf_hub_download, _original_http_get, _original_snapshot_download, _original_snapshot_hf_tqdm, _config
 
     if _original_hf_hub_download is not None:
         logger.debug("Patch is already applied. Skipping.")
@@ -742,6 +995,7 @@ def apply_patch(config: dict) -> None:
     _original_hf_hub_download = huggingface_hub.hf_hub_download
     _original_http_get = file_download.http_get
     _original_snapshot_download = _snapshot_download.snapshot_download
+    _original_snapshot_hf_tqdm = _snapshot_download.hf_tqdm
 
     # Apply patches
     # NOTE: This top-level assignment has NO real effect on newer huggingface_hub versions.
@@ -756,13 +1010,14 @@ def apply_patch(config: dict) -> None:
     # Patch snapshot_download to notify daemon after download completes
     huggingface_hub.snapshot_download = _patched_snapshot_download
     _snapshot_download.snapshot_download = _patched_snapshot_download
+    _snapshot_download.hf_tqdm = _wrap_snapshot_tqdm_class_auto(_original_snapshot_hf_tqdm)
 
     logger.debug("Monkey patch applied successfully")
 
 
 def remove_patch() -> None:
     """Remove monkey patch and restore original functions."""
-    global _original_hf_hub_download, _original_http_get, _original_snapshot_download, _config
+    global _original_hf_hub_download, _original_http_get, _original_snapshot_download, _original_snapshot_hf_tqdm, _config
 
     if _original_hf_hub_download is None:
         return
@@ -781,11 +1036,14 @@ def remove_patch() -> None:
         if _original_snapshot_download:
             huggingface_hub.snapshot_download = _original_snapshot_download
             _snapshot_download.snapshot_download = _original_snapshot_download
+        if _original_snapshot_hf_tqdm:
+            _snapshot_download.hf_tqdm = _original_snapshot_hf_tqdm
 
         # Reset stored state
         _original_hf_hub_download = None
         _original_http_get = None
         _original_snapshot_download = None
+        _original_snapshot_hf_tqdm = None
         _config = {}
         with _deferred_lock:
             for timer in _deferred_timers.values():

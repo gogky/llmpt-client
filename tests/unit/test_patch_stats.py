@@ -6,6 +6,7 @@ _patched_hf_hub_download context management, and _patched_http_get
 P2P-success / P2P-failure / no-context branches.
 """
 
+import time
 import threading
 import pytest
 from unittest.mock import patch, MagicMock
@@ -19,6 +20,7 @@ from llmpt.patch import (
     _truncate_temp_file,
     _patched_http_get,
     _patched_hf_hub_download,
+    _patched_snapshot_download,
 )
 
 
@@ -28,6 +30,8 @@ def clean_patch_state():
     remove_patch()
     patch_module._original_hf_hub_download = None
     patch_module._original_http_get = None
+    patch_module._original_snapshot_download = None
+    patch_module._original_snapshot_hf_tqdm = None
     patch_module._config = {}
     reset_download_stats()
     # Clear thread-local context
@@ -38,6 +42,8 @@ def clean_patch_state():
     remove_patch()
     patch_module._original_hf_hub_download = None
     patch_module._original_http_get = None
+    patch_module._original_snapshot_download = None
+    patch_module._original_snapshot_hf_tqdm = None
     patch_module._config = {}
     reset_download_stats()
 
@@ -338,3 +344,118 @@ class TestApplyRemovePatchIntegration:
 
         remove_patch()
         assert file_download.http_get is original_http_get
+
+
+class TestPatchedSnapshotDownload:
+
+    def test_live_snapshot_progress_uses_proxy_even_when_verbose_disabled(self):
+        """snapshot_download should always show live P2P stats on its shared bar."""
+        patch_module._config = {'verbose': False}
+        patch_module._original_snapshot_download = MagicMock(return_value="/tmp/model")
+
+        class RecordingTqdm:
+            instances = []
+
+            def __init__(self, *args, **kwargs):
+                self.args = args
+                self.kwargs = kwargs
+                self.total = kwargs.get('total', 0)
+                self.disable = kwargs.get('disable', False)
+                self.postfixes = []
+                self.closed = False
+                RecordingTqdm.instances.append(self)
+
+            def set_postfix_str(self, text, refresh=False):
+                self.postfixes.append((text, refresh))
+
+            def close(self):
+                self.closed = True
+
+        def fake_snapshot_download(*args, **kwargs):
+            bar = kwargs['tqdm_class'](
+                name="huggingface_hub.snapshot_download",
+                total=0,
+                disable=False,
+            )
+            bar.total += 8
+            time.sleep(0.03)
+            bar.close()
+            return "/tmp/model"
+
+        patch_module._original_snapshot_download.side_effect = fake_snapshot_download
+
+        mock_manager = MagicMock()
+        mock_manager.get_repo_p2p_stats.return_value = {
+            'peer_download': 1024,
+            'webseed_download': 2048,
+            'max_p2p_peers': 3,
+        }
+
+        with patch('llmpt.utils.resolve_commit_hash', return_value='a' * 40), \
+             patch('llmpt.patch._notify_seed_daemon'), \
+             patch('llmpt.p2p_batch.P2PBatchManager', return_value=mock_manager), \
+             patch.object(patch_module, '_SNAPSHOT_PROGRESS_UPDATE_INTERVAL', 0.01):
+            result = _patched_snapshot_download(
+                repo_id="test/repo",
+                revision="main",
+                tqdm_class=RecordingTqdm,
+            )
+
+        assert result == "/tmp/model"
+        assert len(RecordingTqdm.instances) == 1
+        bar = RecordingTqdm.instances[0]
+        assert bar.total == 8
+        assert bar.closed is True
+        assert any(
+            text == "P2P 1.02kB | WebSeed 2.05kB | Active peers 3"
+            for text, _ in bar.postfixes
+        )
+
+    def test_non_snapshot_bars_do_not_get_live_p2p_postfix(self):
+        """Only the shared snapshot bar should start the live reporter."""
+        patch_module._config = {'verbose': False}
+        patch_module._original_snapshot_download = MagicMock(return_value="/tmp/model")
+
+        class RecordingTqdm:
+            instances = []
+
+            def __init__(self, *args, **kwargs):
+                self.kwargs = kwargs
+                self.total = kwargs.get('total', 0)
+                self.disable = kwargs.get('disable', False)
+                self.postfixes = []
+                RecordingTqdm.instances.append(self)
+
+            def set_postfix_str(self, text, refresh=False):
+                self.postfixes.append((text, refresh))
+
+            def close(self):
+                return None
+
+        def fake_snapshot_download(*args, **kwargs):
+            bar = kwargs['tqdm_class'](name="thread_map", total=0, disable=False)
+            time.sleep(0.03)
+            bar.close()
+            return "/tmp/model"
+
+        patch_module._original_snapshot_download.side_effect = fake_snapshot_download
+
+        mock_manager = MagicMock()
+        mock_manager.get_repo_p2p_stats.return_value = {
+            'peer_download': 1024,
+            'webseed_download': 2048,
+            'max_p2p_peers': 3,
+        }
+
+        with patch('llmpt.utils.resolve_commit_hash', return_value='a' * 40), \
+             patch('llmpt.patch._notify_seed_daemon'), \
+             patch('llmpt.p2p_batch.P2PBatchManager', return_value=mock_manager), \
+             patch.object(patch_module, '_SNAPSHOT_PROGRESS_UPDATE_INTERVAL', 0.01):
+            _patched_snapshot_download(
+                repo_id="test/repo",
+                revision="main",
+                tqdm_class=RecordingTqdm,
+            )
+
+        assert len(RecordingTqdm.instances) == 1
+        assert RecordingTqdm.instances[0].postfixes == []

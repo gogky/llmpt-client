@@ -19,6 +19,8 @@ NOTE on huggingface_hub.__getattr__ (lazy-import):
 import pytest
 from huggingface_hub import _snapshot_download  # intentional: imported BEFORE apply_patch
 from huggingface_hub import file_download
+from unittest.mock import MagicMock, patch as mock_patch
+import time
 
 from llmpt.patch import apply_patch, remove_patch
 
@@ -60,6 +62,19 @@ def test_file_download_module_is_patched_after_apply():
     assert callable(file_download.hf_hub_download)
 
 
+def test_snapshot_hf_tqdm_is_patched_after_apply():
+    """Old snapshot_download references should still see a patched hf_tqdm."""
+    original = _snapshot_download.hf_tqdm
+
+    apply_patch({'tracker_url': 'http://test-tracker'})
+
+    assert _snapshot_download.hf_tqdm is not original, (
+        "_snapshot_download.hf_tqdm was NOT replaced by apply_patch(). "
+        "Import-order fallback for live snapshot postfix is missing."
+    )
+    assert callable(_snapshot_download.hf_tqdm)
+
+
 def test_remove_patch_restores_both():
     """
     remove_patch() must restore both module-level references back to the originals.
@@ -74,6 +89,17 @@ def test_remove_patch_restores_both():
         "_snapshot_download.hf_hub_download was not restored after remove_patch()"
     assert file_download.hf_hub_download is original_fd, \
         "file_download.hf_hub_download was not restored after remove_patch()"
+
+
+def test_remove_patch_restores_snapshot_hf_tqdm():
+    """remove_patch() must restore module-level hf_tqdm as well."""
+    original = _snapshot_download.hf_tqdm
+
+    apply_patch({'tracker_url': 'http://test-tracker'})
+    remove_patch()
+
+    assert _snapshot_download.hf_tqdm is original, \
+        "_snapshot_download.hf_tqdm was not restored after remove_patch()"
 
 
 def test_double_apply_is_idempotent():
@@ -328,15 +354,95 @@ class TestStackFrameInspection:
         result = some_other_function()
         assert result is None
 
+    def test_extract_snapshot_context_from_snapshot_download_frame(self):
+        """snapshot progress fallback should recover repo identity from stack."""
+        from llmpt.patch import _extract_snapshot_context_from_stack
+
+        def snapshot_download():
+            repo_id = 'test-org/test-dataset'
+            commit_hash = 'e' * 40
+            revision = 'main'
+            repo_type = 'dataset'
+
+            def create_bar():
+                return _extract_snapshot_context_from_stack()
+
+            return create_bar()
+
+        result = snapshot_download()
+
+        assert result is not None
+        assert result['repo_id'] == 'test-org/test-dataset'
+        assert result['revision'] == 'e' * 40
+        assert result['repo_type'] == 'dataset'
+
+    def test_snapshot_hf_tqdm_fallback_updates_live_postfix(self):
+        """Patched module-level hf_tqdm should drive live postfix for old snapshot refs."""
+        import llmpt.patch as patch_mod
+
+        apply_patch({'tracker_url': 'http://test-tracker', 'verbose': False})
+
+        class RecordingTqdm:
+            def __init__(self, *args, **kwargs):
+                self.kwargs = kwargs
+                self.disable = kwargs.get('disable', False)
+                self.postfixes = []
+                self.closed = False
+
+            @classmethod
+            def get_lock(cls):
+                return None
+
+            @classmethod
+            def set_lock(cls, lock):
+                return None
+
+            def set_postfix_str(self, text, refresh=False):
+                self.postfixes.append((text, refresh))
+
+            def close(self):
+                self.closed = True
+
+        patched_tqdm = patch_mod._wrap_snapshot_tqdm_class_auto(RecordingTqdm)
+        mock_manager = MagicMock()
+        mock_manager.get_repo_p2p_stats.return_value = {
+            'peer_download': 1024,
+            'webseed_download': 2048,
+            'max_p2p_peers': 3,
+        }
+
+        with mock_patch('llmpt.p2p_batch.P2PBatchManager', return_value=mock_manager), \
+             mock_patch.object(patch_mod, '_SNAPSHOT_PROGRESS_UPDATE_INTERVAL', 0.01):
+
+            def snapshot_download():
+                repo_id = 'owner/repo'
+                commit_hash = 'f' * 40
+                revision = 'main'
+                repo_type = 'dataset'
+
+                bar = patched_tqdm(
+                    name="huggingface_hub.snapshot_download",
+                    total=0,
+                    disable=False,
+                )
+                time.sleep(0.03)
+                bar.close()
+                return bar
+
+            bar = snapshot_download()
+
+        assert bar.closed is True
+        assert any(
+            text == "P2P 1.02kB | WebSeed 2.05kB | Active peers 3"
+            for text, _ in bar.postfixes
+        )
+
 
     def test_http_get_schedules_notification_from_stack(self, monkeypatch):
         """When hf_hub_download is imported before enable_p2p, _patched_hf_hub_download
         is bypassed. _patched_http_get must schedule the deferred notification itself
         after recovering context from the stack."""
         import llmpt.patch as patch_mod
-        from unittest.mock import MagicMock, patch as mock_patch
-        import time
-
         apply_patch({'tracker_url': 'http://test-tracker'})
 
         mock_notify = MagicMock(return_value=True)

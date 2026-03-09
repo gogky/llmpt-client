@@ -86,6 +86,7 @@ class SessionContext:
         self._stats_lock = threading.Lock()
         self._acc_peer_download: int = 0
         self._acc_webseed_download: int = 0
+        self._acc_total_payload_download: int = 0
         self._acc_peak_p2p_peers: int = 0
 
     def _init_torrent(self, initial_filename: str = None) -> bool:
@@ -426,6 +427,11 @@ class SessionContext:
 
             peers = handle.get_peer_info()
             web_seed_flag = getattr(lt.peer_info, 'web_seed', None)
+            total_payload_download = 0
+            try:
+                total_payload_download = handle.status().total_payload_download
+            except Exception:
+                pass
 
             peer_dl = 0
             webseed_dl = 0
@@ -442,6 +448,10 @@ class SessionContext:
             with self._stats_lock:
                 self._acc_peer_download = max(self._acc_peer_download, peer_dl)
                 self._acc_webseed_download = max(self._acc_webseed_download, webseed_dl)
+                self._acc_total_payload_download = max(
+                    self._acc_total_payload_download,
+                    total_payload_download,
+                )
                 self._acc_peak_p2p_peers = max(self._acc_peak_p2p_peers, p2p_peers)
         except Exception:
             pass
@@ -492,13 +502,29 @@ class SessionContext:
             except Exception as e:
                 logger.debug(f"[{self.repo_id}] Failed to collect live P2P stats: {e}")
 
-        # Fall back to accumulated high-water marks if live data is empty
-        # (peers disconnected after download completed)
-        if peer_download == 0 and webseed_download == 0:
-            with self._stats_lock:
-                peer_download = self._acc_peer_download
-                webseed_download = self._acc_webseed_download
-                num_p2p_peers = self._acc_peak_p2p_peers
+        with self._stats_lock:
+            acc_peer_download = self._acc_peer_download
+            acc_webseed_download = self._acc_webseed_download
+            acc_total_payload_download = self._acc_total_payload_download
+            acc_peak_p2p_peers = self._acc_peak_p2p_peers
+
+        peer_download = max(peer_download, acc_peer_download)
+        webseed_download = max(webseed_download, acc_webseed_download)
+        total_payload_download = max(total_payload_download, acc_total_payload_download)
+        num_p2p_peers = max(num_p2p_peers, acc_peak_p2p_peers)
+
+        # ``total_payload_download`` is the most trustworthy all-time byte count.
+        # ``get_peer_info()`` can undercount WebSeed after disconnects, so
+        # reconcile the source breakdown against the authoritative total.
+        if total_payload_download > 0:
+            peer_download = min(peer_download, total_payload_download)
+            if num_p2p_peers == 0:
+                webseed_download = max(webseed_download, total_payload_download)
+            else:
+                webseed_download = max(
+                    webseed_download,
+                    total_payload_download - peer_download,
+                )
 
         if peer_download == 0 and webseed_download == 0 and total_payload_download == 0:
             return {}

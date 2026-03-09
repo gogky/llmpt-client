@@ -628,3 +628,56 @@ class TestMapAllFilesForSeeding:
         assert not f1.exists()
         assert not f2.exists()
         assert ctx.seeding_hardlinks == []
+
+
+class TestP2PStats:
+
+    def test_pure_webseed_uses_total_payload_as_authoritative_total(self, make_ctx, mock_lt):
+        """When no P2P peers were ever seen, all payload should count as WebSeed."""
+        ctx = make_ctx()
+        handle = MagicMock()
+        handle.is_valid.return_value = True
+        handle.get_peer_info.return_value = []
+        handle.status.return_value = MagicMock(
+            total_payload_download=3_460_000,
+            num_peers=0,
+            num_seeds=0,
+        )
+        ctx.handle = handle
+        ctx._acc_webseed_download = 319 * 1024
+        ctx._acc_total_payload_download = 3_460_000
+        ctx._acc_peak_p2p_peers = 0
+
+        stats = ctx.get_p2p_stats()
+
+        assert stats['peer_download'] == 0
+        assert stats['webseed_download'] == 3_460_000
+        assert stats['total_payload_download'] == 3_460_000
+
+    def test_mixed_transfer_reconciles_missing_bytes_into_webseed(self, make_ctx, mock_lt):
+        """Remaining payload bytes should be attributed to WebSeed after peer reconciliation."""
+        ctx = make_ctx()
+        mock_lt.peer_info.web_seed = 1
+        handle = MagicMock()
+        handle.is_valid.return_value = True
+
+        peer = MagicMock()
+        peer.flags = 0
+        peer.total_download = 600
+        handle.get_peer_info.return_value = [peer]
+        handle.status.return_value = MagicMock(
+            total_payload_download=1000,
+            num_peers=1,
+            num_seeds=0,
+        )
+        ctx.handle = handle
+        ctx._acc_peer_download = 600
+        ctx._acc_webseed_download = 100
+        ctx._acc_total_payload_download = 1000
+        ctx._acc_peak_p2p_peers = 1
+
+        stats = ctx.get_p2p_stats()
+
+        assert stats['peer_download'] == 600
+        assert stats['webseed_download'] == 400
+        assert stats['total_payload_download'] == 1000

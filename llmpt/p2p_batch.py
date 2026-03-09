@@ -410,11 +410,12 @@ class P2PBatchManager:
 
         Returns:
             Aggregated stats dict with peer_download, webseed_download,
-            total_payload_download, max_p2p_peers.
+            total_payload_download, active_p2p_peers, max_p2p_peers.
         """
         total_peer_download = 0
         total_webseed_download = 0
         total_payload_download = 0
+        active_p2p_peers = 0
         max_p2p_peers = 0
 
         with self._lock:
@@ -430,6 +431,7 @@ class P2PBatchManager:
                         total_peer_download += stats.get('peer_download', 0)
                         total_webseed_download += stats.get('webseed_download', 0)
                         total_payload_download += stats.get('total_payload_download', 0)
+                        active_p2p_peers += stats.get('num_p2p_peers', 0)
                         max_p2p_peers = max(
                             max_p2p_peers, stats.get('num_p2p_peers', 0)
                         )
@@ -438,6 +440,7 @@ class P2PBatchManager:
             'peer_download': total_peer_download,
             'webseed_download': total_webseed_download,
             'total_payload_download': total_payload_download,
+            'active_p2p_peers': active_p2p_peers,
             'max_p2p_peers': max_p2p_peers,
         }
 
