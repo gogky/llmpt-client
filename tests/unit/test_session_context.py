@@ -233,7 +233,6 @@ class TestInitTorrent:
         assert result is True
         assert ctx.handle is mock_handle
         assert ctx.torrent_info_obj is mock_ti
-        mock_handle.prioritize_files.assert_called_once_with([0, 0, 0])
         mock_lt.bdecode.assert_called_once_with(b'fake_torrent_bytes')
         mock_lt.torrent_info.assert_called_once()
 

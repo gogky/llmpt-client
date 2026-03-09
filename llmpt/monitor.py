@@ -334,6 +334,14 @@ def _collect_ready_files(ctx: "SessionContext") -> list:
         if ctx.handle.file_priorities()[file_index] == 0:
             ctx.handle.file_priority(file_index, 1)
             logger.info(f"[{ctx.repo_id}] Belatedly prioritized {filename} (Index {file_index})")
+            # Also prioritize overlapping files to avoid partfile EOF bug
+            for idx in ctx._get_overlapping_file_indices(file_index):
+                if ctx.handle.file_priorities()[idx] == 0:
+                    ctx.handle.file_priority(idx, 1)
+                    logger.debug(
+                        f"[{ctx.repo_id}] Also prioritizing overlapping file "
+                        f"index {idx} to avoid partfile EOF"
+                    )
 
         file_size = files.file_size(file_index)
         progress_bytes = file_progress[file_index]

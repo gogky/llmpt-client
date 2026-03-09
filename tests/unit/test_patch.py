@@ -98,7 +98,8 @@ def test_p2p_interception_flow():
                 temp_file_path="/tmp/fake",
                 tracker_client=mock_tracker_client,
                 timeout=300,
-                repo_type="model"
+                repo_type="model",
+                tqdm_class=None,
             )
         finally:
             # Cleanup context

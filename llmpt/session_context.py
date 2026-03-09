@@ -127,22 +127,11 @@ class SessionContext:
                         if strip_torrent_root(files.file_path(i).replace('\\', '/')) == initial_filename:
                             priorities[i] = 1
                             break
-                # Also prioritize overlapping
-                if initial_filename:
-                    s_idx = priorities.index(1) if 1 in priorities else -1
-                    if s_idx >= 0:
-                        files = info.files()
-                        plen = info.piece_length()
-                        s_off = files.file_offset(s_idx)
-                        e_off = s_off + files.file_size(s_idx) - 1
-                        sp = s_off // plen
-                        ep = e_off // plen
-                        for i in range(info.num_files()):
-                            if i != s_idx and files.file_size(i) > 0:
-                                fs = files.file_offset(i)
-                                fe = fs + files.file_size(i) - 1
-                                if fs // plen <= ep and fe // plen >= sp:
-                                    priorities[i] = 1
+                # Also prioritize overlapping files to avoid partfile EOF bug
+                if initial_filename and 1 in priorities:
+                    s_idx = priorities.index(1)
+                    for idx in self._get_overlapping_file_indices(s_idx, torrent_info=info):
+                        priorities[idx] = 1
                 params.file_priorities = priorities
 
             self.handle = self.lt_session.add_torrent(params)
@@ -282,27 +271,9 @@ class SessionContext:
                     logger.info(f"[{self.repo_id}] Requesting file {filename} (Index {file_index}). Priority -> 1. Destination: {destination}")
                     self.handle.file_priority(file_index, 1)
 
-                    # Fix libtorrent v2 WebSeed / partfile EOF bug:
-                    # If this file shares boundaries with neighboring files (which are priority 0),
-                    # WebSeed downloads will trigger partfile writes and often fail with "End of file".
-                    # We must also download any files that share a piece with this file.
-                    overlapping = []
-                    if self.torrent_info_obj:
-                        ti = self.torrent_info_obj
-                        piece_len = ti.piece_length()
-                        files = ti.files()
-                        s_off = files.file_offset(file_index)
-                        e_off = s_off + files.file_size(file_index) - 1
-                        s_piece = s_off // piece_len
-                        e_piece = e_off // piece_len
-                        for i in range(files.num_files()):
-                            if i == file_index or files.file_size(i) == 0: continue
-                            fs = files.file_offset(i)
-                            fe = fs + files.file_size(i) - 1
-                            if fs // piece_len <= e_piece and fe // piece_len >= s_piece:
-                                overlapping.append(i)
-
-                    for idx in overlapping:
+                    # Fix libtorrent partfile EOF bug: also prioritize files
+                    # sharing piece boundaries with this file.
+                    for idx in self._get_overlapping_file_indices(file_index):
                         logger.debug(f"[{self.repo_id}] Also prioritizing overlapping file index {idx} to avoid partfile EOF")
                         self.handle.file_priority(idx, 1)
                     
@@ -456,6 +427,45 @@ class SessionContext:
                 return i
                 
         return None
+
+    def _get_overlapping_file_indices(self, file_index: int, *, torrent_info=None) -> list:
+        """Find file indices that share piece boundaries with the given file.
+
+        Works around a libtorrent partfile bug where WebSeed downloads fail
+        with "End of file" when a piece spans a priority-0 file boundary.
+        See docs/libtorrent_partfile_eof_bug_fix.md for details.
+
+        Args:
+            file_index: The index of the target file.
+            torrent_info: Optional torrent_info object. Falls back to
+                self.torrent_info_obj when not provided (needed during
+                _init_torrent before the handle exists).
+
+        Returns:
+            List of file indices whose byte range overlaps with the
+            target file's piece range.
+        """
+        ti = torrent_info or self.torrent_info_obj
+        if not ti:
+            return []
+
+        piece_len = ti.piece_length()
+        files = ti.files()
+        s_off = files.file_offset(file_index)
+        e_off = s_off + files.file_size(file_index) - 1
+        s_piece = s_off // piece_len
+        e_piece = e_off // piece_len
+
+        overlapping = []
+        for i in range(files.num_files()):
+            if i == file_index or files.file_size(i) == 0:
+                continue
+            fs = files.file_offset(i)
+            fe = fs + files.file_size(i) - 1
+            if fs // piece_len <= e_piece and fe // piece_len >= s_piece:
+                overlapping.append(i)
+
+        return overlapping
 
     def _get_webseed_url(self) -> Optional[str]:
         """Build the WebSeed URL for this session's repo, if the proxy is running.

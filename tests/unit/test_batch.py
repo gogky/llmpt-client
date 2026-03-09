@@ -64,7 +64,7 @@ def test_register_request_success(mock_lt_all_modules):
         )
 
         assert success is True
-        mock_download.assert_called_once_with("model.bin", "/tmp/fake")
+        mock_download.assert_called_once_with("model.bin", "/tmp/fake", tqdm_class=None)
         assert ("model", "demo", "main", "hub_cache", "") in manager.sessions
 
 
