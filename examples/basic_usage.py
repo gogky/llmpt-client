@@ -1,20 +1,14 @@
 """
-示例：使用环境变量启用 P2P
+示例：启用 P2P 加速下载
 
-注意：即使使用环境变量，也必须 import llmpt 才能触发 Monkey Patch
+调用 enable_p2p() 启用 P2P，环境变量 HF_P2P_TRACKER 等会被用作默认参数值。
 """
 
-import os
-
-# 启用 P2P（通过环境变量）
-os.environ['HF_USE_P2P'] = '1'
-os.environ['HF_P2P_TRACKER'] = 'http://localhost:8080'
-
-# 导入 llmpt（会自动检测环境变量并启用 P2P）
-import llmpt
-
-# 使用 huggingface_hub（无需其他修改）
+from llmpt import enable_p2p
 from huggingface_hub import snapshot_download
+
+# 启用 P2P（未指定的参数从 HF_P2P_TRACKER 等环境变量读取）
+enable_p2p()
 
 print("下载 gpt2 模型...")
 path = snapshot_download("gpt2")

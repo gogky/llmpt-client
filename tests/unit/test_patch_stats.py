@@ -234,7 +234,8 @@ class TestPatchedHfHubDownload:
         patch_module._original_hf_hub_download = mock_original
         patch_module._config = {'tracker_url': 'http://tracker.example.com'}
 
-        with patch('llmpt.tracker_client.TrackerClient') as MockTracker:
+        with patch('llmpt.tracker_client.TrackerClient') as MockTracker, \
+             patch('llmpt.utils.resolve_commit_hash', side_effect=lambda r, rev, **kw: rev):
             mock_tracker = MagicMock()
             MockTracker.return_value = mock_tracker
 
@@ -260,7 +261,8 @@ class TestPatchedHfHubDownload:
 
         mock_original.side_effect = capture_context
 
-        with patch('llmpt.tracker_client.TrackerClient'):
+        with patch('llmpt.tracker_client.TrackerClient'), \
+             patch('llmpt.utils.resolve_commit_hash', side_effect=lambda r, rev, **kw: rev):
             _patched_hf_hub_download("test/repo", "model.bin", subfolder="onnx", revision="main")
 
         assert contexts_seen == ["onnx/model.bin"]
@@ -279,7 +281,8 @@ class TestPatchedHfHubDownload:
 
         mock_original.side_effect = capture_context
 
-        with patch('llmpt.tracker_client.TrackerClient'):
+        with patch('llmpt.tracker_client.TrackerClient'), \
+             patch('llmpt.utils.resolve_commit_hash', side_effect=lambda r, rev, **kw: rev):
             _patched_hf_hub_download("test/repo", "model.bin", subfolder="", revision="main")
 
         assert contexts_seen == ["model.bin"]  # Not "/model.bin"
@@ -293,7 +296,8 @@ class TestPatchedHfHubDownload:
         patch_module._context.repo_id = "prev/repo"
         patch_module._context.filename = "prev.bin"
 
-        with patch('llmpt.tracker_client.TrackerClient'):
+        with patch('llmpt.tracker_client.TrackerClient'), \
+             patch('llmpt.utils.resolve_commit_hash', side_effect=lambda r, rev, **kw: rev):
             with pytest.raises(RuntimeError):
                 _patched_hf_hub_download("test/repo", "model.bin", revision="main")
 

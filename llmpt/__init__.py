@@ -2,23 +2,19 @@
 llmpt - P2P-accelerated download client for HuggingFace Hub
 
 This package provides seamless P2P acceleration for HuggingFace Hub downloads
-using BitTorrent protocol. It works as a drop-in replacement with zero code changes.
+using BitTorrent protocol. It works as a drop-in replacement with minimal
+code changes.
 
-Import order does NOT matter — only ``enable_p2p()`` (or the ``HF_USE_P2P=1``
-environment variable) must be called/set before the first download starts.
+Import order does NOT matter — ``enable_p2p()`` must be called before the
+first download starts. Environment variables (``HF_P2P_TRACKER``, etc.)
+are used as default values for ``enable_p2p()`` parameters.
 
 Usage:
-    # Method 1: Environment variable
-    export HF_USE_P2P=1
-    import llmpt
-    from huggingface_hub import snapshot_download
-    snapshot_download("meta-llama/Llama-2-7b")  # Automatically uses P2P
-
-    # Method 2: Explicit enable (import order does NOT matter)
-    from huggingface_hub import snapshot_download
     from llmpt import enable_p2p
-    enable_p2p()
-    snapshot_download("meta-llama/Llama-2-7b")  # Works correctly!
+    from huggingface_hub import snapshot_download
+
+    enable_p2p()  # Uses HF_P2P_TRACKER env var, or pass tracker_url="..."
+    snapshot_download("meta-llama/Llama-2-7b")  # Uses P2P!
 """
 
 import os
@@ -313,11 +309,15 @@ def shutdown() -> None:
     """
     global _webseed_proxy
     from .p2p_batch import P2PBatchManager
-    try:
-        manager = P2PBatchManager()
-        manager.shutdown()
-    except Exception:
-        pass  # Best-effort during interpreter shutdown
+    # Only shut down if P2PBatchManager was actually created during this
+    # process's lifetime.  Calling P2PBatchManager() here would *create*
+    # a new singleton (and a new libtorrent session) just to destroy it,
+    # producing noisy log output for no reason.
+    if P2PBatchManager._instance is not None:
+        try:
+            P2PBatchManager._instance.shutdown()
+        except Exception:
+            pass  # Best-effort during interpreter shutdown
 
     # Stop WebSeed proxy
     if _webseed_proxy is not None:
@@ -334,18 +334,3 @@ def _cleanup_on_exit():
     if _patched:
         shutdown()
 
-
-# Auto-enable from environment variable
-def _auto_enable_from_env():
-    """Check environment variables and auto-enable P2P if configured."""
-    if os.getenv('HF_USE_P2P', '0') == '1':
-        logger.info("[Auto] Detected HF_USE_P2P=1, enabling P2P...")
-        enable_p2p(
-            tracker_url=os.getenv('HF_P2P_TRACKER'),
-            timeout=int(os.getenv('HF_P2P_TIMEOUT', '300')),
-            webseed=os.getenv('HF_P2P_WEBSEED', '1') == '1',
-        )
-
-
-# Execute on import
-_auto_enable_from_env()

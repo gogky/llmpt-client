@@ -351,6 +351,12 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
     ipc_server = IPCServer(handler=_handle_ipc)
     ipc_server.start()
 
+    # Write PID file AFTER IPC is listening.  This guarantees that when
+    # is_daemon_running() finds a valid PID, the IPC socket is already
+    # accepting connections — eliminating the "running but not responding
+    # to IPC" race window.
+    _write_pid(os.getpid())
+
     # Clean up on exit
     def _cleanup():
         ipc_server.stop()

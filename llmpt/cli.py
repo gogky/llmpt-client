@@ -366,8 +366,6 @@ def _cmd_internal_daemon_start(args):
     root_log.addHandler(fh)
     root_log.setLevel(logging.INFO)
 
-    _write_pid(os.getpid())
-
     try:
         _daemon_main(args.tracker, port=args.port)
     except Exception as e:

@@ -29,22 +29,22 @@ pip install -e ".[dev]"
 
 ## 快速开始
 
-### 方式一：环境变量（最简单）
+### 方式一：环境变量配置 + 显式启用
 
 ```bash
-# 设置环境变量
-export HF_USE_P2P=1
+# 设置 tracker 地址（enable_p2p() 会自动读取）
 export HF_P2P_TRACKER=http://your-tracker-server
 ```
 
 ```python
-import llmpt
+from llmpt import enable_p2p
 from huggingface_hub import snapshot_download
 
-snapshot_download("meta-llama/Llama-2-7b")  # 自动使用 P2P
+enable_p2p()  # 自动读取 HF_P2P_TRACKER 等环境变量
+snapshot_download("meta-llama/Llama-2-7b")  # 使用 P2P
 ```
 
-### 方式二：显式启用
+### 方式二：代码中直接指定
 
 ```python
 from llmpt import enable_p2p
@@ -144,9 +144,6 @@ llmpt-cli stop
 ### 环境变量
 
 ```bash
-# 启用 P2P
-HF_USE_P2P=1
-
 # HuggingFace 镜像（如果无法访问 huggingface.co）
 HF_ENDPOINT=https://hf-mirror.com
 

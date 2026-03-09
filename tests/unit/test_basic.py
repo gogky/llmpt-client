@@ -44,12 +44,17 @@ def test_config():
     llmpt.disable_p2p()
 
 
-def test_env_variable():
-    """Test auto-enable from environment variable."""
-    # This test needs to be run in isolation
-    # For now, just check the function exists
-    from llmpt import _auto_enable_from_env
-    assert callable(_auto_enable_from_env)
+def test_import_does_not_auto_enable():
+    """Test that importing llmpt does NOT auto-enable P2P.
+
+    Users must explicitly call enable_p2p(). The old _auto_enable_from_env
+    behaviour was removed because it caused unwanted side effects (libtorrent
+    session creation, WebSeedProxy startup) in CLI commands and daemon
+    sub-processes that merely import ``llmpt`` sub-modules.
+    """
+    import llmpt
+    # Even if HF_USE_P2P=1 is set, importing should not enable P2P
+    assert not llmpt.is_enabled()
 
 
 def test_libtorrent_availability():
