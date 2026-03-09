@@ -3,10 +3,10 @@ CLI tool for llmpt.
 """
 
 import sys
+import os
 import argparse
 import logging
 import signal
-from pathlib import Path
 
 
 def main():
@@ -64,6 +64,37 @@ Examples:
         choices=['model', 'dataset', 'space'],
         help='Repository type'
     )
+    download_parser.add_argument(
+        '--timeout',
+        type=int,
+        default=None,
+        help='P2P download timeout in seconds (default: HF_P2P_TIMEOUT or 300)'
+    )
+    download_parser.add_argument(
+        '--port',
+        type=int,
+        default=None,
+        help='libtorrent listen port (default: HF_P2P_PORT or auto-select)'
+    )
+    download_parser.add_argument(
+        '--hf-token',
+        default=None,
+        help='Hugging Face token for WebSeed access to private/gated repos'
+    )
+    webseed_group = download_parser.add_mutually_exclusive_group()
+    webseed_group.add_argument(
+        '--webseed',
+        dest='webseed',
+        action='store_true',
+        default=None,
+        help='Enable WebSeed fallback (default: HF_P2P_WEBSEED or true)'
+    )
+    webseed_group.add_argument(
+        '--no-webseed',
+        dest='webseed',
+        action='store_false',
+        help='Disable WebSeed fallback'
+    )
 
     # Seed command
     seed_parser = subparsers.add_parser(
@@ -101,6 +132,12 @@ Examples:
         action='store_true',
         help='Run in the foreground (for debugging)'
     )
+    start_parser.add_argument(
+        '--port',
+        type=int,
+        default=None,
+        help='libtorrent listen port (default: HF_P2P_PORT or auto-select)'
+    )
 
     # Status command
     status_parser = subparsers.add_parser(
@@ -118,6 +155,12 @@ Examples:
     restart_parser = subparsers.add_parser(
         'restart',
         help='Restart the background seeding daemon'
+    )
+    restart_parser.add_argument(
+        '--port',
+        type=int,
+        default=None,
+        help='libtorrent listen port (default: HF_P2P_PORT or auto-select)'
     )
 
     # Internal hidden command for daemon subprocess
@@ -168,11 +211,16 @@ Examples:
 
 def cmd_download(args):
     """Execute download command."""
-    from llmpt import enable_p2p, get_config
+    from llmpt import enable_p2p
 
     # Enable P2P FIRST, so patches are applied
     enable_p2p(
-        tracker_url=args.tracker
+        tracker_url=args.tracker,
+        timeout=args.timeout,
+        port=args.port,
+        hf_token=args.hf_token,
+        webseed=args.webseed,
+        verbose=args.verbose,
     )
 
     # NOW import the patched function
@@ -197,7 +245,7 @@ def cmd_seed(args):
     from llmpt.seeder import start_seeding
     from llmpt.utils import resolve_commit_hash
 
-    tracker = TrackerClient(args.tracker or 'http://localhost:8080')
+    tracker = TrackerClient(_resolve_tracker_url(args.tracker))
 
     # Resolve revision (e.g. "main") to a 40-char commit hash so the tracker
     # entry is always keyed by the immutable commit identifier.
@@ -253,9 +301,9 @@ def cmd_seed(args):
 def cmd_start(args):
     """Execute start command."""
     from llmpt.daemon import start_daemon, is_daemon_running, LOG_FILE
-    import os
 
-    tracker_url = args.tracker or os.getenv('HF_P2P_TRACKER') or 'http://localhost:8080'
+    tracker_url = _resolve_tracker_url(args.tracker)
+    port = _resolve_port(args.port)
 
     existing = is_daemon_running()
     if existing:
@@ -265,6 +313,7 @@ def cmd_start(args):
     print("Starting daemon...")
     pid = start_daemon(
         tracker_url=tracker_url,
+        port=port,
         foreground=args.foreground,
     )
     if pid:
@@ -289,19 +338,32 @@ def cmd_stop(args):
 def cmd_restart(args):
     """Execute restart command."""
     from llmpt.daemon import start_daemon, stop_daemon
-    import os
     import time
 
-    tracker_url = args.tracker or os.getenv('HF_P2P_TRACKER') or 'http://localhost:8080'
+    tracker_url = _resolve_tracker_url(args.tracker)
+    port = _resolve_port(args.port)
 
     stop_daemon()
     time.sleep(0.5)
-    pid = start_daemon(tracker_url=tracker_url)
+    pid = start_daemon(tracker_url=tracker_url, port=port)
     if pid:
         print(f"✓ Daemon restarted (PID: {pid})")
     else:
         print("Error: Failed to restart daemon")
         sys.exit(1)
+
+
+def _resolve_tracker_url(explicit_tracker):
+    """Resolve tracker URL from CLI arg, env, or hardcoded default."""
+    return explicit_tracker or os.getenv('HF_P2P_TRACKER') or 'http://localhost:8080'
+
+
+def _resolve_port(explicit_port):
+    """Resolve listen port from CLI arg or env var."""
+    if explicit_port is not None:
+        return explicit_port
+    port_env = os.getenv('HF_P2P_PORT')
+    return int(port_env) if port_env else None
 
 
 def cmd_status(args):

@@ -38,6 +38,7 @@ _config = {
     'timeout': 300,  # 5 minutes
     'port': None,  # None = use default 6881 with auto-fallback; set int to override
     'hf_token': None,  # HuggingFace token for WebSeed proxy (private/gated repos)
+    'webseed': True,  # Whether the WebSeed proxy is enabled
     'verbose': False,  # Print P2P summary after snapshot_download
 }
 _webseed_proxy = None  # WebSeedProxy instance (created in enable_p2p)
@@ -88,12 +89,26 @@ def _restore_xet_storage(config: dict) -> None:
         pass
 
 
+def _get_bool_env(name: str, default: bool) -> bool:
+    """Parse a boolean environment variable with a fallback default."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+
+    normalized = value.strip().lower()
+    if normalized in ('1', 'true', 'yes', 'on'):
+        return True
+    if normalized in ('0', 'false', 'no', 'off'):
+        return False
+    return default
+
+
 def enable_p2p(
     tracker_url: Optional[str] = None,
-    timeout: int = 300,
+    timeout: Optional[int] = None,
     port: Optional[int] = None,
     hf_token: Optional[str] = None,
-    webseed: bool = True,
+    webseed: Optional[bool] = None,
     verbose: bool = False,
 ) -> None:
     """
@@ -102,12 +117,14 @@ def enable_p2p(
     Args:
         tracker_url: Tracker server URL. If None, uses HF_P2P_TRACKER env var
                      or default tracker.
-        timeout: P2P download timeout in seconds.
+        timeout: P2P download timeout in seconds. If None, uses
+                 HF_P2P_TIMEOUT or 300.
         port: The port to bind libtorrent to. Defaults to HF_P2P_PORT env var,
               or auto-selects from 6881-6999 range.
         hf_token: HuggingFace token for WebSeed proxy (private/gated repos).
-        webseed: Whether to enable the WebSeed proxy. Defaults to True.
-                 Set to False to disable WebSeed (useful for debugging).
+        webseed: Whether to enable the WebSeed proxy. If None, uses
+                 HF_P2P_WEBSEED or defaults to True. Set to False to disable
+                 WebSeed (useful for debugging).
         verbose: Whether to print P2P acceleration summary after snapshot_download.
                  Defaults to False. Can also be enabled via HF_P2P_VERBOSE=1 env var.
 
@@ -136,19 +153,31 @@ def enable_p2p(
         or os.getenv('HF_P2P_TRACKER')
         or 'http://localhost:8080'  # Default tracker
     )
-    _config['timeout'] = timeout
+    timeout_env = os.getenv('HF_P2P_TIMEOUT')
+    _config['timeout'] = (
+        timeout
+        if timeout is not None
+        else int(timeout_env) if timeout_env
+        else 300
+    )
     _config['hf_token'] = hf_token
-    _config['webseed'] = webseed
-    _config['verbose'] = verbose or os.getenv('HF_P2P_VERBOSE', '').lower() in ('1', 'true', 'yes')
-    if port is not None:
-        _config['port'] = port
-    elif os.getenv('HF_P2P_PORT'):
-        _config['port'] = int(os.getenv('HF_P2P_PORT'))
+    _config['webseed'] = (
+        webseed if webseed is not None
+        else _get_bool_env('HF_P2P_WEBSEED', True)
+    )
+    _config['verbose'] = verbose or _get_bool_env('HF_P2P_VERBOSE', False)
+    port_env = os.getenv('HF_P2P_PORT')
+    _config['port'] = (
+        port
+        if port is not None
+        else int(port_env) if port_env
+        else None
+    )
 
     _disable_xet_storage(_config)
 
     # Start WebSeed proxy (if enabled)
-    if webseed:
+    if _config['webseed']:
         from .webseed_proxy import WebSeedProxy
         _webseed_proxy = WebSeedProxy(hf_token=hf_token)
         try:
@@ -345,4 +374,3 @@ def _cleanup_on_exit():
         from .patch import _flush_deferred_notifications
         _flush_deferred_notifications()
         shutdown()
-
