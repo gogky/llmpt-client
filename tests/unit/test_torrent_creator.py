@@ -113,13 +113,16 @@ class TestCreateTorrent:
     @patch('llmpt.torrent_creator.lt')
     @patch('llmpt.torrent_creator.LIBTORRENT_AVAILABLE', True)
     def test_successful_local_dir_torrent_creation_uses_local_dir(self, mock_lt, tmp_path):
-        """local_dir sources should build torrents from the local_dir itself."""
+        """local_dir sources should only include verified manifest files."""
         from llmpt.torrent_creator import create_torrent
 
         local_dir = tmp_path / "local_dir"
         local_dir.mkdir()
         (local_dir / "config.json").write_text('{"key": "value"}')
         (local_dir / "model.bin").write_bytes(b'\x00' * 1000)
+        cache_dir = local_dir / ".cache" / "huggingface" / "download"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "stale.lock").write_text("")
 
         mock_fs = MagicMock()
         mock_fs.total_size.return_value = 1014
@@ -147,6 +150,7 @@ class TestCreateTorrent:
 
         revision = "a" * 40
         with patch('huggingface_hub.snapshot_download', return_value=str(local_dir)) as mock_snapshot_download, \
+             patch('llmpt.completed_registry.get_completed_manifest', return_value=["config.json", "model.bin"]), \
              patch('llmpt.torrent_cache.resolve_torrent_data', return_value=None), \
              patch('llmpt.torrent_cache.save_torrent_to_cache'):
             tracker = MagicMock()
@@ -164,6 +168,42 @@ class TestCreateTorrent:
             local_files_only=True,
             local_dir=str(local_dir),
         )
+        mock_lt.add_files.assert_not_called()
+        mock_fs.add_file.assert_any_call("local_dir/config.json", 16)
+        mock_fs.add_file.assert_any_call("local_dir/model.bin", 1000)
+        assert mock_fs.add_file.call_count == 2
+        mock_lt.set_piece_hashes.assert_called_once_with(mock_torrent_obj, str(local_dir.parent))
+
+    @patch('llmpt.torrent_creator.lt')
+    @patch('llmpt.torrent_creator.LIBTORRENT_AVAILABLE', True)
+    def test_cached_local_dir_torrent_preserves_explicit_revision(self, mock_lt):
+        """Reused local_dir torrents must not replace revision with the folder name."""
+        from llmpt.torrent_creator import create_torrent
+
+        tracker = MagicMock()
+        tracker.tracker_url = "http://tracker.example.com"
+
+        with patch('llmpt.torrent_cache.resolve_torrent_data', return_value=b'cached_torrent'), \
+             patch('llmpt.torrent_creator.torrent_matches_completed_source', return_value=True), \
+             patch('llmpt.torrent_creator._torrent_data_to_result', return_value={
+                 'info_hash': 'abc',
+                 'file_size': 1000,
+                 'piece_length': 262144,
+                 'num_pieces': 1,
+                 'num_files': 1,
+                 'torrent_data': b'cached_torrent',
+                 'commit_hash': 'local_dir',
+                 'files': [{'path': 'config.json', 'size': 1000}],
+             }):
+            result = create_torrent(
+                "test/repo",
+                "a" * 40,
+                tracker,
+                local_dir="/tmp/local_dir",
+            )
+
+        assert result is not None
+        assert result["commit_hash"] == "a" * 40
 
     @patch('llmpt.torrent_creator.lt')
     @patch('llmpt.torrent_creator.LIBTORRENT_AVAILABLE', True)

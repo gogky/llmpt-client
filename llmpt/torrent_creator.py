@@ -14,6 +14,41 @@ logger = logging.getLogger('llmpt.torrent_creator')
 _COMMIT_HASH_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
+def _build_local_dir_file_storage(
+    repo_id: str,
+    revision: str,
+    local_dir: str,
+) -> tuple[Optional[Any], Optional[str]]:
+    """Build file_storage for a verified local_dir source using its manifest only."""
+    from .completed_registry import get_completed_manifest
+
+    manifest = get_completed_manifest(
+        repo_id,
+        revision,
+        local_dir=local_dir,
+    )
+    if not manifest:
+        logger.error(
+            f"[{repo_id}] No completed manifest available for local_dir source: {local_dir}"
+        )
+        return None, None
+
+    source_root = Path(local_dir)
+    torrent_root = source_root.name
+    fs = lt.file_storage()
+
+    for relative_path in manifest:
+        file_path = source_root / relative_path
+        if not file_path.exists() or not file_path.is_file():
+            logger.error(
+                f"[{repo_id}] Verified local_dir file missing while building torrent: {relative_path}"
+            )
+            return None, None
+        fs.add_file(f"{torrent_root}/{relative_path}", file_path.stat().st_size)
+
+    return fs, str(source_root.parent)
+
+
 def _expected_completed_files(
     repo_id: str,
     revision: str,
@@ -165,6 +200,18 @@ def _torrent_data_to_result(torrent_data: bytes, repo_id: str) -> Optional[dict]
         return None
 
 
+def _normalized_result_commit_hash(
+    result: dict,
+    revision: str,
+    *,
+    local_dir: Optional[str] = None,
+) -> str:
+    """Prefer the explicit revision over the torrent root for local_dir torrents."""
+    if local_dir or _COMMIT_HASH_RE.match(revision or ""):
+        return revision
+    return result.get("commit_hash", revision) or revision
+
+
 def create_torrent(
     repo_id: str,
     revision: str,
@@ -222,6 +269,11 @@ def create_torrent(
                 logger.info(f"Using existing torrent for {repo_id}@{revision} (from cache or tracker)")
                 result = _torrent_data_to_result(cached_or_downloaded, repo_id)
                 if result is not None:
+                    result["commit_hash"] = _normalized_result_commit_hash(
+                        result,
+                        revision,
+                        local_dir=local_dir,
+                    )
                     return result
             else:
                 logger.warning(
@@ -262,12 +314,22 @@ def create_torrent(
 
         commit_hash = revision if _COMMIT_HASH_RE.match(revision) else file_path.name
 
-        # Create file storage
-        fs = lt.file_storage()
-        
-        # We must add files relative to the snapshot path, but since libtorrent handles 
-        # the wrapping folder automatically, we just point it to the snapshot root directory.
-        lt.add_files(fs, str(file_path))
+        if local_dir is not None:
+            fs, piece_hash_base = _build_local_dir_file_storage(
+                repo_id,
+                revision,
+                local_dir,
+            )
+            if fs is None or piece_hash_base is None:
+                return None
+        else:
+            # Create file storage
+            fs = lt.file_storage()
+
+            # We must add files relative to the snapshot path, but since libtorrent handles
+            # the wrapping folder automatically, we just point it to the snapshot root directory.
+            lt.add_files(fs, str(file_path))
+            piece_hash_base = str(file_path.parent)
 
         # ── Deterministic piece_length selection ───────────────────────────
         # piece_length is derived solely from total_size so that every client
@@ -311,7 +373,7 @@ def create_torrent(
 
         # Generate piece hashes
         logger.info(f"Generating piece hashes for {file_path.name}...")
-        lt.set_piece_hashes(t, str(file_path.parent))
+        lt.set_piece_hashes(t, piece_hash_base)
 
         # Generate torrent
         torrent = t.generate()
@@ -401,7 +463,7 @@ def ensure_registered(
         logger.warning(f"[{repo_id}] Cannot parse torrent data for registration")
         return False
 
-    resolved_revision = result.get('commit_hash', revision) or revision
+    resolved_revision = _normalized_result_commit_hash(result, revision)
 
     success = tracker_client.register_torrent(
         repo_id=repo_id,
