@@ -37,6 +37,17 @@ def test_scan_and_seed_respects_retry_deadline(monkeypatch):
         cache_dir="/tmp/cache-b",
     )
     monkeypatch.setattr("llmpt.cache_scanner.scan_seedable_sources", lambda: [source])
+    monkeypatch.setattr(
+        "llmpt.cache_importer.import_verified_cache_sources",
+        lambda: {
+            "imported": 0,
+            "skipped_completed": 0,
+            "skipped_backoff": 0,
+            "blocked": 0,
+            "partial": 0,
+            "error": 0,
+        },
+    )
 
     calls = []
 
@@ -86,6 +97,17 @@ def test_scan_and_seed_removes_stale_session(monkeypatch):
         cache_dir="/tmp/cache-live",
     )
     monkeypatch.setattr("llmpt.cache_scanner.scan_seedable_sources", lambda: [live_source])
+    monkeypatch.setattr(
+        "llmpt.cache_importer.import_verified_cache_sources",
+        lambda: {
+            "imported": 0,
+            "skipped_completed": 0,
+            "skipped_backoff": 0,
+            "blocked": 0,
+            "partial": 0,
+            "error": 0,
+        },
+    )
     monkeypatch.setattr(
         daemon,
         "_process_seedable",
@@ -173,6 +195,17 @@ def test_scan_and_seed_dedupes_by_storage_root(monkeypatch):
         cache_dir="/tmp/cache-b",
     )
     monkeypatch.setattr("llmpt.cache_scanner.scan_seedable_sources", lambda: [source_a, source_b])
+    monkeypatch.setattr(
+        "llmpt.cache_importer.import_verified_cache_sources",
+        lambda: {
+            "imported": 0,
+            "skipped_completed": 0,
+            "skipped_backoff": 0,
+            "blocked": 0,
+            "partial": 0,
+            "error": 0,
+        },
+    )
 
     calls = []
 
@@ -242,6 +275,11 @@ def test_unseed_matching_sessions_can_forget_registry(monkeypatch):
         return {"hub_cache_roots_removed": 1, "local_dir_sources_removed": 0}
 
     monkeypatch.setattr(
+        "llmpt.completed_registry.forget_completed_source",
+        lambda **kwargs: 1,
+    )
+
+    monkeypatch.setattr(
         "llmpt.cache_scanner.forget_seedable_storage",
         fake_forget_seedable_storage,
     )
@@ -274,6 +312,7 @@ def test_unseed_matching_sessions_can_forget_registry(monkeypatch):
     assert result["forgotten"] == {
         "hub_cache_roots_removed": 1,
         "local_dir_sources_removed": 0,
+        "completed_sources_removed": 1,
     }
     assert removed == [
         ("dataset", "org/shared", "2" * 40, "/tmp/cache-a", None)
@@ -330,6 +369,17 @@ def test_scan_and_seed_skips_suppressed_keys(monkeypatch):
     )
     key = ("dataset", "org/suppressed", "5" * 40, "local_dir", "/tmp/local-dir")
     monkeypatch.setattr("llmpt.cache_scanner.scan_seedable_sources", lambda: [source])
+    monkeypatch.setattr(
+        "llmpt.cache_importer.import_verified_cache_sources",
+        lambda: {
+            "imported": 0,
+            "skipped_completed": 0,
+            "skipped_backoff": 0,
+            "blocked": 0,
+            "partial": 0,
+            "error": 0,
+        },
+    )
 
     calls = []
 
@@ -348,6 +398,29 @@ def test_scan_and_seed_skips_suppressed_keys(monkeypatch):
     )
 
     assert calls == []
+
+
+def test_scan_and_seed_runs_cache_import_before_seeding(monkeypatch):
+    import llmpt.daemon as daemon
+
+    calls = []
+
+    monkeypatch.setattr(
+        "llmpt.cache_importer.import_verified_cache_sources",
+        lambda: calls.append("import") or {
+            "imported": 1,
+            "skipped_completed": 0,
+            "skipped_backoff": 0,
+            "blocked": 0,
+            "partial": 0,
+            "error": 0,
+        },
+    )
+    monkeypatch.setattr("llmpt.cache_scanner.scan_seedable_sources", lambda: [])
+
+    daemon._scan_and_seed(None, None, set(), {}, set())
+
+    assert calls == ["import"]
 
 
 def test_reconcile_keeps_only_live_suppressed_keys():

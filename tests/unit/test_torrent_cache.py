@@ -69,13 +69,17 @@ class TestSaveTorrentToCache:
     def test_creates_cache_file(self, tmp_path):
         """Should write torrent data to the correct path."""
         from llmpt.torrent_cache import save_torrent_to_cache
+        from llmpt.torrent_state import get_torrent_state
 
-        with patch('llmpt.torrent_cache.TORRENT_CACHE_DIR', str(tmp_path)):
+        state_file = tmp_path / "torrent_state.json"
+        with patch('llmpt.torrent_cache.TORRENT_CACHE_DIR', str(tmp_path)), \
+             patch('llmpt.torrent_state.TORRENT_STATE_FILE', str(state_file)):
             save_torrent_to_cache("test/repo", "abc123", b"torrent_bytes")
 
         cache_file = tmp_path / "model_test_repo_abc123.torrent"
         assert cache_file.exists()
         assert cache_file.read_bytes() == b"torrent_bytes"
+        assert get_torrent_state("test/repo", "abc123")["local_torrent_present"] is True
 
     def test_creates_directory_if_missing(self, tmp_path):
         """Should create the cache directory if it doesn't exist."""
@@ -122,6 +126,27 @@ class TestSaveTorrentToCache:
             save_torrent_to_cache("test/repo", "abc123", b"data")
 
 
+class TestDeleteCachedTorrent:
+
+    def test_delete_cached_torrent_removes_file_and_updates_state(self, tmp_path):
+        from llmpt.torrent_cache import delete_cached_torrent
+        from llmpt.torrent_state import get_torrent_state, mark_local_torrent
+
+        cache_file = tmp_path / "model_test_repo_abc123.torrent"
+        cache_file.write_bytes(b"torrent_data")
+        state_file = tmp_path / "torrent_state.json"
+
+        with patch('llmpt.torrent_cache.TORRENT_CACHE_DIR', str(tmp_path)), \
+             patch('llmpt.torrent_state.TORRENT_STATE_FILE', str(state_file)):
+            mark_local_torrent("test/repo", "abc123", present=True)
+            removed = delete_cached_torrent("test/repo", "abc123")
+            state = get_torrent_state("test/repo", "abc123")
+
+        assert removed is True
+        assert not cache_file.exists()
+        assert state["local_torrent_present"] is False
+
+
 # ─── resolve_torrent_data ─────────────────────────────────────────────────────
 
 class TestResolveTorrentData:
@@ -144,11 +169,15 @@ class TestResolveTorrentData:
     def test_layer2_tracker_hit(self, tmp_path):
         """Layer 2: cache miss → tracker returns data → data is cached locally."""
         from llmpt.torrent_cache import resolve_torrent_data
+        from llmpt.torrent_state import get_torrent_state
 
         tracker = MagicMock()
+        tracker.tracker_url = "http://tracker.example.com"
         tracker.download_torrent.return_value = b"tracker_torrent"
 
-        with patch('llmpt.torrent_cache.TORRENT_CACHE_DIR', str(tmp_path)):
+        state_file = tmp_path / "torrent_state.json"
+        with patch('llmpt.torrent_cache.TORRENT_CACHE_DIR', str(tmp_path)), \
+             patch('llmpt.torrent_state.TORRENT_STATE_FILE', str(state_file)):
             result = resolve_torrent_data("test/repo", "abc123", tracker)
 
         assert result == b"tracker_torrent"
@@ -157,6 +186,10 @@ class TestResolveTorrentData:
         cache_file = tmp_path / "model_test_repo_abc123.torrent"
         assert cache_file.exists()
         assert cache_file.read_bytes() == b"tracker_torrent"
+        with patch('llmpt.torrent_state.TORRENT_STATE_FILE', str(state_file)):
+            state = get_torrent_state("test/repo", "abc123", tracker_url="http://tracker.example.com")
+        assert state["local_torrent_present"] is True
+        assert state["tracker_registered"] is True
 
     def test_layer3_nothing_found(self, tmp_path):
         """Layer 3: both cache and tracker miss → returns None."""

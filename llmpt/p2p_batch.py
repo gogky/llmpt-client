@@ -232,7 +232,16 @@ class P2PBatchManager:
             return False
                 
         # For seeding, force map all files in the torrent to their HF blob equivalents!
-        return session_ctx.map_all_files_for_seeding()
+        success = session_ctx.map_all_files_for_seeding()
+        if not success:
+            self.remove_session(
+                repo_id,
+                revision,
+                repo_type=repo_type,
+                cache_dir=cache_dir,
+                local_dir=local_dir,
+            )
+        return success
 
     def register_request(
         self,
@@ -391,6 +400,9 @@ class P2PBatchManager:
                     'upload_rate': s.upload_rate,
                     'progress': s.progress,
                     'state': str(s.state),
+                    'mapped_files': ctx.seeding_mapped_files,
+                    'total_files': ctx.seeding_total_files,
+                    'full_mapping': ctx.full_mapping,
                 }
         return status
 

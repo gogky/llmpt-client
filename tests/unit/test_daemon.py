@@ -5,6 +5,7 @@ Tests for llmpt.daemon module.
 import os
 import signal
 import time
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -76,3 +77,47 @@ class TestIsDaemonRunning:
         _write_pid(os.getpid())
         result = is_daemon_running()
         assert result == os.getpid()
+
+
+class TestProcessSeedable:
+
+    def test_stale_cached_torrent_is_regenerated(self):
+        from llmpt.daemon import _process_seedable
+
+        tracker = MagicMock()
+        tracker.tracker_url = "http://tracker.example.com"
+        manager = MagicMock()
+        manager.register_seeding_task.return_value = True
+        seeding_set = set()
+        failed_attempts = {}
+
+        with patch("llmpt.torrent_cache.resolve_torrent_data", return_value=b"stale"), \
+             patch("llmpt.torrent_cache.delete_cached_torrent") as mock_delete, \
+             patch("llmpt.torrent_creator.torrent_matches_completed_source", return_value=False), \
+             patch("llmpt.torrent_creator.create_and_register_torrent", return_value={
+                 "torrent_data": b"fresh",
+                 "info_hash": "abc123",
+             }) as mock_create, \
+             patch("llmpt.torrent_cache.save_torrent_to_cache"), \
+             patch("llmpt.torrent_creator.ensure_registered"):
+            result = _process_seedable(
+                "test/repo",
+                "a" * 40,
+                tracker,
+                manager,
+                seeding_set,
+                failed_attempts,
+            )
+
+        assert result is True
+        mock_delete.assert_called_once_with("test/repo", "a" * 40, repo_type="model")
+        mock_create.assert_called_once()
+        manager.register_seeding_task.assert_called_once_with(
+            repo_id="test/repo",
+            revision="a" * 40,
+            repo_type="model",
+            tracker_client=tracker,
+            torrent_data=b"fresh",
+            cache_dir=None,
+            local_dir=None,
+        )

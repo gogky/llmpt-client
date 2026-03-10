@@ -118,6 +118,7 @@ def test_snapshot_download_notification_handles_storage_key_shape():
 
     with patch('llmpt.patch._original_snapshot_download', return_value="/tmp/local"), \
          patch('llmpt.utils.resolve_commit_hash', return_value="a" * 40), \
+         patch('llmpt.patch.get_download_stats', return_value={'p2p': {'config.json'}, 'http': set()}), \
          patch('llmpt.ipc.notify_daemon') as notify_daemon:
 
         key = patch_module._deferred_key(
@@ -147,4 +148,5 @@ def test_snapshot_download_notification_handles_storage_key_shape():
             revision="a" * 40,
             repo_type="model",
             local_dir="/tmp/model",
+            completed_snapshot=True,
         )

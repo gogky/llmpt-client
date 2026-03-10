@@ -240,6 +240,84 @@ class TestDeferredDaemonNotification:
                     time.sleep(2.5)
                     mock_notify.assert_not_called()
 
+    def test_hf_hub_download_deferred_marks_completed_snapshot_for_local_dir(self):
+        """When old snapshot_download calls patched hf_hub_download, deferred notify must keep completed_snapshot."""
+        import llmpt.patch as patch_mod
+        from unittest.mock import MagicMock, patch as mock_patch
+        import time
+
+        apply_patch({'tracker_url': 'http://test-tracker'})
+
+        mock_notify = MagicMock(return_value=True)
+
+        with mock_patch.object(patch_mod, '_active_wrapper_counts', {}):
+            with mock_patch('llmpt.ipc.notify_daemon', mock_notify):
+                original_fn = MagicMock(return_value='/fake/path')
+                patch_mod._original_hf_hub_download = original_fn
+
+                def snapshot_download():
+                    repo_id = 'org/local-model'
+                    revision = 'main'
+                    repo_type = 'model'
+                    local_dir = '/tmp/local-model'
+                    filename = 'weights.bin'
+                    return patch_mod._patched_hf_hub_download(
+                        repo_id,
+                        filename,
+                        revision=revision,
+                        repo_type=repo_type,
+                        local_dir=local_dir,
+                    )
+
+                snapshot_download()
+                time.sleep(2.5)
+
+                mock_notify.assert_called_once()
+                call_args = mock_notify.call_args
+                assert call_args[0][0] == 'seed'
+                assert call_args[1]['repo_id'] == 'org/local-model'
+                assert call_args[1]['local_dir'] == '/tmp/local-model'
+                assert call_args[1]['completed_snapshot'] is True
+
+    def test_hf_hub_download_deferred_marks_completed_snapshot_for_cache_dir(self):
+        """Import-order snapshot_download(cache_dir=...) should also carry completed_snapshot."""
+        import llmpt.patch as patch_mod
+        from unittest.mock import MagicMock, patch as mock_patch
+        import time
+
+        apply_patch({'tracker_url': 'http://test-tracker'})
+
+        mock_notify = MagicMock(return_value=True)
+
+        with mock_patch.object(patch_mod, '_active_wrapper_counts', {}):
+            with mock_patch('llmpt.ipc.notify_daemon', mock_notify):
+                original_fn = MagicMock(return_value='/fake/path')
+                patch_mod._original_hf_hub_download = original_fn
+
+                def snapshot_download():
+                    repo_id = 'org/cache-model'
+                    revision = 'main'
+                    repo_type = 'model'
+                    cache_dir = '/tmp/custom-cache'
+                    filename = 'weights.bin'
+                    return patch_mod._patched_hf_hub_download(
+                        repo_id,
+                        filename,
+                        revision=revision,
+                        repo_type=repo_type,
+                        cache_dir=cache_dir,
+                    )
+
+                snapshot_download()
+                time.sleep(2.5)
+
+                mock_notify.assert_called_once()
+                call_args = mock_notify.call_args
+                assert call_args[0][0] == 'seed'
+                assert call_args[1]['repo_id'] == 'org/cache-model'
+                assert call_args[1]['cache_dir'] == '/tmp/custom-cache'
+                assert call_args[1]['completed_snapshot'] is True
+
 
 # ---------------------------------------------------------------------------
 # Stack frame inspection (hf_hub_download import-order fallback) tests
@@ -375,6 +453,84 @@ class TestStackFrameInspection:
         assert result['repo_id'] == 'test-org/test-dataset'
         assert result['revision'] == 'e' * 40
         assert result['repo_type'] == 'dataset'
+
+    def test_extract_snapshot_context_from_inner_snapshot_worker(self):
+        """Real snapshot_download workers run in _inner_hf_hub_download frames."""
+        from llmpt.patch import _extract_snapshot_context_from_stack
+
+        def _inner_hf_hub_download():
+            repo_id = 'test-org/test-dataset'
+            commit_hash = '1' * 40
+            revision = 'main'
+            repo_type = 'dataset'
+            cache_dir = '/tmp/custom-cache'
+
+            def create_bar():
+                return _extract_snapshot_context_from_stack()
+
+            return create_bar()
+
+        result = _inner_hf_hub_download()
+
+        assert result is not None
+        assert result['repo_id'] == 'test-org/test-dataset'
+        assert result['revision'] == '1' * 40
+        assert result['repo_type'] == 'dataset'
+        assert result['cache_dir'] == '/tmp/custom-cache'
+
+    def test_extract_context_from_stack_marks_snapshot_origin_and_storage(self):
+        """Import-order fallback should preserve local_dir/cache_dir and snapshot origin."""
+        from llmpt.patch import _extract_context_from_stack
+
+        def snapshot_download():
+            repo_id = 'test-org/test-model'
+            commit_hash = 'f' * 40
+            revision = 'main'
+            repo_type = 'model'
+            local_dir = '/tmp/local-model'
+
+            def _hf_hub_download_to_local_dir():
+                filename = 'weights.bin'
+
+                def inner():
+                    return _extract_context_from_stack()
+
+                return inner()
+
+            return _hf_hub_download_to_local_dir()
+
+        result = snapshot_download()
+
+        assert result is not None
+        assert result['repo_id'] == 'test-org/test-model'
+        assert result['revision'] == 'f' * 40
+        assert result['local_dir'] == '/tmp/local-model'
+        assert result['from_snapshot_download'] is True
+
+    def test_extract_context_from_inner_snapshot_worker_marks_snapshot_origin(self):
+        """Worker-thread stack extraction should still mark snapshot origin."""
+        from llmpt.patch import _extract_context_from_stack
+
+        def _inner_hf_hub_download():
+            repo_id = 'test-org/test-model'
+            filename = 'weights.bin'
+            commit_hash = '0' * 40
+            revision = 'main'
+            repo_type = 'model'
+            local_dir = '/tmp/local-model'
+
+            def inner():
+                return _extract_context_from_stack()
+
+            return inner()
+
+        result = _inner_hf_hub_download()
+
+        assert result is not None
+        assert result['repo_id'] == 'test-org/test-model'
+        assert result['revision'] == '0' * 40
+        assert result['local_dir'] == '/tmp/local-model'
+        assert result['from_snapshot_download'] is True
 
     def test_snapshot_hf_tqdm_fallback_updates_live_postfix(self):
         """Patched module-level hf_tqdm should drive live postfix for old snapshot refs."""
@@ -528,3 +684,95 @@ class TestStackFrameInspection:
                 hf_hub_download()
                 time.sleep(2.5)
                 mock_notify.assert_not_called()
+
+    def test_http_get_deferred_notification_marks_completed_snapshot_for_local_dir(self):
+        """Import-order fallback should mark snapshot_download(local_dir=...) as completed."""
+        import llmpt.patch as patch_mod
+        apply_patch({'tracker_url': 'http://test-tracker'})
+
+        mock_notify = MagicMock(return_value=True)
+
+        with mock_patch.object(patch_mod, '_active_wrapper_counts', {}):
+            with mock_patch('llmpt.ipc.notify_daemon', mock_notify):
+
+                def snapshot_download():
+                    repo_id = 'org/local-model'
+                    commit_hash = '1' * 40
+                    revision = 'main'
+                    repo_type = 'model'
+                    local_dir = '/tmp/local-model'
+
+                    def _hf_hub_download_to_local_dir():
+                        filename = 'weights.bin'
+
+                        def _call_http_get():
+                            mock_file = MagicMock()
+                            mock_file.name = '/tmp/fake'
+
+                            with mock_patch('llmpt.p2p_batch.P2PBatchManager') as mock_manager_cls:
+                                mock_manager = MagicMock()
+                                mock_manager.register_request.return_value = False
+                                mock_manager_cls.return_value = mock_manager
+                                with mock_patch.object(patch_mod, '_original_http_get', return_value=None):
+                                    patch_mod._patched_http_get('http://fake', mock_file)
+
+                        _call_http_get()
+
+                    _hf_hub_download_to_local_dir()
+
+                snapshot_download()
+                time.sleep(2.5)
+
+                mock_notify.assert_called_once()
+                call_args = mock_notify.call_args
+                assert call_args[0][0] == 'seed'
+                assert call_args[1]['repo_id'] == 'org/local-model'
+                assert call_args[1]['revision'] == '1' * 40
+                assert call_args[1]['local_dir'] == '/tmp/local-model'
+                assert call_args[1]['completed_snapshot'] is True
+
+    def test_http_get_deferred_notification_marks_completed_snapshot_for_cache_dir(self):
+        """Import-order fallback should mark snapshot_download(cache_dir=...) as completed."""
+        import llmpt.patch as patch_mod
+        apply_patch({'tracker_url': 'http://test-tracker'})
+
+        mock_notify = MagicMock(return_value=True)
+
+        with mock_patch.object(patch_mod, '_active_wrapper_counts', {}):
+            with mock_patch('llmpt.ipc.notify_daemon', mock_notify):
+
+                def snapshot_download():
+                    repo_id = 'org/cache-model'
+                    commit_hash = '2' * 40
+                    revision = 'main'
+                    repo_type = 'model'
+                    cache_dir = '/tmp/custom-cache'
+
+                    def _hf_hub_download_to_cache_dir():
+                        filename = 'weights.bin'
+
+                        def _call_http_get():
+                            mock_file = MagicMock()
+                            mock_file.name = '/tmp/fake'
+
+                            with mock_patch('llmpt.p2p_batch.P2PBatchManager') as mock_manager_cls:
+                                mock_manager = MagicMock()
+                                mock_manager.register_request.return_value = False
+                                mock_manager_cls.return_value = mock_manager
+                                with mock_patch.object(patch_mod, '_original_http_get', return_value=None):
+                                    patch_mod._patched_http_get('http://fake', mock_file)
+
+                        _call_http_get()
+
+                    _hf_hub_download_to_cache_dir()
+
+                snapshot_download()
+                time.sleep(2.5)
+
+                mock_notify.assert_called_once()
+                call_args = mock_notify.call_args
+                assert call_args[0][0] == 'seed'
+                assert call_args[1]['repo_id'] == 'org/cache-model'
+                assert call_args[1]['revision'] == '2' * 40
+                assert call_args[1]['cache_dir'] == '/tmp/custom-cache'
+                assert call_args[1]['completed_snapshot'] is True

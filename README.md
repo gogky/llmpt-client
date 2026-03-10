@@ -10,7 +10,7 @@ HuggingFace Hub 模型/数据集的 P2P 加速下载客户端。
 - **自动降级**：P2P 失败时自动回退到标准 HTTP 下载
 - **自动做种**：下载完成后自动创建 torrent 并持续做种，回馈社区
 - **后台守护进程**：做种运行在独立的后台进程中，不影响正常使用
-- **全缓存做种**：守护进程会扫描 HF 缓存中的所有模型/数据集并自动做种
+- **完整性验证导入**：守护进程会扫描 HF cache，但只会为验证完整的仓库自动做种
 - **自定义目录支持**：支持 `snapshot_download(..., cache_dir=...)` 和 `snapshot_download(..., local_dir=...)`
 - **冷启动恢复**：守护进程重启后可恢复已登记的自定义目录做种任务
 
@@ -57,8 +57,8 @@ snapshot_download("meta-llama/Llama-2-7b")
 
 当调用 `enable_p2p()` 时，系统会自动：
 1. Monkey Patch HuggingFace 的下载函数，拦截文件请求到 P2P 网络
-2. 在后台启动**做种守护进程**，扫描本地 HF 缓存，为所有已有的模型/数据集做种
-3. 下载完成后通知守护进程，自动为新下载的模型/数据集创建 torrent 并注册到 tracker
+2. 在后台启动**做种守护进程**，扫描本地 HF cache，并自动导入那些经验证完整的仓库
+3. 下载完成后通知守护进程，自动为新下载且确认完整的模型/数据集创建 torrent 并注册到 tracker
 
 推荐在`snapshot_download("meta-llama/Llama-2-7b")`前执行 `enable_p2p()` ，但不强制要求。
 
@@ -103,6 +103,7 @@ llmpt-cli download gpt2 --tracker http://your-tracker-server  # 指定 tracker
 # ─── 守护进程管理 ───
 llmpt-cli start                                               # 启动后台做种守护进程
 llmpt-cli start --tracker http://your-tracker-server          # 指定 tracker
+llmpt-cli scan                                                # 立即重扫 cache 并重试导入验证
 llmpt-cli status                                              # 查看做种状态
 llmpt-cli unseed gpt2                                         # 停止该做种条目
 llmpt-cli stop                                                # 停止守护进程
@@ -126,13 +127,22 @@ $  # ← 立刻返回，终端可以关掉
 ```
 
 守护进程的核心功能：
-- **自动扫描** `~/.cache/huggingface/hub/` 中所有完整的模型/数据集快照
+- **自动扫描** `~/.cache/huggingface/hub/` 中的候选仓库 revision
+- **完整性验证**：只有 manifest 校验通过的 repo revision 才会进入自动做种
 - **扫描自定义 cache_dir**：恢复已登记的自定义 Hub cache 根目录
 - **恢复 local_dir 做种**：基于本地 registry 和 `local_dir/.cache/huggingface/download/*.metadata` 重建做种任务
 - **回收失效 session**：当已登记的自定义存储内容被删除后，后续扫描会移除陈旧做种会话，避免 `status` 长期显示旧条目
 - **自动创建 torrent**：如果 tracker 上没有某模型的 torrent，自动创建并注册
 - **持续做种**：为所有已发现的模型/数据集提供 P2P 上传
 - **接收通知**：下载端下载完成后会通过 IPC 立即通知守护进程
+
+这意味着：
+
+- “在 HF cache 里存在” 不等于 “会自动做种”
+- 对默认 Hub cache，daemon 会先拉取远端 manifest 并检查本地文件是否齐全
+- 对 `local_dir`，daemon 会复用 Hugging Face 的 `.metadata` 做验证
+- gated/private repo 在没有可用权限时可能显示为 `blocked`，不会自动做种
+- 残缺 snapshot 不会再被误判成可做种仓库
 
 当使用 `enable_p2p()` 时，守护进程会 **自动启动**，用户无需手动操作。如果不想做种，可以停止守护进程：
 
@@ -159,6 +169,37 @@ llmpt-cli unseed gpt2
 
 默认 HF cache 不受 `--forget` 影响，因为 daemon 会始终扫描默认 HF cache。
 
+如果你刚补齐了某个仓库缺失的文件，希望 daemon 立即重新验证并尝试导入，可以执行：
+
+```bash
+llmpt-cli scan
+```
+
+这个命令会清空导入退避状态，并立刻触发一次新的 cache 扫描和完整性验证。
+
+### status 输出说明
+
+`llmpt-cli status` 现在只显示活动中的做种会话。每个条目会附带三类轻量状态：
+
+- `source:<verified|partial|blocked|error|unknown>`：本地内容的导入验证结果
+- `torrent:<registered|local_only|absent>`：`.torrent` 是否仅存在于本地，还是已经成功注册到 tracker
+- `session:<active|degraded|inactive>`：当前 libtorrent 会话状态
+
+同时还会显示 `mapped x/y`，表示该做种任务成功映射的文件数量。只有 `mapped` 完整命中时，任务才会进入自动做种。
+
+示例：
+
+```bash
+$ llmpt-cli status
+llmptd (PID: 12345) — running
+  Tracker: http://your-tracker-server
+  Port: 6881
+
+Active seeding sessions: 1
+
+  model:albert/albert-base-v2@<commit> (hub_cache=~/.cache/huggingface/hub) ↑  136.0 B  │ 0 peers │ 5.0 B/s │ source:verified │ torrent:registered │ session:active │ mapped 12/12
+```
+
 ## 配置
 
 ### 环境变量
@@ -179,7 +220,7 @@ HF_P2P_TIMEOUT=300
 # 启用/禁用 WebSeed（默认：1）
 HF_P2P_WEBSEED=1
 
-# HuggingFace 认证 Token（用于 WebSeed 访问私有/受限仓库）
+# HuggingFace 认证 Token（用于 WebSeed 访问私有/受限仓库）, 当前暂不支持对访问受限的仓库做种
 HF_TOKEN=hf_xxxxx
 
 # 下载完成后显示是否显示统计信息（默认：False）

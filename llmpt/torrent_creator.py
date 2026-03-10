@@ -4,6 +4,7 @@ Torrent creation utilities.
 
 import logging
 import re
+import os
 from pathlib import Path
 from typing import Optional, Any
 
@@ -11,6 +12,117 @@ from .utils import lt, LIBTORRENT_AVAILABLE, get_optimal_piece_length, format_by
 
 logger = logging.getLogger('llmpt.torrent_creator')
 _COMMIT_HASH_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _expected_completed_files(
+    repo_id: str,
+    revision: str,
+    *,
+    repo_type: str = "model",
+    cache_dir: Optional[str] = None,
+    local_dir: Optional[str] = None,
+) -> Optional[list[dict]]:
+    from .completed_registry import get_completed_manifest
+
+    manifest = get_completed_manifest(
+        repo_id,
+        revision,
+        repo_type=repo_type,
+        cache_dir=cache_dir,
+        local_dir=local_dir,
+    )
+    if manifest is None:
+        return None
+
+    files = []
+    if local_dir:
+        base_dir = Path(local_dir)
+        for relative_path in manifest:
+            file_path = base_dir / relative_path
+            if not file_path.exists() or not file_path.is_file():
+                logger.warning(
+                    f"[{repo_id}] Completed local_dir manifest no longer resolves: {relative_path}"
+                )
+                return []
+            files.append({"path": relative_path, "size": file_path.stat().st_size})
+    else:
+        from huggingface_hub import try_to_load_from_cache
+
+        lookup_repo_type = repo_type if repo_type != "model" else None
+        for relative_path in manifest:
+            resolved = try_to_load_from_cache(
+                repo_id=repo_id,
+                filename=relative_path,
+                revision=revision,
+                repo_type=lookup_repo_type,
+                cache_dir=cache_dir,
+            )
+            if not resolved or not os.path.exists(resolved):
+                logger.warning(
+                    f"[{repo_id}] Completed cache manifest no longer resolves: {relative_path}"
+                )
+                return []
+            files.append({"path": relative_path, "size": os.path.getsize(resolved)})
+
+    files.sort(key=lambda item: item["path"])
+    return files
+
+
+def torrent_matches_completed_source(
+    repo_id: str,
+    revision: str,
+    torrent_data: bytes,
+    *,
+    repo_type: str = "model",
+    cache_dir: Optional[str] = None,
+    local_dir: Optional[str] = None,
+) -> bool:
+    """Return True when a torrent matches the verified completed source manifest.
+
+    If no completed manifest is available for this source, this check is skipped
+    and only syntactic torrent parsing is required.
+    """
+    result = _torrent_data_to_result(torrent_data, repo_id)
+    if result is None:
+        return False
+
+    expected_files = _expected_completed_files(
+        repo_id,
+        revision,
+        repo_type=repo_type,
+        cache_dir=cache_dir,
+        local_dir=local_dir,
+    )
+    if expected_files is None:
+        return True
+
+    actual_files = sorted(
+        [
+            {
+                "path": str(item.get("path", "")).replace("\\", "/"),
+                "size": int(item.get("size", 0) or 0),
+            }
+            for item in (result.get("files") or [])
+        ],
+        key=lambda item: item["path"],
+    )
+
+    if actual_files != expected_files:
+        logger.warning(
+            f"[{repo_id}] Rejecting stale torrent: files do not match completed manifest "
+            f"(torrent={len(actual_files)} files, expected={len(expected_files)} files)"
+        )
+        return False
+
+    expected_total_size = sum(item["size"] for item in expected_files)
+    if result.get("file_size") != expected_total_size or result.get("num_files") != len(expected_files):
+        logger.warning(
+            f"[{repo_id}] Rejecting stale torrent: metadata mismatch "
+            f"(torrent size={result.get('file_size')}, expected size={expected_total_size})"
+        )
+        return False
+
+    return True
 
 
 def _torrent_data_to_result(torrent_data: bytes, repo_id: str) -> Optional[dict]:
@@ -86,7 +198,11 @@ def create_torrent(
 
     try:
         from huggingface_hub import snapshot_download
-        from .torrent_cache import resolve_torrent_data, save_torrent_to_cache
+        from .torrent_cache import (
+            delete_cached_torrent,
+            resolve_torrent_data,
+            save_torrent_to_cache,
+        )
 
         # ── Layer 1 & 2: check local .torrent cache AND tracker ───────────
         # If we or another seeder already generated a torrent for this repo@revision,
@@ -94,10 +210,24 @@ def create_torrent(
         # 30+ minutes for large models on HDD.
         cached_or_downloaded = resolve_torrent_data(repo_id, revision, tracker_client, repo_type=repo_type)
         if cached_or_downloaded:
-            logger.info(f"Using existing torrent for {repo_id}@{revision} (from cache or tracker)")
-            result = _torrent_data_to_result(cached_or_downloaded, repo_id)
-            if result is not None:
-                return result
+            result = None
+            if torrent_matches_completed_source(
+                repo_id,
+                revision,
+                cached_or_downloaded,
+                repo_type=repo_type,
+                cache_dir=cache_dir,
+                local_dir=local_dir,
+            ):
+                logger.info(f"Using existing torrent for {repo_id}@{revision} (from cache or tracker)")
+                result = _torrent_data_to_result(cached_or_downloaded, repo_id)
+                if result is not None:
+                    return result
+            else:
+                logger.warning(
+                    f"[{repo_id}] Existing torrent does not match verified source; regenerating"
+                )
+                delete_cached_torrent(repo_id, revision, repo_type=repo_type)
             # Corrupt cache/downloaded entry — fall through to regenerate
             logger.warning(f"Existing torrent for {repo_id}@{revision} is invalid, regenerating")
 
@@ -249,6 +379,19 @@ def ensure_registered(
     # Check if tracker already has this torrent
     existing = tracker_client.get_torrent_info(repo_id, revision, repo_type=repo_type)
     if existing:
+        try:
+            from .torrent_state import mark_tracker_registration
+
+            mark_tracker_registration(
+                repo_id,
+                revision,
+                repo_type=repo_type,
+                tracker_url=tracker_client.tracker_url,
+                registered=True,
+                info_hash=existing.get("info_hash"),
+            )
+        except Exception:
+            pass
         logger.debug(f"[{repo_id}] Torrent already registered on tracker")
         return True
 
@@ -274,8 +417,35 @@ def ensure_registered(
     )
 
     if success:
+        try:
+            from .torrent_state import mark_tracker_registration
+
+            mark_tracker_registration(
+                repo_id,
+                revision,
+                repo_type=repo_type,
+                tracker_url=tracker_client.tracker_url,
+                registered=True,
+                info_hash=result["info_hash"],
+            )
+        except Exception:
+            pass
         logger.info(f"[{repo_id}] ✓ Torrent registered on tracker (was missing)")
     else:
+        try:
+            from .torrent_state import mark_tracker_registration
+
+            mark_tracker_registration(
+                repo_id,
+                revision,
+                repo_type=repo_type,
+                tracker_url=tracker_client.tracker_url,
+                registered=False,
+                info_hash=result["info_hash"],
+                error="register_failed",
+            )
+        except Exception:
+            pass
         logger.warning(f"[{repo_id}] ✗ Failed to register torrent on tracker")
 
     return success
@@ -342,5 +512,32 @@ def create_and_register_torrent(
     )
 
     if success:
+        try:
+            from .torrent_state import mark_tracker_registration
+
+            mark_tracker_registration(
+                repo_id,
+                revision,
+                repo_type=repo_type,
+                tracker_url=tracker_client.tracker_url,
+                registered=True,
+                info_hash=torrent_info["info_hash"],
+            )
+        except Exception:
+            pass
         return torrent_info
+    try:
+        from .torrent_state import mark_tracker_registration
+
+        mark_tracker_registration(
+            repo_id,
+            revision,
+            repo_type=repo_type,
+            tracker_url=tracker_client.tracker_url,
+            registered=False,
+            info_hash=torrent_info["info_hash"],
+            error="register_failed",
+        )
+    except Exception:
+        pass
     return None

@@ -201,6 +201,7 @@ def _unseed_matching_sessions(
             "forgotten": {
                 "hub_cache_roots_removed": 0,
                 "local_dir_sources_removed": 0,
+                "completed_sources_removed": 0,
             },
         }
 
@@ -216,12 +217,14 @@ def _unseed_matching_sessions(
             "forgotten": {
                 "hub_cache_roots_removed": 0,
                 "local_dir_sources_removed": 0,
+                "completed_sources_removed": 0,
             },
         }
 
     forgotten = {
         "hub_cache_roots_removed": 0,
         "local_dir_sources_removed": 0,
+        "completed_sources_removed": 0,
     }
     removed_sessions = []
 
@@ -243,6 +246,7 @@ def _unseed_matching_sessions(
 
         if forget and (cache_dir or local_dir):
             from llmpt.cache_scanner import forget_seedable_storage
+            from llmpt.completed_registry import forget_completed_source
 
             counts = forget_seedable_storage(
                 repo_id=match_repo_id,
@@ -253,6 +257,13 @@ def _unseed_matching_sessions(
             )
             forgotten["hub_cache_roots_removed"] += counts["hub_cache_roots_removed"]
             forgotten["local_dir_sources_removed"] += counts["local_dir_sources_removed"]
+            forgotten["completed_sources_removed"] += forget_completed_source(
+                repo_id=match_repo_id,
+                revision=match_revision,
+                repo_type=match_repo_type,
+                cache_dir=cache_dir,
+                local_dir=local_dir,
+            )
 
         removed_sessions.append(
             {
@@ -460,6 +471,7 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
             repo_type = msg.get("repo_type", "model")
             cache_dir = msg.get("cache_dir")
             local_dir = msg.get("local_dir")
+            completed_snapshot = bool(msg.get("completed_snapshot"))
             if repo_id and revision:
                 key = _seeding_key(
                     repo_type,
@@ -473,8 +485,39 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
                     # Explicit seed requests should not wait for backoff.
                     failed_attempts.pop(key, None)
                     suppressed_set.discard(key)
-                    
+
                     from llmpt.cache_scanner import register_seedable_storage
+                    from llmpt.completed_registry import (
+                        has_completed_source,
+                        register_completed_source,
+                    )
+
+                    completed_registered = has_completed_source(
+                        repo_id=repo_id,
+                        revision=revision,
+                        repo_type=repo_type,
+                        cache_dir=cache_dir,
+                        local_dir=local_dir,
+                    )
+                    if completed_snapshot and not completed_registered:
+                        completed_registered = register_completed_source(
+                            repo_id=repo_id,
+                            revision=revision,
+                            repo_type=repo_type,
+                            cache_dir=cache_dir,
+                            local_dir=local_dir,
+                        )
+
+                    if not completed_registered:
+                        logger.info(
+                            f"IPC seed skipped for unverified source: "
+                            f"{repo_id}@{revision[:8]}..."
+                        )
+                        return {
+                            "status": "skipped",
+                            "message": "source is not verified complete",
+                        }
+
                     register_seedable_storage(
                         repo_id=repo_id,
                         revision=revision,
@@ -500,6 +543,26 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
             except Exception as e:
                 logger.warning(f"Failed to reconcile seeding sessions before status: {e}")
             status = manager.get_all_session_status()
+            from llmpt.torrent_state import get_torrent_state
+            from llmpt.status_summary import summarize_status
+
+            session_states = {}
+            unified_states = {}
+            for key, value in status.items():
+                session_states[key] = get_torrent_state(
+                    value.get("repo_id"),
+                    value.get("revision"),
+                    repo_type=value.get("repo_type", "model"),
+                    tracker_url=tracker_url,
+                )
+                unified_states[key] = summarize_status(
+                    value.get("repo_id"),
+                    value.get("revision"),
+                    repo_type=value.get("repo_type", "model"),
+                    tracker_url=tracker_url,
+                    active=True,
+                    full_mapping=bool(value.get("full_mapping", False)),
+                )
             return {
                 "status": "ok",
                 "pid": os.getpid(),
@@ -513,6 +576,14 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
                         "uploaded": v.get("uploaded", 0),
                         "peers": v.get("peers", 0),
                         "upload_rate": v.get("upload_rate", 0),
+                        "mapped_files": v.get("mapped_files", 0),
+                        "total_files": v.get("total_files", 0),
+                        "full_mapping": v.get("full_mapping", False),
+                        "tracker_registered": session_states[k].get("tracker_registered", False),
+                        "last_registration_error": session_states[k].get("last_registration_error"),
+                        "source_status": unified_states[k]["source_status"],
+                        "torrent_status": unified_states[k]["torrent_status"],
+                        "session_status": unified_states[k]["session_status"],
                     }
                     for k, v in status.items()
                 },
@@ -532,6 +603,8 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
 
             # Update announce URL on all active torrent handles
             announce_url = f"{new_url.rstrip('/')}/announce"
+            from llmpt.torrent_cache import resolve_torrent_data
+            from llmpt.torrent_creator import ensure_registered
             with manager._lock:
                 for ctx in manager.sessions.values():
                     with ctx.lock:
@@ -543,6 +616,25 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
                                 handle.force_reannounce()
                         except Exception as e:
                             logger.warning(f"Failed to update tracker for {ctx.repo_id}: {e}")
+                    try:
+                        torrent_data = resolve_torrent_data(
+                            ctx.repo_id,
+                            ctx.revision,
+                            tracker_client,
+                            repo_type=ctx.repo_type,
+                        )
+                        if torrent_data:
+                            ensure_registered(
+                                ctx.repo_id,
+                                ctx.revision,
+                                ctx.repo_type,
+                                torrent_data,
+                                tracker_client,
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to re-register torrent after tracker update for {ctx.repo_id}: {e}"
+                        )
 
             logger.info(f"Tracker URL updated: {old_url} -> {new_url}")
             return {"status": "ok", "old_tracker": old_url, "new_tracker": new_url}
@@ -550,6 +642,12 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
         elif action == "scan":
             # Clear failure backoff and reset scan timer to trigger immediate rescan
             failed_attempts.clear()
+            try:
+                from llmpt.cache_importer import clear_import_state
+
+                clear_import_state()
+            except Exception as e:
+                logger.warning(f"Failed to clear cache import state before scan: {e}")
             last_scan_time = 0.0
             return {"status": "ok", "message": "scan triggered"}
 
@@ -673,6 +771,15 @@ def _scan_and_seed(
     suppressed_set: Set[SeedSessionKey],
 ) -> None:
     """Scan HF cache and start seeding any new models found."""
+    try:
+        from llmpt.cache_importer import import_verified_cache_sources
+
+        import_summary = import_verified_cache_sources()
+        if any(import_summary.values()):
+            logger.info(f"Cache import summary: {import_summary}")
+    except Exception as e:
+        logger.warning(f"Cache import verification failed: {e}")
+
     from llmpt.cache_scanner import scan_seedable_sources
 
     seedable = scan_seedable_sources()
@@ -768,12 +875,29 @@ def _process_seedable(
     logger.info(f"[{repo_id}@{revision[:8]}] Processing seedable model...")
 
     try:
-        from .torrent_cache import resolve_torrent_data, save_torrent_to_cache
-        from .torrent_creator import create_and_register_torrent, ensure_registered
+        from .torrent_cache import delete_cached_torrent, resolve_torrent_data, save_torrent_to_cache
+        from .torrent_creator import (
+            create_and_register_torrent,
+            ensure_registered,
+            torrent_matches_completed_source,
+        )
 
         # Try to get existing torrent (local cache or tracker)
         logger.info(f"[{repo_id}] Checking for existing torrent...")
         torrent_data = resolve_torrent_data(repo_id, revision, tracker_client, repo_type=repo_type)
+        if torrent_data and not torrent_matches_completed_source(
+            repo_id,
+            revision,
+            torrent_data,
+            repo_type=repo_type,
+            cache_dir=cache_dir,
+            local_dir=local_dir,
+        ):
+            logger.warning(
+                f"[{repo_id}] Ignoring cached/downloaded torrent because it does not match the verified source"
+            )
+            delete_cached_torrent(repo_id, revision, repo_type=repo_type)
+            torrent_data = None
 
         if not torrent_data:
             # No torrent exists anywhere — we need to create it

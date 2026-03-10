@@ -519,6 +519,9 @@ class TestMapAllFilesForSeeding:
         ctx.handle.force_recheck.assert_not_called()
         # Hardlink paths should be tracked for cleanup
         assert len(ctx.seeding_hardlinks) == 2
+        assert ctx.seeding_mapped_files == 2
+        assert ctx.seeding_total_files == 2
+        assert ctx.full_mapping is True
 
     def test_padding_file_handling(self, make_ctx, mock_lt, tmp_path):
         """Padding files (.pad/) should create zero-filled files at the expected lt path."""
@@ -546,9 +549,12 @@ class TestMapAllFilesForSeeding:
         # seed_mode should still be enabled
         ctx.handle.set_flags.assert_called_once_with(mock_lt.torrent_flags.seed_mode)
         ctx.handle.force_recheck.assert_not_called()
+        assert ctx.seeding_mapped_files == 0
+        assert ctx.seeding_total_files == 0
+        assert ctx.full_mapping is True
 
     def test_cache_miss_continues(self, make_ctx, mock_lt):
-        """Files not in HF cache should be skipped but not fail."""
+        """Files not in HF cache should prevent seed_mode."""
         ctx = make_ctx()
         ctx.handle = MagicMock()
         ctx.temp_dir = "/tmp/p2p_root"
@@ -567,13 +573,16 @@ class TestMapAllFilesForSeeding:
              patch('huggingface_hub.try_to_load_from_cache', return_value=None):
             result = ctx.map_all_files_for_seeding()
 
-        assert result is True
+        assert result is False
         # No hardlinks or rename_file for cache-missed files
         ctx.handle.rename_file.assert_not_called()
-        # seed_mode and resume should still be called
-        ctx.handle.set_flags.assert_called_once_with(mock_lt.torrent_flags.seed_mode)
-        ctx.handle.resume.assert_called_once()
+        # seed_mode must not be enabled for partial mappings
+        ctx.handle.set_flags.assert_not_called()
+        ctx.handle.resume.assert_not_called()
         ctx.handle.force_recheck.assert_not_called()
+        assert ctx.seeding_mapped_files == 0
+        assert ctx.seeding_total_files == 1
+        assert ctx.full_mapping is False
 
     def test_cross_filesystem_fallback(self, make_ctx, mock_lt):
         """When hardlink fails (OSError), should fall back to legacy rename_file + force_recheck."""
@@ -611,6 +620,9 @@ class TestMapAllFilesForSeeding:
         ctx.handle.force_recheck.assert_called_once()
         # seed_mode should NOT have been set
         ctx.handle.set_flags.assert_not_called()
+        assert ctx.seeding_mapped_files == 1
+        assert ctx.seeding_total_files == 1
+        assert ctx.full_mapping is True
 
     def test_cleanup_seeding_hardlinks(self, make_ctx, tmp_path):
         """_cleanup_seeding_hardlinks should remove tracked hardlink files."""

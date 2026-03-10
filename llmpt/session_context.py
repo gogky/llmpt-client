@@ -88,6 +88,10 @@ class SessionContext:
         self._acc_webseed_download: int = 0
         self._acc_total_payload_download: int = 0
         self._acc_peak_p2p_peers: int = 0
+        self.seeding_mapped_files: int = 0
+        self.seeding_total_files: int = 0
+        self.full_mapping: bool = False
+        self.seeding_hardlinks = []
 
     def _init_torrent(self, initial_filename: str = None) -> bool:
         """Initialize the libtorrent handle if not already done."""
@@ -635,9 +639,19 @@ class SessionContext:
             hardlink_files_for_seeding,
             rename_files_for_seeding,
             cleanup_hardlinks,
+            is_padding_file,
         )
 
         logger.info(f"[{self.repo_id}] Mapping all files for background seeding...")
+        files = self.torrent_info_obj.files()
+        required_count = 0
+        for file_index in range(files.num_files()):
+            lt_path = files.file_path(file_index).replace('\\', '/')
+            if not is_padding_file(strip_torrent_root(lt_path)):
+                required_count += 1
+        self.seeding_total_files = required_count
+        self.seeding_mapped_files = 0
+        self.full_mapping = False
 
         try:
             hardlinks, mapped_count = hardlink_files_for_seeding(
@@ -645,12 +659,21 @@ class SessionContext:
                 repo_type=self.repo_type, cache_dir=self.cache_dir, local_dir=self.local_dir
             )
             self.seeding_hardlinks = hardlinks
+            self.seeding_mapped_files = mapped_count
 
-            files = self.torrent_info_obj.files()
-            logger.info(f"[{self.repo_id}] Hardlinked {mapped_count}/{files.num_files()} files for seeding.")
+            logger.info(f"[{self.repo_id}] Hardlinked {mapped_count}/{required_count} required files for seeding.")
+            if mapped_count != required_count:
+                logger.warning(
+                    f"[{self.repo_id}] Refusing seed_mode: mapped "
+                    f"{mapped_count}/{required_count} required files."
+                )
+                cleanup_hardlinks(self.repo_id, self.seeding_hardlinks)
+                self.seeding_hardlinks = []
+                return False
 
             self.handle.set_flags(lt.torrent_flags.seed_mode)
             self.handle.resume()
+            self.full_mapping = True
             logger.info(f"[{self.repo_id}] Seeding started with seed_mode (0s startup, lazy verification).")
             return True
 
@@ -660,11 +683,19 @@ class SessionContext:
             cleanup_hardlinks(self.repo_id, getattr(self, 'seeding_hardlinks', []))
             self.seeding_hardlinks = []
 
-            rename_files_for_seeding(
+            mapped_count = rename_files_for_seeding(
                 self.handle, self.torrent_info_obj,
                 self.temp_dir, self.repo_id, self.revision,
                 repo_type=self.repo_type, cache_dir=self.cache_dir, local_dir=self.local_dir
             )
+            self.seeding_mapped_files = mapped_count
+            if mapped_count != required_count:
+                logger.warning(
+                    f"[{self.repo_id}] Refusing partial legacy mapping: "
+                    f"{mapped_count}/{required_count} required files."
+                )
+                return False
+            self.full_mapping = True
             return True
 
     def _cleanup_seeding_hardlinks(self):

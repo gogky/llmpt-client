@@ -182,6 +182,54 @@ class TestCreateTorrent:
 
         assert result is None
 
+    @patch('llmpt.torrent_creator.lt')
+    @patch('llmpt.torrent_creator.LIBTORRENT_AVAILABLE', True)
+    def test_stale_cached_torrent_is_deleted_and_regenerated(self, mock_lt, tmp_path):
+        """A cached torrent that does not match the completed manifest must be ignored."""
+        from llmpt.torrent_creator import create_torrent
+
+        snap_dir = tmp_path / "snapshot_abc123"
+        snap_dir.mkdir()
+        (snap_dir / "config.json").write_text('{"key": "value"}')
+        (snap_dir / "model.bin").write_bytes(b'\x00' * 1000)
+
+        mock_fs = MagicMock()
+        mock_fs.total_size.return_value = 1014
+        mock_lt.file_storage.return_value = mock_fs
+
+        mock_torrent_obj = MagicMock()
+        mock_torrent_obj.generate.return_value = {'info': 'data'}
+        mock_lt.create_torrent.return_value = mock_torrent_obj
+
+        mock_files = MagicMock()
+        mock_files.num_files.return_value = 2
+        mock_files.file_path.side_effect = lambda i: [
+            "snapshot_abc123/config.json",
+            "snapshot_abc123/model.bin",
+        ][i]
+        mock_files.file_size.side_effect = lambda i: [14, 1000][i]
+
+        mock_info = MagicMock()
+        mock_info.info_hash.return_value = "abcdef1234567890"
+        mock_info.num_pieces.return_value = 1
+        mock_info.num_files.return_value = 2
+        mock_info.files.return_value = mock_files
+        mock_lt.torrent_info.return_value = mock_info
+        mock_lt.bencode.return_value = b'bencoded_torrent'
+
+        with patch('huggingface_hub.snapshot_download', return_value=str(snap_dir)), \
+             patch('llmpt.torrent_cache.resolve_torrent_data', return_value=b'stale_torrent'), \
+             patch('llmpt.torrent_creator.torrent_matches_completed_source', return_value=False), \
+             patch('llmpt.torrent_cache.delete_cached_torrent') as mock_delete, \
+             patch('llmpt.torrent_cache.save_torrent_to_cache'):
+            tracker = MagicMock()
+            tracker.tracker_url = "http://tracker.example.com"
+            result = create_torrent("test/repo", "main", tracker)
+
+        assert result is not None
+        mock_delete.assert_called_once_with("test/repo", "main", repo_type="model")
+        mock_lt.create_torrent.assert_called_once()
+
 
 # ─── create_and_register_torrent ──────────────────────────────────────────────
 
@@ -202,9 +250,10 @@ class TestCreateAndRegisterTorrent:
         assert result is None
 
     @patch('llmpt.torrent_creator.create_torrent')
-    def test_registration_fails_returns_none(self, mock_create):
+    def test_registration_fails_returns_none(self, mock_create, tmp_path):
         """If tracker.register_torrent fails, should return None."""
         from llmpt.torrent_creator import create_and_register_torrent
+        from llmpt.torrent_state import get_torrent_state
 
         mock_create.return_value = {
             'info_hash': 'abc',
@@ -218,15 +267,24 @@ class TestCreateAndRegisterTorrent:
         tracker.tracker_url = "http://tracker.example.com"
         tracker.register_torrent.return_value = False
 
-        result = create_and_register_torrent(
-            "test/repo", "main", "model", "Test Model", tracker
-        )
+        with patch("llmpt.torrent_state.TORRENT_STATE_FILE", str(tmp_path / "torrent_state_fail.json")):
+            result = create_and_register_torrent(
+                "test/repo", "main", "model", "Test Model", tracker
+            )
+            state = get_torrent_state(
+                "test/repo",
+                "main",
+                tracker_url="http://tracker.example.com",
+            )
         assert result is None
+        assert state["tracker_registered"] is False
+        assert state["last_registration_error"] == "register_failed"
 
     @patch('llmpt.torrent_creator.create_torrent')
-    def test_successful_creation_and_registration(self, mock_create):
+    def test_successful_creation_and_registration(self, mock_create, tmp_path):
         """Full success: create_torrent returns info, register_torrent returns True."""
         from llmpt.torrent_creator import create_and_register_torrent
+        from llmpt.torrent_state import get_torrent_state
 
         torrent_info = {
             'info_hash': 'abc',
@@ -247,11 +305,18 @@ class TestCreateAndRegisterTorrent:
         tracker.tracker_url = "http://tracker.example.com"
         tracker.register_torrent.return_value = True
 
-        result = create_and_register_torrent(
-            "test/repo", "main", "model", "Test Model", tracker
-        )
+        with patch("llmpt.torrent_state.TORRENT_STATE_FILE", str(tmp_path / "torrent_state_success.json")):
+            result = create_and_register_torrent(
+                "test/repo", "main", "model", "Test Model", tracker
+            )
+            state = get_torrent_state(
+                "test/repo",
+                "main",
+                tracker_url="http://tracker.example.com",
+            )
 
         assert result is torrent_info
+        assert state["tracker_registered"] is True
         tracker.register_torrent.assert_called_once_with(
             repo_id="test/repo",
             revision="main",
@@ -268,6 +333,43 @@ class TestCreateAndRegisterTorrent:
                 {'path': 'model-00002.bin', 'size': 2450},
             ],
         )
+
+
+class TestEnsureRegistered:
+    def test_records_failed_registration_state(self, tmp_path):
+        from llmpt.torrent_creator import ensure_registered
+        from llmpt.torrent_state import get_torrent_state
+
+        tracker = MagicMock()
+        tracker.tracker_url = "http://tracker.example.com"
+        tracker.get_torrent_info.return_value = None
+        tracker.register_torrent.return_value = False
+
+        with patch("llmpt.torrent_state.TORRENT_STATE_FILE", str(tmp_path / "torrent_state.json")), \
+             patch("llmpt.torrent_creator._torrent_data_to_result", return_value={
+                 "info_hash": "abc",
+                 "file_size": 1000,
+                 "piece_length": 262144,
+                 "num_files": 1,
+                 "files": [{"path": "model.bin", "size": 1000}],
+                 "commit_hash": "a" * 40,
+             }):
+            result = ensure_registered(
+                "test/repo",
+                "a" * 40,
+                "model",
+                b"torrent",
+                tracker,
+            )
+            state = get_torrent_state(
+                "test/repo",
+                "a" * 40,
+                tracker_url="http://tracker.example.com",
+            )
+
+        assert result is False
+        assert state["tracker_registered"] is False
+        assert state["last_registration_error"] == "register_failed"
 
     @patch('llmpt.torrent_creator.create_torrent')
     def test_registration_passes_storage_args(self, mock_create):

@@ -8,7 +8,7 @@ individual command functions with all external dependencies mocked.
 import pytest
 from unittest.mock import patch, MagicMock
 
-from llmpt.cli import main, cmd_download, cmd_unseed
+from llmpt.cli import main, cmd_download, cmd_scan, cmd_unseed
 
 # ─── main() argument parsing & dispatch ───────────────────────────────────────
 
@@ -85,6 +85,14 @@ class TestMainDispatch:
             main()
         args = mock_cmd.call_args[0][0]
         assert args.port == 7001
+
+    @patch('llmpt.cli.cmd_scan')
+    def test_scan_command(self, mock_cmd):
+        with patch('sys.argv', ['llmpt-cli', 'scan']):
+            main()
+        mock_cmd.assert_called_once()
+        args = mock_cmd.call_args[0][0]
+        assert args.command == 'scan'
 
 
 # ─── cmd_download ─────────────────────────────────────────────────────────────
@@ -209,3 +217,15 @@ class TestCmdUnseed:
             cmd_unseed(args)
 
         assert exc_info.value.code == 1
+
+
+class TestCmdScan:
+
+    @patch('llmpt.ipc.query_daemon', return_value={'status': 'ok', 'message': 'scan triggered'})
+    @patch('llmpt.daemon.is_daemon_running', return_value=12345)
+    def test_scan_success(self, mock_is_running, mock_query):
+        args = MagicMock()
+
+        cmd_scan(args)
+
+        mock_query.assert_called_once_with('scan')

@@ -29,6 +29,8 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from .completed_registry import load_completed_sources, save_completed_sources
+
 logger = logging.getLogger("llmpt.cache_scanner")
 
 # Default HF cache directory.
@@ -381,83 +383,131 @@ def _local_dir_matches_revision(local_dir: str, revision: str) -> bool:
     return False
 
 
-def scan_seedable_sources() -> List[SeedableSource]:
-    """Scan default/custom hub caches plus registered local_dir sources."""
-    seedable = _scan_hf_cache_root(None)
-    registry = _load_storage_registry()
+def _local_dir_manifest_matches(local_dir: str, revision: str, manifest: List[str]) -> bool:
+    """Return True when every manifest file exists with matching metadata."""
+    if not manifest:
+        return False
 
-    seen_hub_roots = {_normalize_path(HF_HUB_CACHE)}
-    seen_hub_roots.update(
-        _normalize_path(source.storage_root)
-        for source in seedable
-        if source.storage_kind == "hub_cache"
-    )
+    metadata_root = Path(local_dir) / ".cache" / "huggingface" / "download"
+    if not metadata_root.exists():
+        return False
 
-    # Track which registry entries are still valid for pruning.
-    live_hub_roots: List[dict] = []
-    for item in registry["hub_cache_roots"]:
-        root = item.get("root")
-        if not root:
+    valid_files = set()
+    for metadata_path in metadata_root.rglob("*.metadata"):
+        try:
+            with metadata_path.open("r") as f:
+                commit_hash = f.readline().strip()
+            if commit_hash != revision:
+                continue
+            relative = metadata_path.relative_to(metadata_root).with_suffix("")
+            file_relative = relative.as_posix()
+            if (Path(local_dir) / relative).exists():
+                valid_files.add(file_relative)
+        except OSError:
             continue
-        normalized_root = _normalize_path(root)
-        if not os.path.isdir(normalized_root):
-            logger.info(f"Pruning stale hub_cache_root from registry: {root}")
-            continue
-        live_hub_roots.append(item)
-        if normalized_root in seen_hub_roots:
-            continue
-        seen_hub_roots.add(normalized_root)
-        seedable.extend(_scan_hf_cache_root(normalized_root))
 
-    seen_local_sources = set()
-    live_local_sources: List[dict] = []
-    for item in registry["local_dir_sources"]:
-        local_dir = item["local_dir"]
-        source_key = (
-            item["repo_type"],
-            item["repo_id"],
-            item["revision"],
-            local_dir,
+    return all(path in valid_files for path in manifest)
+
+
+def _validate_completed_entry(item: dict) -> Optional[SeedableSource]:
+    repo_type = item.get("repo_type", "model")
+    repo_id = item.get("repo_id")
+    revision = item.get("revision")
+    storage_kind = item.get("storage_kind")
+    storage_root = item.get("storage_root")
+    manifest = item.get("manifest") or []
+
+    if not (repo_id and revision and storage_kind and storage_root and manifest):
+        return None
+
+    if storage_kind == "hub_cache":
+        cache_dir = _normalize_path(item.get("cache_dir") or storage_root)
+        if not os.path.isdir(cache_dir):
+            return None
+
+        try:
+            from huggingface_hub import try_to_load_from_cache
+        except ImportError:
+            return None
+
+        lookup_repo_type = repo_type if repo_type != "model" else None
+        for filename in manifest:
+            resolved = try_to_load_from_cache(
+                repo_id=repo_id,
+                filename=filename,
+                revision=revision,
+                repo_type=lookup_repo_type,
+                cache_dir=cache_dir,
+            )
+            if not resolved or not os.path.exists(resolved):
+                logger.info(
+                    f"Completed source missing cached file, pruning: "
+                    f"{repo_id}@{revision[:8]}... ({filename})"
+                )
+                return None
+
+        return SeedableSource(
+            repo_type=repo_type,
+            repo_id=repo_id,
+            revision=revision,
+            storage_kind="hub_cache",
+            storage_root=cache_dir,
+            cache_dir=cache_dir,
         )
-        if source_key in seen_local_sources:
-            continue
-        seen_local_sources.add(source_key)
+
+    if storage_kind == "local_dir":
+        local_dir = _normalize_path(item.get("local_dir") or storage_root)
         if not os.path.isdir(local_dir):
-            logger.info(f"Pruning stale local_dir from registry: {local_dir}")
-            continue
-        if not _local_dir_matches_revision(local_dir, item["revision"]):
+            return None
+        if not _local_dir_manifest_matches(local_dir, revision, manifest):
             logger.info(
-                f"Pruning stale local_dir from registry (revision mismatch): "
-                f"{item['repo_id']}@{item['revision'][:8]}... in {local_dir}"
+                f"Completed local_dir source no longer matches manifest, pruning: "
+                f"{repo_id}@{revision[:8]}... in {local_dir}"
             )
+            return None
+
+        return SeedableSource(
+            repo_type=repo_type,
+            repo_id=repo_id,
+            revision=revision,
+            storage_kind="local_dir",
+            storage_root=local_dir,
+            local_dir=local_dir,
+        )
+
+    return None
+
+
+def scan_seedable_sources() -> List[SeedableSource]:
+    """Return only completed-and-still-valid sources eligible for auto-seeding."""
+    seedable: List[SeedableSource] = []
+    live_entries: List[dict] = []
+    seen = set()
+    entries = load_completed_sources()
+
+    for item in entries:
+        key = (
+            item.get("repo_type", "model"),
+            item.get("repo_id"),
+            item.get("revision"),
+            item.get("storage_kind"),
+            item.get("storage_root"),
+        )
+        if key in seen:
             continue
-        live_local_sources.append(item)
-        seedable.append(
-            SeedableSource(
-                repo_type=item["repo_type"],
-                repo_id=item["repo_id"],
-                revision=item["revision"],
-                storage_kind="local_dir",
-                storage_root=local_dir,
-                local_dir=local_dir,
-            )
-        )
+        seen.add(key)
+        source = _validate_completed_entry(item)
+        if source is None:
+            continue
+        live_entries.append(item)
+        seedable.append(source)
 
-    # Prune stale entries from the registry (atomic write).
-    if (
-        len(live_hub_roots) != len(registry["hub_cache_roots"])
-        or len(live_local_sources) != len(registry["local_dir_sources"])
-    ):
-        pruned = (
-            len(registry["hub_cache_roots"]) - len(live_hub_roots)
-            + len(registry["local_dir_sources"]) - len(live_local_sources)
-        )
-        logger.info(f"Pruned {pruned} stale entries from storage registry")
-        _save_storage_registry(
-            {"hub_cache_roots": live_hub_roots, "local_dir_sources": live_local_sources}
-        )
+    if len(live_entries) != len(entries):
+        pruned = len(entries) - len(live_entries)
+        logger.info(f"Pruned {pruned} stale entries from completed source registry")
+        save_completed_sources(live_entries)
 
-    logger.info(f"Scan complete: {len(seedable)} seedable sources found")
+    logger.info(f"Scan complete: {len(seedable)} verified seedable sources found")
     return seedable
 
 

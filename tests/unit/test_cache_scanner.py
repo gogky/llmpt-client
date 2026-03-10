@@ -9,10 +9,12 @@ from pathlib import Path
 from llmpt.cache_scanner import (
     _parse_repo_id,
     _is_snapshot_complete,
-    forget_seedable_storage,
-    register_seedable_storage,
     scan_seedable_sources,
     scan_hf_cache,
+)
+from llmpt.completed_registry import (
+    forget_completed_source,
+    register_completed_source,
 )
 
 
@@ -206,8 +208,8 @@ class TestRegisteredSeedableSources:
                     file_path.parent.mkdir(parents=True, exist_ok=True)
                     file_path.write_text("content")
 
-    def test_registered_custom_hub_cache_is_scanned(self, tmp_path, monkeypatch):
-        registry_file = tmp_path / "known_storage.json"
+    def test_registered_completed_hub_cache_is_scanned(self, tmp_path, monkeypatch):
+        registry_file = tmp_path / "completed_sources.json"
         custom_cache = tmp_path / "custom-hub"
         commit = "a" * 40
         self._create_mock_cache(
@@ -215,13 +217,17 @@ class TestRegisteredSeedableSources:
             {"models--gpt2": {commit: ["config.json", "model.bin"]}},
         )
 
-        monkeypatch.setattr("llmpt.cache_scanner.KNOWN_STORAGE_FILE", str(registry_file))
-        register_seedable_storage(
+        monkeypatch.setattr("llmpt.completed_registry.COMPLETED_SOURCES_FILE", str(registry_file))
+        register_completed_source(
             repo_id="gpt2",
             revision=commit,
             cache_dir=str(custom_cache),
         )
 
+        def fake_try_to_load_from_cache(repo_id, filename, cache_dir=None, revision=None, repo_type=None):
+            return str(custom_cache / "models--gpt2" / "snapshots" / commit / filename)
+
+        monkeypatch.setattr("huggingface_hub.try_to_load_from_cache", fake_try_to_load_from_cache)
         result = scan_seedable_sources()
         assert any(
             item.repo_id == "gpt2"
@@ -230,8 +236,8 @@ class TestRegisteredSeedableSources:
             for item in result
         )
 
-    def test_registered_local_dir_is_scanned(self, tmp_path, monkeypatch):
-        registry_file = tmp_path / "known_storage.json"
+    def test_registered_completed_local_dir_is_scanned(self, tmp_path, monkeypatch):
+        registry_file = tmp_path / "completed_sources.json"
         local_dir = tmp_path / "local-model"
         commit = "b" * 40
         model_file = local_dir / "weights.bin"
@@ -247,8 +253,8 @@ class TestRegisteredSeedableSources:
         metadata_path.parent.mkdir(parents=True, exist_ok=True)
         metadata_path.write_text(f"{commit}\netag\n123.0\n")
 
-        monkeypatch.setattr("llmpt.cache_scanner.KNOWN_STORAGE_FILE", str(registry_file))
-        register_seedable_storage(
+        monkeypatch.setattr("llmpt.completed_registry.COMPLETED_SOURCES_FILE", str(registry_file))
+        register_completed_source(
             repo_id="org/model",
             revision=commit,
             repo_type="model",
@@ -264,47 +270,74 @@ class TestRegisteredSeedableSources:
         )
 
 
-class TestForgetSeedableStorage:
+class TestForgetCompletedSource:
+    def _create_mock_cache(self, base: Path, models: dict):
+        for dir_name, revisions in models.items():
+            model_dir = base / dir_name / "snapshots"
+            model_dir.mkdir(parents=True)
+            for revision, files in revisions.items():
+                snap = model_dir / revision
+                snap.mkdir()
+                for f in files:
+                    file_path = snap / f
+                    file_path.parent.mkdir(parents=True, exist_ok=True)
+                    file_path.write_text("content")
+
     def test_forget_custom_hub_cache_root(self, tmp_path, monkeypatch):
-        registry_file = tmp_path / "known_storage.json"
+        registry_file = tmp_path / "completed_sources.json"
         custom_cache = tmp_path / "custom-hub"
-        custom_cache.mkdir()
+        commit = "a" * 40
+        self._create_mock_cache(
+            custom_cache,
+            {"models--gpt2": {commit: ["config.json"]}},
+        )
 
-        monkeypatch.setattr("llmpt.cache_scanner.KNOWN_STORAGE_FILE", str(registry_file))
-        monkeypatch.setattr("llmpt.cache_scanner.HF_HUB_CACHE", str(tmp_path / "default-hub"))
-        register_seedable_storage(
+        monkeypatch.setattr("llmpt.completed_registry.COMPLETED_SOURCES_FILE", str(registry_file))
+        register_completed_source(
             repo_id="gpt2",
-            revision="a" * 40,
+            revision=commit,
             cache_dir=str(custom_cache),
         )
 
-        removed = forget_seedable_storage(
+        removed = forget_completed_source(
             repo_id="gpt2",
-            revision="a" * 40,
+            revision=commit,
             cache_dir=str(custom_cache),
         )
 
-        assert removed == {"hub_cache_roots_removed": 1, "local_dir_sources_removed": 0}
+        assert removed == 1
         assert scan_seedable_sources() == []
 
     def test_forget_local_dir_entry(self, tmp_path, monkeypatch):
-        registry_file = tmp_path / "known_storage.json"
+        registry_file = tmp_path / "completed_sources.json"
         local_dir = tmp_path / "local-model"
-        local_dir.mkdir()
+        commit = "b" * 40
+        model_file = local_dir / "weights.bin"
+        model_file.parent.mkdir(parents=True, exist_ok=True)
+        model_file.write_bytes(b"123")
+        metadata_path = (
+            local_dir
+            / ".cache"
+            / "huggingface"
+            / "download"
+            / "weights.bin.metadata"
+        )
+        metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        metadata_path.write_text(f"{commit}\netag\n123.0\n")
 
-        monkeypatch.setattr("llmpt.cache_scanner.KNOWN_STORAGE_FILE", str(registry_file))
-        register_seedable_storage(
+        monkeypatch.setattr("llmpt.completed_registry.COMPLETED_SOURCES_FILE", str(registry_file))
+        register_completed_source(
             repo_id="org/model",
-            revision="b" * 40,
+            revision=commit,
             repo_type="dataset",
             local_dir=str(local_dir),
         )
 
-        removed = forget_seedable_storage(
+        removed = forget_completed_source(
             repo_id="org/model",
-            revision="b" * 40,
+            revision=commit,
             repo_type="dataset",
             local_dir=str(local_dir),
         )
 
-        assert removed == {"hub_cache_roots_removed": 0, "local_dir_sources_removed": 1}
+        assert removed == 1

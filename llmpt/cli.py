@@ -24,6 +24,7 @@ Examples:
 
   # Manage the background seeding daemon
   llmpt-cli start
+  llmpt-cli scan
   llmpt-cli status
   llmpt-cli unseed gpt2
         """
@@ -117,6 +118,12 @@ Examples:
         help='Show background seeding status'
     )
 
+    # Scan command
+    scan_parser = subparsers.add_parser(
+        'scan',
+        help='Force an immediate cache rescan and import verification'
+    )
+
     # Unseed command
     unseed_parser = subparsers.add_parser(
         'unseed',
@@ -194,6 +201,8 @@ Examples:
         cmd_start(args)
     elif args.command == 'status':
         cmd_status(args)
+    elif args.command == 'scan':
+        cmd_scan(args)
     elif args.command == 'unseed':
         cmd_unseed(args)
     elif args.command == 'stop':
@@ -338,17 +347,55 @@ def cmd_status(args):
         print("  No active seeding tasks")
         return
 
-    print(f"\nSeeding {len(sessions)} model(s):\n")
+    print(f"\nActive seeding sessions: {len(sessions)}\n")
     for repo_key, info in sessions.items():
         uploaded = info.get('uploaded', 0)
         peers = info.get('peers', 0)
         rate = info.get('upload_rate', 0)
+        mapped_files = info.get('mapped_files')
+        total_files = info.get('total_files')
+        source_status = info.get('source_status', 'unknown')
+        torrent_status = info.get('torrent_status', 'unknown')
+        session_status = info.get('session_status', 'unknown')
+        state_summary = (
+            f"source:{source_status} │ "
+            f"torrent:{torrent_status} │ "
+            f"session:{session_status}"
+        )
+        mapping_suffix = ""
+        if total_files:
+            mapping_suffix = f" │ mapped {mapped_files}/{total_files}"
         print(
             f"  {repo_key:<45} "
             f"↑ {format_bytes(uploaded):>8}  │ "
             f"{peers} peers │ "
-            f"{format_bytes(rate)}/s"
+            f"{format_bytes(rate)}/s │ "
+            f"{state_summary}"
+            f"{mapping_suffix}"
         )
+
+
+def cmd_scan(args):
+    """Execute scan command."""
+    from llmpt.daemon import is_daemon_running
+    from llmpt.ipc import query_daemon
+
+    pid = is_daemon_running()
+    if not pid:
+        print("Daemon is not running")
+        print("  Start with: llmpt-cli start")
+        return
+
+    response = query_daemon("scan")
+    if not response:
+        print(f"Daemon running (PID: {pid}) but not responding to IPC")
+        return
+
+    if response.get("status") != "ok":
+        print(f"Error: {response.get('message', 'scan failed')}")
+        sys.exit(1)
+
+    print("✓ Cache rescan triggered")
 
 
 def cmd_unseed(args):

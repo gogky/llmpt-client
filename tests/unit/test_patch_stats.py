@@ -459,3 +459,46 @@ class TestPatchedSnapshotDownload:
 
         assert len(RecordingTqdm.instances) == 1
         assert RecordingTqdm.instances[0].postfixes == []
+
+    def test_skips_daemon_notification_without_transfers(self):
+        """Pure cache hits must not auto-register a completed snapshot."""
+        patch_module._config = {'verbose': False}
+        patch_module._original_snapshot_download = MagicMock(return_value="/tmp/model")
+
+        with patch('llmpt.utils.resolve_commit_hash', return_value='a' * 40), \
+             patch('llmpt.patch._notify_seed_daemon') as mock_notify:
+            result = _patched_snapshot_download(
+                repo_id="test/repo",
+                revision="main",
+            )
+
+        assert result == "/tmp/model"
+        mock_notify.assert_not_called()
+
+    def test_notifies_daemon_for_transferred_snapshot(self):
+        """A snapshot that transferred files should mark the source complete."""
+        patch_module._config = {'verbose': False}
+
+        def fake_snapshot_download(*args, **kwargs):
+            with patch_module._stats_lock:
+                patch_module._download_stats['http'].add("config.json")
+            return "/tmp/model"
+
+        patch_module._original_snapshot_download = MagicMock(side_effect=fake_snapshot_download)
+
+        with patch('llmpt.utils.resolve_commit_hash', return_value='a' * 40), \
+             patch('llmpt.patch._notify_seed_daemon') as mock_notify:
+            result = _patched_snapshot_download(
+                repo_id="test/repo",
+                revision="main",
+            )
+
+        assert result == "/tmp/model"
+        mock_notify.assert_called_once_with(
+            repo_id="test/repo",
+            revision='a' * 40,
+            repo_type="model",
+            cache_dir=None,
+            local_dir=None,
+            completed_snapshot=True,
+        )

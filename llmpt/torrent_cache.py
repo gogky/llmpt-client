@@ -57,6 +57,12 @@ def load_cached_torrent(repo_id: str, revision: str, *, repo_type: str = "model"
         with open(path, "rb") as f:
             data = f.read()
         if data:
+            try:
+                from .torrent_state import mark_local_torrent
+
+                mark_local_torrent(repo_id, revision, repo_type=repo_type, present=True)
+            except Exception:
+                pass
             logger.info(
                 f"[{repo_id}] Torrent loaded from local cache "
                 f"({len(data)} bytes)"
@@ -85,6 +91,12 @@ def save_torrent_to_cache(
         with open(tmp_path, "wb") as f:
             f.write(torrent_data)
         os.replace(tmp_path, path)  # atomic on POSIX
+        try:
+            from .torrent_state import mark_local_torrent
+
+            mark_local_torrent(repo_id, revision, repo_type=repo_type, present=True)
+        except Exception:
+            pass
         logger.debug(
             f"[{repo_id}] Torrent cached locally ({len(torrent_data)} bytes)"
         )
@@ -95,6 +107,29 @@ def save_torrent_to_cache(
             os.unlink(tmp_path)
         except OSError:
             pass
+
+
+def delete_cached_torrent(
+    repo_id: str, revision: str, *, repo_type: str = "model"
+) -> bool:
+    """Remove a cached .torrent file if present."""
+    path = _cache_path(repo_id, revision, repo_type)
+    removed = False
+    try:
+        if os.path.exists(path):
+            os.unlink(path)
+            removed = True
+    except OSError as exc:
+        logger.warning(f"[{repo_id}] Failed to delete cached torrent: {exc}")
+        return False
+
+    try:
+        from .torrent_state import mark_local_torrent
+
+        mark_local_torrent(repo_id, revision, repo_type=repo_type, present=False)
+    except Exception:
+        pass
+    return removed
 
 
 def resolve_torrent_data(
@@ -124,6 +159,18 @@ def resolve_torrent_data(
             f"[{repo_id}] Torrent downloaded from tracker, caching locally"
         )
         save_torrent_to_cache(repo_id, revision, torrent_data, repo_type=repo_type)
+        try:
+            from .torrent_state import mark_tracker_registration
+
+            mark_tracker_registration(
+                repo_id,
+                revision,
+                repo_type=repo_type,
+                tracker_url=tracker_client.tracker_url,
+                registered=True,
+            )
+        except Exception:
+            pass
         return torrent_data
 
     # Layer 3: not found
