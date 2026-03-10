@@ -7,7 +7,7 @@ This test verifies the complete cold-start scenario:
   3. Node B downloads the same model — this time via P2P from Node A
 
 This is the most critical E2E test: it proves that the P2P network
-can bootstrap itself without any manual `llmpt-cli seed` intervention.
+can bootstrap itself without any manual foreground seeding step.
 
 Run via Docker Compose:
     docker compose -f docker-compose.test-daemon.yml up --build

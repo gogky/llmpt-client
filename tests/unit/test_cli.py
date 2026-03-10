@@ -8,7 +8,7 @@ individual command functions with all external dependencies mocked.
 import pytest
 from unittest.mock import patch, MagicMock
 
-from llmpt.cli import main, cmd_download, cmd_seed, cmd_unseed
+from llmpt.cli import main, cmd_download, cmd_unseed
 
 # ─── main() argument parsing & dispatch ───────────────────────────────────────
 
@@ -50,16 +50,11 @@ class TestMainDispatch:
         assert args.hf_token == 'hf_test'
         assert args.webseed is False
 
-    @patch('llmpt.cli.cmd_seed')
-    def test_seed_command(self, mock_cmd):
+    def test_seed_command_is_rejected(self):
         with patch('sys.argv', ['llmpt-cli', 'seed', '--repo-id', 'gpt2', '--revision', 'main']):
-            main()
-        mock_cmd.assert_called_once()
-        args = mock_cmd.call_args[0][0]
-        assert args.repo_id == 'gpt2'
-        assert args.revision == 'main'
-        assert args.repo_type == 'model'  # default
-        assert args.name == 'HF Model'  # default
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 2
 
     @patch('llmpt.cli.cmd_unseed')
     def test_unseed_command(self, mock_cmd):
@@ -214,57 +209,3 @@ class TestCmdUnseed:
             cmd_unseed(args)
 
         assert exc_info.value.code == 1
-
-# ─── cmd_seed ─────────────────────────────────────────────────────────────────
-
-class TestCmdSeed:
-
-    @patch('llmpt.cli.start_seeding', create=True)
-    @patch('llmpt.cli.create_and_register_torrent', create=True)
-    @patch('llmpt.cli.TrackerClient', create=True)
-    @patch('llmpt.utils.resolve_commit_hash', side_effect=lambda repo, rev, repo_type='model': rev)
-    def test_seed_creation_failure(self, mock_resolve, MockTracker, mock_create, mock_start):
-        """If create_and_register_torrent fails (returns None), should exit(1)."""
-        mock_create.return_value = None
-
-        args = MagicMock()
-        args.tracker = 'http://tracker.example.com'
-        args.repo_id = 'gpt2'
-        args.revision = 'main'
-        args.repo_type = 'model'
-        args.name = 'GPT2'
-
-        with patch('llmpt.torrent_creator.create_and_register_torrent', mock_create), \
-             patch('llmpt.tracker_client.TrackerClient', MockTracker), \
-             patch('llmpt.seeder.start_seeding', mock_start):
-            with pytest.raises(SystemExit) as exc_info:
-                cmd_seed(args)
-            assert exc_info.value.code == 1
-
-    @patch('time.sleep', side_effect=KeyboardInterrupt)
-    @patch('llmpt.cli.start_seeding', create=True)
-    @patch('llmpt.cli.create_and_register_torrent', create=True)
-    @patch('llmpt.cli.TrackerClient', create=True)
-    @patch('llmpt.utils.resolve_commit_hash', side_effect=lambda repo, rev, repo_type='model': rev)
-    def test_seed_success_and_ctrl_c(self, mock_resolve, MockTracker, mock_create, mock_start, mock_sleep):
-        """Successful seed should pass torrent_data through and loop until KeyboardInterrupt."""
-        mock_create.return_value = {
-            'info_hash': 'abc123',
-            'torrent_data': b'fake_torrent_bytes',
-        }
-
-        args = MagicMock()
-        args.tracker = 'http://tracker.example.com'
-        args.repo_id = 'gpt2'
-        args.revision = 'main'
-        args.repo_type = 'model'
-        args.name = 'GPT2'
-
-        with patch('llmpt.torrent_creator.create_and_register_torrent', mock_create), \
-             patch('llmpt.tracker_client.TrackerClient', MockTracker), \
-             patch('llmpt.seeder.start_seeding', mock_start):
-            cmd_seed(args)  # Should not raise, KeyboardInterrupt is caught
-
-        mock_start.assert_called_once()
-        # Verify torrent_data is passed through to start_seeding
-        assert mock_start.call_args.kwargs.get('torrent_data') == b'fake_torrent_bytes'

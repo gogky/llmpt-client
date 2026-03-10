@@ -1,7 +1,7 @@
 """
 Seeder entry point using the daemon architecture.
 
-Instead of the old `cmd_seed()` approach (which blocked the terminal),
+Instead of the removed foreground seeding CLI,
 this uses the daemon to:
   1. Download the repo via HuggingFace HTTP (populates local cache)
   2. Start the daemon, which scans the cache and creates torrents

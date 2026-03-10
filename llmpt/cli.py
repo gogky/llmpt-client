@@ -22,9 +22,6 @@ Examples:
   # Download with custom tracker
   llmpt-cli download gpt2 --tracker http://tracker.example.com
 
-  # Create and seed a torrent (foreground)
-  llmpt-cli seed /path/to/model.bin --repo-id gpt2 --filename model.bin
-
   # Manage the background seeding daemon
   llmpt-cli start
   llmpt-cli status
@@ -95,32 +92,6 @@ Examples:
         dest='webseed',
         action='store_false',
         help='Disable WebSeed fallback'
-    )
-
-    # Seed command
-    seed_parser = subparsers.add_parser(
-        'seed',
-        help='Create torrent and start seeding'
-    )
-    seed_parser.add_argument(
-        '--repo-id',
-        required=True,
-        help='Repository ID'
-    )
-    seed_parser.add_argument(
-        '--revision',
-        required=True,
-        help='Git commit hash or branch name'
-    )
-    seed_parser.add_argument(
-        '--repo-type',
-        default='model',
-        help='Repository type'
-    )
-    seed_parser.add_argument(
-        '--name',
-        default='HF Model',
-        help='Display name'
     )
 
     # Start command
@@ -219,8 +190,6 @@ Examples:
     # Execute command
     if args.command == 'download':
         cmd_download(args)
-    elif args.command == 'seed':
-        cmd_seed(args)
     elif args.command == 'start':
         cmd_start(args)
     elif args.command == 'status':
@@ -265,65 +234,6 @@ def cmd_download(args):
     )
 
     print(f"✓ Downloaded to: {path}")
-
-
-def cmd_seed(args):
-    """Execute seed command."""
-    from llmpt.tracker_client import TrackerClient
-    from llmpt.torrent_creator import create_and_register_torrent
-    from llmpt.seeder import start_seeding
-    from llmpt.utils import resolve_commit_hash
-
-    tracker = TrackerClient(_resolve_tracker_url(args.tracker))
-
-    # Resolve revision (e.g. "main") to a 40-char commit hash so the tracker
-    # entry is always keyed by the immutable commit identifier.
-    raw_revision = args.revision
-    try:
-        revision = resolve_commit_hash(
-            args.repo_id, raw_revision, repo_type=args.repo_type
-        )
-    except Exception as e:
-        print(f"Error: Could not resolve revision '{raw_revision}': {e}")
-        sys.exit(1)
-
-    if revision != raw_revision:
-        print(f"Resolved revision: {raw_revision} → {revision}")
-
-    print(f"Resolving caching structure and creating torrent for {args.repo_id}@{revision}...")
-
-    # Create and register torrent
-    torrent_info = create_and_register_torrent(
-        repo_id=args.repo_id,
-        revision=revision,
-        repo_type=args.repo_type,
-        name=args.name,
-        tracker_client=tracker,
-    )
-
-    if not torrent_info:
-        print("Error: Failed to create or register torrent.")
-        print("Hint: Make sure the model is already downloaded locally:")
-        print(f"  llmpt-cli download {args.repo_id}")
-        sys.exit(1)
-
-    print("✓ Torrent created and registered")
-    print("Starting background seeding engine (press Ctrl+C to stop)...")
-
-    # Start unified seeding natively in P2PBatch
-    start_seeding(
-        repo_id=args.repo_id,
-        revision=revision,
-        tracker_client=tracker,
-        torrent_data=torrent_info.get('torrent_data'),
-    )
-    
-    try:
-        while True:
-            import time
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("\n✓ Seeding stopped")
 
 
 
