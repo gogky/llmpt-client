@@ -28,6 +28,7 @@ Examples:
   # Manage the background seeding daemon
   llmpt-cli start
   llmpt-cli status
+  llmpt-cli unseed gpt2
         """
     )
 
@@ -145,6 +146,32 @@ Examples:
         help='Show background seeding status'
     )
 
+    # Unseed command
+    unseed_parser = subparsers.add_parser(
+        'unseed',
+        help='Stop seeding a specific active daemon session'
+    )
+    unseed_parser.add_argument(
+        'repo_id',
+        help='Repository ID'
+    )
+    unseed_parser.add_argument(
+        '--revision',
+        default=None,
+        help='Git commit hash or branch name'
+    )
+    unseed_parser.add_argument(
+        '--repo-type',
+        default=None,
+        choices=['model', 'dataset', 'space'],
+        help='Optional repository type filter (only needed if repo_id is ambiguous)'
+    )
+    unseed_parser.add_argument(
+        '--forget',
+        action='store_true',
+        help='Also forget the matched custom storage entry from known_storage.json'
+    )
+
     # Stop command
     stop_parser = subparsers.add_parser(
         'stop',
@@ -198,6 +225,8 @@ Examples:
         cmd_start(args)
     elif args.command == 'status':
         cmd_status(args)
+    elif args.command == 'unseed':
+        cmd_unseed(args)
     elif args.command == 'stop':
         cmd_stop(args)
     elif args.command == 'restart':
@@ -409,6 +438,57 @@ def cmd_status(args):
             f"↑ {format_bytes(uploaded):>8}  │ "
             f"{peers} peers │ "
             f"{format_bytes(rate)}/s"
+        )
+
+
+def cmd_unseed(args):
+    """Execute unseed command."""
+    from llmpt.daemon import is_daemon_running
+    from llmpt.ipc import query_daemon
+    from llmpt.utils import resolve_commit_hash
+
+    pid = is_daemon_running()
+    if not pid:
+        print("Daemon is not running")
+        print("  Start with: llmpt-cli start")
+        return
+
+    revision = None
+    if args.revision is not None:
+        raw_revision = args.revision
+        try:
+            revision = resolve_commit_hash(
+                args.repo_id, raw_revision, repo_type=args.repo_type or "model"
+            )
+        except Exception:
+            revision = raw_revision
+
+        if revision != raw_revision:
+            print(f"Resolved revision: {raw_revision} → {revision}")
+
+    response = query_daemon(
+        "unseed",
+        repo_id=args.repo_id,
+        revision=revision,
+        repo_type=args.repo_type,
+        forget=args.forget,
+    )
+    if not response:
+        print(f"Daemon running (PID: {pid}) but not responding to IPC")
+        return
+
+    if response.get("status") != "ok":
+        print(f"Error: {response.get('message', 'unseed failed')}")
+        sys.exit(1)
+
+    removed_count = response.get("removed_count", 0)
+    forgotten = response.get("forgotten", {})
+    print(f"✓ Removed {removed_count} active seeding session(s)")
+    if args.forget:
+        print(
+            "  Forgot registry entries: "
+            f"hub_cache_roots={forgotten.get('hub_cache_roots_removed', 0)}, "
+            f"local_dir_sources={forgotten.get('local_dir_sources_removed', 0)}"
         )
 
 

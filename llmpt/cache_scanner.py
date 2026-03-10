@@ -189,6 +189,61 @@ def register_seedable_storage(
         )
 
 
+def forget_seedable_storage(
+    repo_id: str,
+    revision: str,
+    *,
+    repo_type: str = "model",
+    cache_dir: Optional[str] = None,
+    local_dir: Optional[str] = None,
+) -> Dict[str, int]:
+    """Remove persisted custom storage entries used for daemon cold starts.
+
+    Returns:
+        Dict with counts for removed registry entries:
+        ``{"hub_cache_roots_removed": int, "local_dir_sources_removed": int}``
+    """
+    removed = {"hub_cache_roots_removed": 0, "local_dir_sources_removed": 0}
+    if not cache_dir and not local_dir:
+        return removed
+
+    try:
+        registry = _load_storage_registry()
+
+        if cache_dir:
+            normalized_cache_dir = _normalize_path(cache_dir)
+            kept_roots = []
+            for item in registry["hub_cache_roots"]:
+                if item.get("root") == normalized_cache_dir:
+                    removed["hub_cache_roots_removed"] += 1
+                    continue
+                kept_roots.append(item)
+            registry["hub_cache_roots"] = kept_roots
+
+        if local_dir:
+            normalized_local_dir = _normalize_path(local_dir)
+            kept_local_sources = []
+            for item in registry["local_dir_sources"]:
+                if (
+                    item.get("repo_type") == (repo_type or "model")
+                    and item.get("repo_id") == repo_id
+                    and item.get("revision") == revision
+                    and item.get("local_dir") == normalized_local_dir
+                ):
+                    removed["local_dir_sources_removed"] += 1
+                    continue
+                kept_local_sources.append(item)
+            registry["local_dir_sources"] = kept_local_sources
+
+        _save_storage_registry(registry)
+    except Exception as e:
+        logger.warning(
+            f"Failed to forget seedable storage for {repo_id}@{revision}: {e}"
+        )
+
+    return removed
+
+
 def _parse_repo_id(dirname: str) -> Optional[str]:
     """Convert a HuggingFace cache directory name to a repo_id.
 

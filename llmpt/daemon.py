@@ -125,6 +125,7 @@ def _reconcile_seeding_sessions(
     manager,
     seeding_set: Set[SeedSessionKey],
     failed_attempts: Dict[SeedSessionKey, Dict[str, object]],
+    suppressed_set: Set[SeedSessionKey],
     seedable,
 ) -> Set[SeedSessionKey]:
     """Remove sessions that no longer correspond to a live seedable source."""
@@ -149,7 +150,126 @@ def _reconcile_seeding_sessions(
         finally:
             seeding_set.discard(stale_key)
             failed_attempts.pop(stale_key, None)
+    suppressed_set.intersection_update(discovered_keys)
     return discovered_keys
+
+
+def _matching_seeding_keys(
+    seeding_set: Set[SeedSessionKey],
+    *,
+    repo_type: Optional[str],
+    repo_id: str,
+    revision: Optional[str] = None,
+) -> list[SeedSessionKey]:
+    """Find active seeding sessions matching the given repo identity."""
+    matches = []
+    for key in seeding_set:
+        key_repo_type, key_repo_id, key_revision, _storage_kind, _storage_root = key
+        if key_repo_id != repo_id:
+            continue
+        if repo_type is not None and key_repo_type != repo_type:
+            continue
+        if revision is not None and key_revision != revision:
+            continue
+        matches.append(key)
+    return matches
+
+
+def _unseed_matching_sessions(
+    manager,
+    seeding_set: Set[SeedSessionKey],
+    failed_attempts: Dict[SeedSessionKey, Dict[str, object]],
+    suppressed_set: Set[SeedSessionKey],
+    *,
+    repo_type: Optional[str],
+    repo_id: str,
+    revision: Optional[str] = None,
+    forget: bool = False,
+) -> dict:
+    """Stop active seeding sessions and optionally forget custom storage."""
+    matches = _matching_seeding_keys(
+        seeding_set,
+        repo_type=repo_type,
+        repo_id=repo_id,
+        revision=revision,
+    )
+    if not matches:
+        return {
+            "status": "error",
+            "message": "no matching active seeding session",
+            "removed_count": 0,
+            "forgotten": {
+                "hub_cache_roots_removed": 0,
+                "local_dir_sources_removed": 0,
+            },
+        }
+
+    matched_repo_types = sorted({key[0] for key in matches})
+    if repo_type is None and len(matched_repo_types) > 1:
+        return {
+            "status": "error",
+            "message": (
+                "multiple repo types match this repo_id; "
+                f"please specify --repo-type ({', '.join(matched_repo_types)})"
+            ),
+            "removed_count": 0,
+            "forgotten": {
+                "hub_cache_roots_removed": 0,
+                "local_dir_sources_removed": 0,
+            },
+        }
+
+    forgotten = {
+        "hub_cache_roots_removed": 0,
+        "local_dir_sources_removed": 0,
+    }
+    removed_sessions = []
+
+    for key in matches:
+        match_repo_type, match_repo_id, match_revision, storage_kind, storage_root = key
+        cache_dir = storage_root if storage_kind == "hub_cache" and storage_root else None
+        local_dir = storage_root if storage_kind == "local_dir" else None
+
+        manager.remove_session(
+            match_repo_id,
+            match_revision,
+            repo_type=match_repo_type,
+            cache_dir=cache_dir,
+            local_dir=local_dir,
+        )
+        seeding_set.discard(key)
+        failed_attempts.pop(key, None)
+        suppressed_set.add(key)
+
+        if forget and (cache_dir or local_dir):
+            from llmpt.cache_scanner import forget_seedable_storage
+
+            counts = forget_seedable_storage(
+                repo_id=match_repo_id,
+                revision=match_revision,
+                repo_type=match_repo_type,
+                cache_dir=cache_dir,
+                local_dir=local_dir,
+            )
+            forgotten["hub_cache_roots_removed"] += counts["hub_cache_roots_removed"]
+            forgotten["local_dir_sources_removed"] += counts["local_dir_sources_removed"]
+
+        removed_sessions.append(
+            {
+                "repo_type": match_repo_type,
+                "repo_id": match_repo_id,
+                "revision": match_revision,
+                "storage_kind": storage_kind,
+                "storage_root": storage_root,
+            }
+        )
+
+    return {
+        "status": "ok",
+        "removed_count": len(removed_sessions),
+        "removed_sessions": removed_sessions,
+        "forgotten": forgotten,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +434,7 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
 
     # Track what we're already seeding to avoid duplicate work
     seeding_set: Set[SeedSessionKey] = set()
+    suppressed_set: Set[SeedSessionKey] = set()
     # Failed seed attempts with retry/backoff metadata.
     # key -> {"attempts": int, "next_retry_ts": float, "last_error": str}
     failed_attempts: Dict[SeedSessionKey, Dict[str, object]] = {}
@@ -351,6 +472,7 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
                     logger.info(f"IPC: seed request for {repo_id}@{revision[:8]}...")
                     # Explicit seed requests should not wait for backoff.
                     failed_attempts.pop(key, None)
+                    suppressed_set.discard(key)
                     
                     from llmpt.cache_scanner import register_seedable_storage
                     register_seedable_storage(
@@ -373,7 +495,7 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
                 from llmpt.cache_scanner import scan_seedable_sources
                 seedable = scan_seedable_sources()
                 _reconcile_seeding_sessions(
-                    manager, seeding_set, failed_attempts, seedable
+                    manager, seeding_set, failed_attempts, suppressed_set, seedable
                 )
             except Exception as e:
                 logger.warning(f"Failed to reconcile seeding sessions before status: {e}")
@@ -431,6 +553,24 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
             last_scan_time = 0.0
             return {"status": "ok", "message": "scan triggered"}
 
+        elif action == "unseed":
+            repo_id = msg.get("repo_id")
+            revision = msg.get("revision")
+            repo_type = msg.get("repo_type")
+            forget = bool(msg.get("forget"))
+            if not repo_id:
+                return {"status": "error", "message": "repo_id required"}
+            return _unseed_matching_sessions(
+                manager,
+                seeding_set,
+                failed_attempts,
+                suppressed_set,
+                repo_type=repo_type,
+                repo_id=repo_id,
+                revision=revision,
+                forget=forget,
+            )
+
         elif action == "ping":
             return {"status": "ok", "pid": os.getpid()}
 
@@ -466,7 +606,8 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
             if now - last_scan_time >= SCAN_INTERVAL:
                 last_scan_time = now
                 _scan_and_seed(
-                    tracker_client, manager, seeding_set, failed_attempts
+                    tracker_client, manager, seeding_set, failed_attempts,
+                    suppressed_set,
                 )
 
             time.sleep(1)
@@ -529,6 +670,7 @@ def _scan_and_seed(
     manager,
     seeding_set: Set[SeedSessionKey],
     failed_attempts: Dict[SeedSessionKey, Dict[str, object]],
+    suppressed_set: Set[SeedSessionKey],
 ) -> None:
     """Scan HF cache and start seeding any new models found."""
     from llmpt.cache_scanner import scan_seedable_sources
@@ -554,6 +696,8 @@ def _scan_and_seed(
         )
         if key in seeding_set:
             continue
+        if key in suppressed_set:
+            continue
 
         failure = failed_attempts.get(key)
         if failure is not None:
@@ -570,7 +714,9 @@ def _scan_and_seed(
 
     if new_count > 0:
         logger.info(f"Scan processed {new_count} new models")
-    _reconcile_seeding_sessions(manager, seeding_set, failed_attempts, seedable)
+    _reconcile_seeding_sessions(
+        manager, seeding_set, failed_attempts, suppressed_set, seedable
+    )
 
 
 def _record_seed_failure(

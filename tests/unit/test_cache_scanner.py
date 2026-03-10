@@ -9,6 +9,7 @@ from pathlib import Path
 from llmpt.cache_scanner import (
     _parse_repo_id,
     _is_snapshot_complete,
+    forget_seedable_storage,
     register_seedable_storage,
     scan_seedable_sources,
     scan_hf_cache,
@@ -261,3 +262,49 @@ class TestRegisteredSeedableSources:
             and item.local_dir == str(local_dir.resolve())
             for item in result
         )
+
+
+class TestForgetSeedableStorage:
+    def test_forget_custom_hub_cache_root(self, tmp_path, monkeypatch):
+        registry_file = tmp_path / "known_storage.json"
+        custom_cache = tmp_path / "custom-hub"
+        custom_cache.mkdir()
+
+        monkeypatch.setattr("llmpt.cache_scanner.KNOWN_STORAGE_FILE", str(registry_file))
+        monkeypatch.setattr("llmpt.cache_scanner.HF_HUB_CACHE", str(tmp_path / "default-hub"))
+        register_seedable_storage(
+            repo_id="gpt2",
+            revision="a" * 40,
+            cache_dir=str(custom_cache),
+        )
+
+        removed = forget_seedable_storage(
+            repo_id="gpt2",
+            revision="a" * 40,
+            cache_dir=str(custom_cache),
+        )
+
+        assert removed == {"hub_cache_roots_removed": 1, "local_dir_sources_removed": 0}
+        assert scan_seedable_sources() == []
+
+    def test_forget_local_dir_entry(self, tmp_path, monkeypatch):
+        registry_file = tmp_path / "known_storage.json"
+        local_dir = tmp_path / "local-model"
+        local_dir.mkdir()
+
+        monkeypatch.setattr("llmpt.cache_scanner.KNOWN_STORAGE_FILE", str(registry_file))
+        register_seedable_storage(
+            repo_id="org/model",
+            revision="b" * 40,
+            repo_type="dataset",
+            local_dir=str(local_dir),
+        )
+
+        removed = forget_seedable_storage(
+            repo_id="org/model",
+            revision="b" * 40,
+            repo_type="dataset",
+            local_dir=str(local_dir),
+        )
+
+        assert removed == {"hub_cache_roots_removed": 0, "local_dir_sources_removed": 1}

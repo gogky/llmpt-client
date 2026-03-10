@@ -104,6 +104,7 @@ llmpt-cli download gpt2 --tracker http://your-tracker-server  # 指定 tracker
 llmpt-cli start                                               # 启动后台做种守护进程
 llmpt-cli start --tracker http://your-tracker-server          # 指定 tracker
 llmpt-cli status                                              # 查看做种状态
+llmpt-cli unseed gpt2                                         # 停止该做种条目
 llmpt-cli stop                                                # 停止守护进程
 llmpt-cli restart                                             # 重启
 
@@ -142,6 +143,25 @@ $  # ← 立刻返回，终端可以关掉
 ```bash
 llmpt-cli stop
 ```
+
+如果只想停掉某个具体条目的做种，而不影响 daemon 中其他任务，可以使用：
+
+```bash
+llmpt-cli unseed gpt2
+```
+
+可选参数：
+
+- `--revision <commit-or-branch>`：只停止某个具体 revision
+- `--repo-type model|dataset|space`：只有同名 repo_id 同时出现在多种 repo_type 时才需要
+- `--forget`：额外删除 `known_storage.json` 中对应的自定义存储恢复记录
+
+其中 `--forget` 的语义是：
+
+- 对匹配到的 `local_dir` session：删除对应的恢复记录
+- 对匹配到的自定义 `cache_dir` session：删除对应的 hub cache root 恢复记录
+
+默认 HF cache 不受 `--forget` 影响，因为 daemon 会始终扫描默认 HF cache。
 
 ## 配置
 

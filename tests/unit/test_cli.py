@@ -8,7 +8,7 @@ individual command functions with all external dependencies mocked.
 import pytest
 from unittest.mock import patch, MagicMock
 
-from llmpt.cli import main, cmd_download, cmd_seed
+from llmpt.cli import main, cmd_download, cmd_seed, cmd_unseed
 
 # ─── main() argument parsing & dispatch ───────────────────────────────────────
 
@@ -60,6 +60,20 @@ class TestMainDispatch:
         assert args.revision == 'main'
         assert args.repo_type == 'model'  # default
         assert args.name == 'HF Model'  # default
+
+    @patch('llmpt.cli.cmd_unseed')
+    def test_unseed_command(self, mock_cmd):
+        with patch('sys.argv', [
+            'llmpt-cli', 'unseed',
+            'gpt2',
+            '--forget',
+        ]):
+            main()
+        args = mock_cmd.call_args[0][0]
+        assert args.repo_id == 'gpt2'
+        assert args.revision is None
+        assert args.repo_type is None
+        assert args.forget is True
 
 
 
@@ -135,6 +149,72 @@ class TestCmdStart:
             foreground=False,
         )
 
+
+class TestCmdUnseed:
+
+    @patch('llmpt.utils.resolve_commit_hash', side_effect=lambda repo, rev, repo_type='model': rev)
+    @patch('llmpt.ipc.query_daemon', return_value={
+        'status': 'ok',
+        'removed_count': 1,
+        'forgotten': {'hub_cache_roots_removed': 1, 'local_dir_sources_removed': 0},
+    })
+    @patch('llmpt.daemon.is_daemon_running', return_value=12345)
+    def test_unseed_success(self, mock_is_running, mock_query, mock_resolve):
+        args = MagicMock()
+        args.repo_id = 'gpt2'
+        args.revision = None
+        args.repo_type = None
+        args.forget = True
+
+        cmd_unseed(args)
+
+        mock_query.assert_called_once_with(
+            'unseed',
+            repo_id='gpt2',
+            revision=None,
+            repo_type=None,
+            forget=True,
+        )
+
+    @patch('llmpt.utils.resolve_commit_hash', side_effect=RuntimeError('network down'))
+    @patch('llmpt.ipc.query_daemon', return_value={
+        'status': 'ok',
+        'removed_count': 1,
+        'forgotten': {'hub_cache_roots_removed': 0, 'local_dir_sources_removed': 0},
+    })
+    @patch('llmpt.daemon.is_daemon_running', return_value=12345)
+    def test_unseed_falls_back_to_raw_revision_when_resolution_fails(self, mock_is_running, mock_query, mock_resolve):
+        args = MagicMock()
+        args.repo_id = 'gpt2'
+        args.revision = 'main'
+        args.repo_type = None
+        args.forget = False
+
+        cmd_unseed(args)
+
+        mock_query.assert_called_once_with(
+            'unseed',
+            repo_id='gpt2',
+            revision='main',
+            repo_type=None,
+            forget=False,
+        )
+
+    @patch('llmpt.utils.resolve_commit_hash', side_effect=lambda repo, rev, repo_type='model': rev)
+    @patch('llmpt.ipc.query_daemon', return_value={'status': 'error', 'message': 'no matching active seeding session'})
+    @patch('llmpt.daemon.is_daemon_running', return_value=12345)
+    def test_unseed_error_exits(self, mock_is_running, mock_query, mock_resolve):
+        args = MagicMock()
+        args.repo_id = 'gpt2'
+        args.revision = 'main'
+        args.repo_type = None
+        args.forget = False
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_unseed(args)
+
+        assert exc_info.value.code == 1
+
 # ─── cmd_seed ─────────────────────────────────────────────────────────────────
 
 class TestCmdSeed:
@@ -188,4 +268,3 @@ class TestCmdSeed:
         mock_start.assert_called_once()
         # Verify torrent_data is passed through to start_seeding
         assert mock_start.call_args.kwargs.get('torrent_data') == b'fake_torrent_bytes'
-
