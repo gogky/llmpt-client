@@ -38,6 +38,8 @@ RETRY_BASE_DELAY = 60   # first retry after 60s
 RETRY_MAX_DELAY = 3600  # cap backoff at 1h
 RETRY_JITTER_RATIO = 0.10
 
+SeedSessionKey = Tuple[str, str, str, str, str]
+
 
 # ---------------------------------------------------------------------------
 # PID file management
@@ -75,6 +77,79 @@ def _is_process_running(pid: int) -> bool:
         return True
     except (OSError, ProcessLookupError):
         return False
+
+
+def _normalize_storage_path(path: str) -> str:
+    """Normalize a storage path for stable in-memory session keys."""
+    return os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+
+
+def _seeding_key(
+    repo_type: str,
+    repo_id: str,
+    revision: str,
+    *,
+    cache_dir: Optional[str] = None,
+    local_dir: Optional[str] = None,
+) -> SeedSessionKey:
+    """Return the daemon's canonical key for one seeding session."""
+    if local_dir:
+        storage_kind = "local_dir"
+        storage_root = _normalize_storage_path(local_dir)
+    elif cache_dir:
+        storage_kind = "hub_cache"
+        storage_root = _normalize_storage_path(cache_dir)
+    else:
+        storage_kind = "hub_cache"
+        storage_root = ""
+    return (repo_type, repo_id, revision, storage_kind, storage_root)
+
+
+def _discovered_seeding_keys(seedable) -> Set[SeedSessionKey]:
+    """Build daemon session keys for the current scan result."""
+    discovered_keys: Set[SeedSessionKey] = set()
+    for item in seedable:
+        discovered_keys.add(
+            _seeding_key(
+                item.repo_type,
+                item.repo_id,
+                item.revision,
+                cache_dir=item.cache_dir,
+                local_dir=item.local_dir,
+            )
+        )
+    return discovered_keys
+
+
+def _reconcile_seeding_sessions(
+    manager,
+    seeding_set: Set[SeedSessionKey],
+    failed_attempts: Dict[SeedSessionKey, Dict[str, object]],
+    seedable,
+) -> Set[SeedSessionKey]:
+    """Remove sessions that no longer correspond to a live seedable source."""
+    discovered_keys = _discovered_seeding_keys(seedable)
+    stale_keys = [key for key in seeding_set if key not in discovered_keys]
+    for stale_key in stale_keys:
+        repo_type, repo_id, revision, storage_kind, storage_root = stale_key
+        cache_dir = storage_root if storage_kind == "hub_cache" and storage_root else None
+        local_dir = storage_root if storage_kind == "local_dir" else None
+        logger.info(
+            f"[{repo_id}@{revision[:8]}] Removing stale seeding session "
+            f"({storage_kind}={storage_root or '<default>'})"
+        )
+        try:
+            manager.remove_session(
+                repo_id,
+                revision,
+                repo_type=repo_type,
+                cache_dir=cache_dir,
+                local_dir=local_dir,
+            )
+        finally:
+            seeding_set.discard(stale_key)
+            failed_attempts.pop(stale_key, None)
+    return discovered_keys
 
 
 # ---------------------------------------------------------------------------
@@ -238,10 +313,10 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
     manager = P2PBatchManager()
 
     # Track what we're already seeding to avoid duplicate work
-    seeding_set: Set[Tuple[str, str, str]] = set()
+    seeding_set: Set[SeedSessionKey] = set()
     # Failed seed attempts with retry/backoff metadata.
     # key -> {"attempts": int, "next_retry_ts": float, "last_error": str}
-    failed_attempts: Dict[Tuple[str, str, str], Dict[str, object]] = {}
+    failed_attempts: Dict[SeedSessionKey, Dict[str, object]] = {}
 
     running = True
 
@@ -265,7 +340,13 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
             cache_dir = msg.get("cache_dir")
             local_dir = msg.get("local_dir")
             if repo_id and revision:
-                key = (repo_type, repo_id, revision)
+                key = _seeding_key(
+                    repo_type,
+                    repo_id,
+                    revision,
+                    cache_dir=cache_dir,
+                    local_dir=local_dir,
+                )
                 if key not in seeding_set:
                     logger.info(f"IPC: seed request for {repo_id}@{revision[:8]}...")
                     # Explicit seed requests should not wait for backoff.
@@ -288,13 +369,21 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
                 return {"status": "ok"}
 
         elif action == "status":
+            try:
+                from llmpt.cache_scanner import scan_seedable_sources
+                seedable = scan_seedable_sources()
+                _reconcile_seeding_sessions(
+                    manager, seeding_set, failed_attempts, seedable
+                )
+            except Exception as e:
+                logger.warning(f"Failed to reconcile seeding sessions before status: {e}")
             status = manager.get_all_session_status()
             return {
                 "status": "ok",
                 "pid": os.getpid(),
                 "port": getattr(manager, 'listen_port', None),
                 "tracker_url": tracker_url,
-                "seeding_count": len(seeding_set),
+                "seeding_count": len(status),
                 "sessions": {
                     k: {
                         "progress": v.get("progress", 0),
@@ -438,8 +527,8 @@ def _rewrite_announce_url(torrent_data: bytes, tracker_url: str, repo_id: str) -
 def _scan_and_seed(
     tracker_client,
     manager,
-    seeding_set: Set[Tuple[str, str, str]],
-    failed_attempts: Dict[Tuple[str, str, str], Dict[str, object]],
+    seeding_set: Set[SeedSessionKey],
+    failed_attempts: Dict[SeedSessionKey, Dict[str, object]],
 ) -> None:
     """Scan HF cache and start seeding any new models found."""
     from llmpt.cache_scanner import scan_seedable_sources
@@ -447,6 +536,7 @@ def _scan_and_seed(
     seedable = scan_seedable_sources()
     new_count = 0
     now = time.time()
+    discovered_keys = _discovered_seeding_keys(seedable)
 
     for item in seedable:
         repo_type = item.repo_type
@@ -455,7 +545,13 @@ def _scan_and_seed(
         cache_dir = item.cache_dir
         local_dir = item.local_dir
 
-        key = (repo_type, repo_id, revision)
+        key = _seeding_key(
+            repo_type,
+            repo_id,
+            revision,
+            cache_dir=cache_dir,
+            local_dir=local_dir,
+        )
         if key in seeding_set:
             continue
 
@@ -474,11 +570,12 @@ def _scan_and_seed(
 
     if new_count > 0:
         logger.info(f"Scan processed {new_count} new models")
+    _reconcile_seeding_sessions(manager, seeding_set, failed_attempts, seedable)
 
 
 def _record_seed_failure(
-    key: Tuple[str, str, str],
-    failed_attempts: Dict[Tuple[str, str, str], Dict[str, object]],
+    key: SeedSessionKey,
+    failed_attempts: Dict[SeedSessionKey, Dict[str, object]],
     reason: str,
 ) -> None:
     """Record a failed seed attempt and compute its next retry deadline."""
@@ -493,7 +590,7 @@ def _record_seed_failure(
         "last_error": reason,
     }
 
-    _, repo_id, revision = key
+    _, repo_id, revision, _, _ = key
     wait_seconds = max(1, int(next_retry - time.time()))
     logger.warning(
         f"[{repo_id}@{revision[:8]}] Seeding attempt failed ({reason}). "
@@ -506,15 +603,21 @@ def _process_seedable(
     revision: str,
     tracker_client,
     manager,
-    seeding_set: Set[Tuple[str, str, str]],
-    failed_attempts: Dict[Tuple[str, str, str], Dict[str, object]],
+    seeding_set: Set[SeedSessionKey],
+    failed_attempts: Dict[SeedSessionKey, Dict[str, object]],
     *,
     repo_type: str = "model",
     cache_dir: Optional[str] = None,
     local_dir: Optional[str] = None,
 ) -> bool:
     """Process a single seedable model: create torrent if needed, start seeding."""
-    key = (repo_type, repo_id, revision)
+    key = _seeding_key(
+        repo_type,
+        repo_id,
+        revision,
+        cache_dir=cache_dir,
+        local_dir=local_dir,
+    )
 
     logger.info(f"[{repo_id}@{revision[:8]}] Processing seedable model...")
 

@@ -132,6 +132,7 @@ $  # ← 立刻返回，终端可以关掉
 - **自动扫描** `~/.cache/huggingface/hub/` 中所有完整的模型/数据集快照
 - **扫描自定义 cache_dir**：恢复已登记的自定义 Hub cache 根目录
 - **恢复 local_dir 做种**：基于本地 registry 和 `local_dir/.cache/huggingface/download/*.metadata` 重建做种任务
+- **回收失效 session**：当已登记的自定义存储内容被删除后，后续扫描会移除陈旧做种会话，避免 `status` 长期显示旧条目
 - **自动创建 torrent**：如果 tracker 上没有某模型的 torrent，自动创建并注册
 - **持续做种**：为所有已发现的模型/数据集提供 P2P 上传
 - **接收通知**：下载端下载完成后会通过 IPC 立即通知守护进程

@@ -45,6 +45,10 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 
+# manual tests
+manual_tests
+my_cache
+
 # Virtual environments
 venv/
 env/
@@ -71,4 +75,12 @@ API.md
 # Docker
 tests/integration/docker/hf_cache_downloader/
 tests/integration/docker/hf_cache_seeder/
+
+# docs
+docs/*
+!docs/architecture.md
+
+# daemon
+.daemon*
+
 
