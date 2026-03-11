@@ -825,6 +825,23 @@ def _scan_and_seed(
         manager, seeding_set, failed_attempts, suppressed_set, seedable
     )
 
+    try:
+        from .torrent_cache import cleanup_torrent_cache
+
+        protected = {
+            (item.repo_type, item.repo_id, item.revision)
+            for item in seedable
+        }
+        protected.update(
+            (repo_type, repo_id, revision)
+            for repo_type, repo_id, revision, _storage_kind, _storage_root in seeding_set
+        )
+        cleanup_summary = cleanup_torrent_cache(protected)
+        if any(cleanup_summary.values()):
+            logger.info(f"Torrent cache cleanup summary: {cleanup_summary}")
+    except Exception as e:
+        logger.warning(f"Torrent cache cleanup failed: {e}")
+
 
 def _record_seed_failure(
     key: SeedSessionKey,

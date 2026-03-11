@@ -34,7 +34,7 @@ def _build_local_dir_file_storage(
         return None, None
 
     source_root = Path(local_dir)
-    torrent_root = source_root.name
+    torrent_root = revision if _COMMIT_HASH_RE.match(revision or "") else source_root.name
     fs = lt.file_storage()
 
     for relative_path in manifest:
@@ -47,6 +47,23 @@ def _build_local_dir_file_storage(
         fs.add_file(f"{torrent_root}/{relative_path}", file_path.stat().st_size)
 
     return fs, str(source_root.parent)
+
+
+def _rewrite_torrent_root_name(
+    torrent: Any,
+    root_name: str,
+) -> bool:
+    """Rewrite the top-level name of a generated multi-file torrent."""
+    if not isinstance(torrent, dict):
+        return False
+
+    info = torrent.get(b"info")
+    if not isinstance(info, dict):
+        return False
+
+    encoded_name = str(root_name).encode("utf-8")
+    info[b"name"] = encoded_name
+    return True
 
 
 def _expected_completed_files(
@@ -120,6 +137,15 @@ def torrent_matches_completed_source(
     result = _torrent_data_to_result(torrent_data, repo_id)
     if result is None:
         return False
+
+    if local_dir and _COMMIT_HASH_RE.match(revision or ""):
+        actual_root = str(result.get("commit_hash", "") or "")
+        if actual_root != revision:
+            logger.warning(
+                f"[{repo_id}] Rejecting stale local_dir torrent: "
+                f"root name {actual_root!r} != revision {revision!r}"
+            )
+            return False
 
     expected_files = _expected_completed_files(
         repo_id,
@@ -369,7 +395,8 @@ def create_torrent(
 
         # Set creator and comment
         t.set_creator("llmpt-client")
-        t.set_comment(f"Created by llmpt for {file_path.name}")
+        comment_target = commit_hash if _COMMIT_HASH_RE.match(commit_hash or "") else file_path.name
+        t.set_comment(f"Created by llmpt for {comment_target}")
 
         # Generate piece hashes
         logger.info(f"Generating piece hashes for {file_path.name}...")
@@ -377,6 +404,13 @@ def create_torrent(
 
         # Generate torrent
         torrent = t.generate()
+        if local_dir is not None and _COMMIT_HASH_RE.match(commit_hash or ""):
+            if not _rewrite_torrent_root_name(torrent, commit_hash):
+                logger.error(
+                    f"[{repo_id}] Failed to rewrite generated local_dir torrent root "
+                    f"to revision {commit_hash}"
+                )
+                return None
         torrent_data = lt.bencode(torrent)
 
         # Cache the generated torrent for future use

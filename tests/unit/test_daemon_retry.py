@@ -423,6 +423,57 @@ def test_scan_and_seed_runs_cache_import_before_seeding(monkeypatch):
     assert calls == ["import"]
 
 
+def test_scan_and_seed_runs_torrent_cache_cleanup(monkeypatch):
+    import llmpt.daemon as daemon
+
+    from llmpt.cache_scanner import SeedableSource
+
+    source = SeedableSource(
+        repo_type="model",
+        repo_id="org/live",
+        revision="9" * 40,
+        storage_kind="hub_cache",
+        storage_root="/tmp/cache-live",
+        cache_dir="/tmp/cache-live",
+    )
+    monkeypatch.setattr("llmpt.cache_scanner.scan_seedable_sources", lambda: [source])
+    monkeypatch.setattr(
+        "llmpt.cache_importer.import_verified_cache_sources",
+        lambda: {
+            "imported": 0,
+            "skipped_completed": 0,
+            "skipped_backoff": 0,
+            "blocked": 0,
+            "partial": 0,
+            "error": 0,
+        },
+    )
+    monkeypatch.setattr(daemon, "_process_seedable", lambda *args, **kwargs: True)
+
+    cleanup_calls = []
+
+    def fake_cleanup(protected):
+        cleanup_calls.append(set(protected))
+        return {
+            "removed_torrents": 1,
+            "removed_tmp_files": 0,
+            "kept_torrents": 1,
+            "skipped_unparsed": 0,
+            "errors": 0,
+        }
+
+    monkeypatch.setattr("llmpt.torrent_cache.cleanup_torrent_cache", fake_cleanup)
+
+    seeding_set = {
+        ("model", "org/live", "9" * 40, "hub_cache", "/tmp/cache-live")
+    }
+    daemon._scan_and_seed(None, None, seeding_set, {}, set())
+
+    assert cleanup_calls == [
+        {("model", "org/live", "9" * 40)}
+    ]
+
+
 def test_reconcile_keeps_only_live_suppressed_keys():
     import llmpt.daemon as daemon
 

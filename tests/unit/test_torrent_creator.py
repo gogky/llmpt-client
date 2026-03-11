@@ -129,14 +129,25 @@ class TestCreateTorrent:
         mock_lt.file_storage.return_value = mock_fs
 
         mock_torrent_obj = MagicMock()
-        mock_torrent_obj.generate.return_value = {'info': 'data'}
+        mock_torrent_obj.generate.return_value = {
+            b'info': {
+                b'name': local_dir.name.encode(),
+                b'files': [
+                    {b'length': 16, b'path': [b'config.json']},
+                    {b'length': 1000, b'path': [b'model.bin']},
+                ],
+                b'piece length': 262144,
+                b'pieces': b'0' * 20,
+            }
+        }
         mock_lt.create_torrent.return_value = mock_torrent_obj
 
+        revision = "a" * 40
         mock_files = MagicMock()
         mock_files.num_files.return_value = 2
         mock_files.file_path.side_effect = lambda i: [
-            "local_dir/config.json",
-            "local_dir/model.bin",
+            f"{revision}/config.json",
+            f"{revision}/model.bin",
         ][i]
         mock_files.file_size.side_effect = lambda i: [14, 1000][i]
 
@@ -148,7 +159,6 @@ class TestCreateTorrent:
         mock_lt.torrent_info.return_value = mock_info
         mock_lt.bencode.return_value = b'bencoded_torrent'
 
-        revision = "a" * 40
         with patch('huggingface_hub.snapshot_download', return_value=str(local_dir)) as mock_snapshot_download, \
              patch('llmpt.completed_registry.get_completed_manifest', return_value=["config.json", "model.bin"]), \
              patch('llmpt.torrent_cache.resolve_torrent_data', return_value=None), \
@@ -169,8 +179,8 @@ class TestCreateTorrent:
             local_dir=str(local_dir),
         )
         mock_lt.add_files.assert_not_called()
-        mock_fs.add_file.assert_any_call("local_dir/config.json", 16)
-        mock_fs.add_file.assert_any_call("local_dir/model.bin", 1000)
+        mock_fs.add_file.assert_any_call(f"{revision}/config.json", 16)
+        mock_fs.add_file.assert_any_call(f"{revision}/model.bin", 1000)
         assert mock_fs.add_file.call_count == 2
         mock_lt.set_piece_hashes.assert_called_once_with(mock_torrent_obj, str(local_dir.parent))
 
@@ -204,6 +214,70 @@ class TestCreateTorrent:
 
         assert result is not None
         assert result["commit_hash"] == "a" * 40
+
+    @patch('llmpt.torrent_creator.lt')
+    @patch('llmpt.torrent_creator.LIBTORRENT_AVAILABLE', True)
+    def test_stale_cached_local_dir_torrent_root_is_deleted_and_regenerated(self, mock_lt, tmp_path):
+        """Old local_dir torrents rooted at the folder name must be regenerated."""
+        from llmpt.torrent_creator import create_torrent
+
+        revision = "a" * 40
+        local_dir = tmp_path / "my_cache"
+        local_dir.mkdir()
+        (local_dir / "config.json").write_text('{"key": "value"}')
+
+        mock_fs = MagicMock()
+        mock_fs.total_size.return_value = 16
+        mock_lt.file_storage.return_value = mock_fs
+
+        mock_torrent_obj = MagicMock()
+        mock_torrent_obj.generate.return_value = {
+            b'info': {
+                b'name': b'my_cache',
+                b'files': [{b'length': 16, b'path': [b'config.json']}],
+                b'piece length': 262144,
+                b'pieces': b'0' * 20,
+            }
+        }
+        mock_lt.create_torrent.return_value = mock_torrent_obj
+
+        mock_files = MagicMock()
+        mock_files.num_files.return_value = 1
+        mock_files.file_path.return_value = f"{revision}/config.json"
+        mock_files.file_size.return_value = 16
+
+        mock_info = MagicMock()
+        mock_info.info_hash.return_value = "abcdef1234567890"
+        mock_info.num_pieces.return_value = 1
+        mock_info.num_files.return_value = 1
+        mock_info.files.return_value = mock_files
+        mock_lt.torrent_info.return_value = mock_info
+        mock_lt.bencode.return_value = b'bencoded_torrent'
+
+        with patch('huggingface_hub.snapshot_download', return_value=str(local_dir)), \
+             patch('llmpt.completed_registry.get_completed_manifest', return_value=["config.json"]), \
+             patch('llmpt.torrent_cache.resolve_torrent_data', return_value=b'stale_torrent'), \
+             patch('llmpt.torrent_creator._torrent_data_to_result', return_value={
+                 'info_hash': 'old',
+                 'file_size': 16,
+                 'piece_length': 262144,
+                 'num_pieces': 1,
+                 'num_files': 1,
+                 'torrent_data': b'stale_torrent',
+                 'commit_hash': 'my_cache',
+                 'files': [{'path': 'config.json', 'size': 16}],
+             }), \
+             patch('llmpt.torrent_cache.delete_cached_torrent') as mock_delete, \
+             patch('llmpt.torrent_cache.save_torrent_to_cache'):
+            tracker = MagicMock()
+            tracker.tracker_url = "http://tracker.example.com"
+            result = create_torrent(
+                "test/repo", revision, tracker, local_dir=str(local_dir)
+            )
+
+        assert result is not None
+        mock_delete.assert_called_once_with("test/repo", revision, repo_type="model")
+        mock_lt.create_torrent.assert_called_once()
 
     @patch('llmpt.torrent_creator.lt')
     @patch('llmpt.torrent_creator.LIBTORRENT_AVAILABLE', True)

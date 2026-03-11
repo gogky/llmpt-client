@@ -216,3 +216,42 @@ class TestResolveTorrentData:
         # Filename should use underscore instead of slash
         cache_file = tmp_path / "model_org_model-name_abc123.torrent"
         assert cache_file.exists()
+
+
+class TestCleanupTorrentCache:
+
+    def test_cleanup_removes_unprotected_torrents_and_tmp_files(self, tmp_path):
+        from llmpt.torrent_cache import cleanup_torrent_cache
+        from llmpt.torrent_state import get_torrent_state, mark_local_torrent
+
+        keep_rev = "a" * 40
+        remove_rev = "b" * 40
+        keep_file = tmp_path / f"model_keep_repo_{keep_rev}.torrent"
+        remove_file = tmp_path / f"model_remove_repo_{remove_rev}.torrent"
+        tmp_file = tmp_path / "model_remove_repo_main.torrent.tmp"
+
+        keep_file.write_bytes(b"keep")
+        remove_file.write_bytes(b"remove")
+        tmp_file.write_bytes(b"")
+
+        state_file = tmp_path / "torrent_state.json"
+        with patch("llmpt.torrent_cache.TORRENT_CACHE_DIR", str(tmp_path)), \
+             patch("llmpt.torrent_state.TORRENT_STATE_FILE", str(state_file)):
+            mark_local_torrent("keep/repo", keep_rev, present=True)
+            mark_local_torrent("remove/repo", remove_rev, present=True)
+
+            summary = cleanup_torrent_cache(
+                {("model", "keep/repo", keep_rev)}
+            )
+
+            keep_state = get_torrent_state("keep/repo", keep_rev)
+            remove_state = get_torrent_state("remove/repo", remove_rev)
+
+        assert summary["kept_torrents"] == 1
+        assert summary["removed_torrents"] == 1
+        assert summary["removed_tmp_files"] == 1
+        assert keep_file.exists()
+        assert not remove_file.exists()
+        assert not tmp_file.exists()
+        assert keep_state["local_torrent_present"] is True
+        assert remove_state["local_torrent_present"] is False

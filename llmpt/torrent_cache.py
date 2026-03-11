@@ -23,7 +23,7 @@ half-written .torrent files from corrupting the cache.
 
 import logging
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Iterable, Optional
 
 if TYPE_CHECKING:
     from .tracker_client import TrackerClient
@@ -37,6 +37,38 @@ def _cache_path(repo_id: str, revision: str, repo_type: str = "model") -> str:
     """Return the filesystem path for a cached .torrent file."""
     safe_repo = f"{repo_type}_{repo_id.replace('/', '_')}"
     return os.path.join(TORRENT_CACHE_DIR, f"{safe_repo}_{revision}.torrent")
+
+
+def _safe_identity(repo_id: str, revision: str, repo_type: str = "model") -> tuple[str, str, str]:
+    """Return a filesystem-safe torrent cache identity."""
+    return (repo_type, repo_id.replace("/", "_"), revision)
+
+
+def _parse_cached_torrent_name(filename: str) -> Optional[tuple[str, str, str]]:
+    """Parse a cached torrent filename into ``(repo_type, safe_repo, revision)``."""
+    if not filename.endswith(".torrent"):
+        return None
+
+    stem = filename[: -len(".torrent")]
+    first_sep = stem.find("_")
+    if first_sep <= 0:
+        return None
+
+    repo_type = stem[:first_sep]
+    if repo_type not in {"model", "dataset", "space"}:
+        return None
+
+    remainder = stem[first_sep + 1 :]
+    last_sep = remainder.rfind("_")
+    if last_sep <= 0:
+        return None
+
+    safe_repo = remainder[:last_sep]
+    revision = remainder[last_sep + 1 :]
+    if not safe_repo or not revision:
+        return None
+
+    return repo_type, safe_repo, revision
 
 
 # ---------------------------------------------------------------------------
@@ -176,3 +208,98 @@ def resolve_torrent_data(
     # Layer 3: not found
     logger.info(f"[{repo_id}] No torrent found in cache or tracker")
     return None
+
+
+def cleanup_torrent_cache(
+    protected: Iterable[tuple[str, str, str]],
+) -> dict:
+    """Delete cached torrents that are not needed for active or verified sources.
+
+    Args:
+        protected: Iterable of ``(repo_type, repo_id, revision)`` identities that
+            must be retained. These typically come from active seeding sessions
+            and verified completed sources.
+
+    Returns:
+        Summary dict containing counts for removed/kept/skipped entries.
+    """
+    summary = {
+        "removed_torrents": 0,
+        "removed_tmp_files": 0,
+        "kept_torrents": 0,
+        "skipped_unparsed": 0,
+        "errors": 0,
+    }
+    if not os.path.isdir(TORRENT_CACHE_DIR):
+        return summary
+
+    protected_safe = {
+        _safe_identity(repo_id, revision, repo_type)
+        for repo_type, repo_id, revision in protected
+    }
+
+    state_entries = []
+    try:
+        from .torrent_state import load_all_torrent_states
+
+        state_entries = load_all_torrent_states()
+    except Exception as exc:
+        logger.warning(f"Failed to load torrent state for cache cleanup: {exc}")
+
+    state_map: dict[tuple[str, str, str], list[dict]] = {}
+    for entry in state_entries:
+        repo_type = entry.get("repo_type", "model")
+        repo_id = entry.get("repo_id")
+        revision = entry.get("revision")
+        if not repo_id or not revision:
+            continue
+        key = _safe_identity(repo_id, revision, repo_type)
+        state_map.setdefault(key, []).append(entry)
+
+    for filename in os.listdir(TORRENT_CACHE_DIR):
+        path = os.path.join(TORRENT_CACHE_DIR, filename)
+        if not os.path.isfile(path):
+            continue
+
+        if filename.endswith(".tmp"):
+            try:
+                os.unlink(path)
+                summary["removed_tmp_files"] += 1
+            except OSError as exc:
+                logger.warning(f"Failed to remove cached torrent temp file {filename}: {exc}")
+                summary["errors"] += 1
+            continue
+
+        parsed = _parse_cached_torrent_name(filename)
+        if parsed is None:
+            summary["skipped_unparsed"] += 1
+            continue
+
+        if parsed in protected_safe:
+            summary["kept_torrents"] += 1
+            continue
+
+        try:
+            os.unlink(path)
+            summary["removed_torrents"] += 1
+        except OSError as exc:
+            logger.warning(f"Failed to remove cached torrent {filename}: {exc}")
+            summary["errors"] += 1
+            continue
+
+        matched_entries = state_map.get(parsed, [])
+        if len(matched_entries) == 1:
+            try:
+                from .torrent_state import mark_local_torrent
+
+                entry = matched_entries[0]
+                mark_local_torrent(
+                    entry["repo_id"],
+                    entry["revision"],
+                    repo_type=entry.get("repo_type", "model"),
+                    present=False,
+                )
+            except Exception:
+                pass
+
+    return summary

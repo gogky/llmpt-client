@@ -135,3 +135,8 @@ def get_torrent_state(
             entry.get("tracker_registered") and entry.get("tracker_url") == normalized
         )
     return entry
+
+
+def load_all_torrent_states() -> list[dict]:
+    """Return all persisted torrent state entries."""
+    return list(_load_state().values())
