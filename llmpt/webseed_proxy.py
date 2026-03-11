@@ -20,7 +20,7 @@ See docs/webseed_design.md.resolved for full design rationale.
 import os
 import logging
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from typing import Optional
 from urllib.parse import quote
 
@@ -188,8 +188,10 @@ class WebSeedProxyHandler(BaseHTTPRequestHandler):
         return repo_type, repo_id, commit_hash, file_path
 
 
-class _WebSeedHTTPServer(HTTPServer):
-    """HTTPServer subclass that carries proxy configuration."""
+class _WebSeedHTTPServer(ThreadingHTTPServer):
+    """Threaded HTTP server that carries proxy configuration."""
+
+    daemon_threads = True
 
     hf_token: Optional[str] = None
     hf_endpoint: str = "https://huggingface.co"

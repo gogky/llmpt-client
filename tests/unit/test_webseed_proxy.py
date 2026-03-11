@@ -7,6 +7,7 @@ Covers: WebSeedProxyHandler path parsing, token resolution, proxy lifecycle,
 
 import os
 import time
+import threading
 import pytest
 from http.client import HTTPConnection
 from unittest.mock import patch, MagicMock
@@ -307,6 +308,58 @@ class TestProxyHTTPIntegration:
 
         upstream_url = mock_get.call_args[0][0]
         assert upstream_url == "https://huggingface.co/org/repo/resolve/1111111111111111111111111111111111111111/subdir/deep/nested/file.safetensors"
+
+    def test_proxy_handles_requests_concurrently(self):
+        """A slow upstream request must not block other WebSeed requests."""
+        started = threading.Event()
+        release = threading.Event()
+
+        def fake_get(url, **kwargs):
+            if url.endswith("/slow.bin"):
+                started.set()
+                release.wait(timeout=5)
+                resp = self._make_upstream_response(
+                    status_code=200,
+                    headers={"Content-Length": "4"},
+                    chunks=[b"slow"],
+                )
+                return resp
+
+            resp = self._make_upstream_response(
+                status_code=200,
+                headers={"Content-Length": "4"},
+                chunks=[b"fast"],
+            )
+            return resp
+
+        results = {}
+
+        def do_slow():
+            results["slow"] = _http_get(
+                self.port,
+                "/ws/org/repo/1111111111111111111111111111111111111111/slow.bin",
+            )
+
+        with patch("llmpt.webseed_proxy._requests.get", side_effect=fake_get):
+            slow_thread = threading.Thread(target=do_slow, daemon=True)
+            slow_thread.start()
+            assert started.wait(timeout=2), "slow request did not start in time"
+
+            fast_started = time.perf_counter()
+            fast_status, fast_body, _ = _http_get(
+                self.port,
+                "/ws/org/repo/1111111111111111111111111111111111111111/fast.bin",
+            )
+            fast_elapsed = time.perf_counter() - fast_started
+
+            release.set()
+            slow_thread.join(timeout=2)
+
+        assert fast_status == 200
+        assert fast_body == b"fast"
+        assert fast_elapsed < 1.0
+        assert results["slow"][0] == 200
+        assert results["slow"][1] == b"slow"
 
 
 # ─── SessionContext._get_webseed_url ─────────────────────────────────────────
