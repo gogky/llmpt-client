@@ -12,7 +12,7 @@ import pytest
 from http.client import HTTPConnection
 from unittest.mock import patch, MagicMock
 
-import requests as _real_requests  # keep a reference for test HTTP calls
+import httpx as _real_httpx
 
 
 def _http_get(port, path, headers=None):
@@ -24,6 +24,32 @@ def _http_get(port, path, headers=None):
     resp_headers = dict(resp.getheaders())
     conn.close()
     return resp.status, body, resp_headers
+
+
+class _FakeUpstreamStream:
+    """Small stand-in for ``httpx.Client.stream()`` responses."""
+
+    def __init__(self, status_code=200, headers=None, chunks=None, stream_error=None):
+        self.status_code = status_code
+        self.headers = headers or {}
+        self._chunks = list(chunks or [])
+        self._stream_error = stream_error
+        self.requested_chunk_size = None
+        self.closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.closed = True
+        return False
+
+    def iter_bytes(self, chunk_size=None):
+        self.requested_chunk_size = chunk_size
+        for chunk in self._chunks:
+            yield chunk
+        if self._stream_error is not None:
+            raise self._stream_error
 
 
 # ─── WebSeedProxyHandler._parse_path ──────────────────────────────────────────
@@ -145,6 +171,17 @@ class TestProxyLifecycle:
         proxy.stop()
         proxy.stop()  # Should not raise
 
+    def test_stop_closes_shared_http_client(self):
+        from llmpt.webseed_proxy import WebSeedProxy
+
+        mock_client = MagicMock()
+        with patch("llmpt.webseed_proxy._build_http_client", return_value=mock_client):
+            proxy = WebSeedProxy()
+            proxy.start()
+            proxy.stop()
+
+        mock_client.close.assert_called_once()
+
     def test_get_webseed_url_format(self):
         from llmpt.webseed_proxy import WebSeedProxy
         proxy = WebSeedProxy()
@@ -167,8 +204,7 @@ class TestProxyLifecycle:
 
 class TestProxyHTTPIntegration:
     """These tests start a real proxy and make actual HTTP requests using
-    http.client (unaffected by ``requests`` patches) while mocking the
-    upstream ``_requests.get`` call inside the proxy handler."""
+    http.client while mocking the shared upstream ``httpx.Client``."""
 
     @pytest.fixture(autouse=True)
     def proxy_fixture(self):
@@ -178,16 +214,14 @@ class TestProxyHTTPIntegration:
         yield
         self.proxy.stop()
 
-    def _make_upstream_response(self, status_code=200, headers=None, chunks=None):
-        """Create a properly configured mock Response for requests.get()."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = status_code
-        # Make .headers behave like a real dict (items() for iteration, lowercase lookup)
-        resp_headers = headers or {}
-        mock_resp.headers = resp_headers
-        mock_resp.iter_content.return_value = iter(chunks or [])
-        mock_resp.close = MagicMock()
-        return mock_resp
+    def _make_upstream_response(self, status_code=200, headers=None, chunks=None, stream_error=None):
+        """Create a stand-in ``httpx`` streaming response."""
+        return _FakeUpstreamStream(
+            status_code=status_code,
+            headers=headers,
+            chunks=chunks,
+            stream_error=stream_error,
+        )
 
     def test_successful_proxy_request(self):
         """Full path: libtorrent → proxy → mock HF CDN."""
@@ -197,15 +231,18 @@ class TestProxyHTTPIntegration:
             chunks=[b"hello"],
         )
 
-        with patch("llmpt.webseed_proxy._requests.get", return_value=mock_resp) as mock_get:
+        with patch.object(self.proxy.server.http_client, "stream", return_value=mock_resp) as mock_stream:
             status, body, _ = _http_get(self.port, "/ws/org/repo/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/config.json")
 
         assert status == 200
         assert body == b"hello"
 
         # Verify upstream URL was constructed correctly
-        call_args = mock_get.call_args
-        assert call_args[0][0] == "https://huggingface.co/org/repo/resolve/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/config.json"
+        call_args = mock_stream.call_args
+        assert call_args[0] == (
+            "GET",
+            "https://huggingface.co/org/repo/resolve/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/config.json",
+        )
         # Verify token was injected
         assert call_args[1]["headers"]["Authorization"] == "Bearer test_token_123"
 
@@ -221,7 +258,7 @@ class TestProxyHTTPIntegration:
             chunks=[b"0123456789"],
         )
 
-        with patch("llmpt.webseed_proxy._requests.get", return_value=mock_resp) as mock_get:
+        with patch.object(self.proxy.server.http_client, "stream", return_value=mock_resp) as mock_stream:
             status, body, _ = _http_get(
                 self.port, "/ws/org/repo/1111111111111111111111111111111111111111/model.bin",
                 headers={"Range": "bytes=0-9"},
@@ -229,7 +266,7 @@ class TestProxyHTTPIntegration:
 
         assert status == 206
         # Verify Range was forwarded
-        upstream_headers = mock_get.call_args[1]["headers"]
+        upstream_headers = mock_stream.call_args[1]["headers"]
         assert upstream_headers["Range"] == "bytes=0-9"
 
     def test_bad_path_returns_400(self):
@@ -239,8 +276,14 @@ class TestProxyHTTPIntegration:
 
     def test_upstream_failure_returns_502(self):
         """When upstream request fails, should return 502."""
-        with patch("llmpt.webseed_proxy._requests.get",
-                    side_effect=_real_requests.ConnectionError("Network down")):
+        with patch.object(
+            self.proxy.server.http_client,
+            "stream",
+            side_effect=_real_httpx.ConnectError(
+                "Network down",
+                request=_real_httpx.Request("GET", "https://huggingface.co"),
+            ),
+        ):
             status, _, _ = _http_get(self.port, "/ws/org/repo/1111111111111111111111111111111111111111/file.bin")
         assert status == 502
 
@@ -260,11 +303,11 @@ class TestProxyHTTPIntegration:
                 chunks=[b"abc"],
             )
 
-            with patch("llmpt.webseed_proxy._requests.get", return_value=mock_resp) as mock_get:
+            with patch.object(proxy_no_token.server.http_client, "stream", return_value=mock_resp) as mock_stream:
                 status, body, _ = _http_get(port, "/ws/org/repo/1111111111111111111111111111111111111111/file.bin")
 
             assert status == 200
-            upstream_headers = mock_get.call_args[1]["headers"]
+            upstream_headers = mock_stream.call_args[1]["headers"]
             assert "Authorization" not in upstream_headers
         finally:
             proxy_no_token.stop()
@@ -284,10 +327,10 @@ class TestProxyHTTPIntegration:
                 chunks=[b"abc"],
             )
 
-            with patch("llmpt.webseed_proxy._requests.get", return_value=mock_resp) as mock_get:
+            with patch.object(proxy_custom.server.http_client, "stream", return_value=mock_resp) as mock_stream:
                 _http_get(port, "/ws/org/repo/1111111111111111111111111111111111111111/file.bin")
 
-            upstream_url = mock_get.call_args[0][0]
+            upstream_url = mock_stream.call_args[0][1]
             assert upstream_url.startswith("https://hf-mirror.com/")
         finally:
             proxy_custom.stop()
@@ -300,21 +343,39 @@ class TestProxyHTTPIntegration:
             chunks=[b"abc"],
         )
 
-        with patch("llmpt.webseed_proxy._requests.get", return_value=mock_resp) as mock_get:
+        with patch.object(self.proxy.server.http_client, "stream", return_value=mock_resp) as mock_stream:
             _http_get(
                 self.port,
                 "/ws/org/repo/1111111111111111111111111111111111111111/subdir/deep/nested/file.safetensors",
             )
 
-        upstream_url = mock_get.call_args[0][0]
+        upstream_url = mock_stream.call_args[0][1]
         assert upstream_url == "https://huggingface.co/org/repo/resolve/1111111111111111111111111111111111111111/subdir/deep/nested/file.safetensors"
+
+    def test_proxy_uses_larger_stream_chunk_size(self):
+        """Proxy should stream upstream bytes in 1 MB chunks."""
+        mock_resp = self._make_upstream_response(
+            status_code=200,
+            headers={"Content-Length": "3"},
+            chunks=[b"abc"],
+        )
+
+        with patch.object(self.proxy.server.http_client, "stream", return_value=mock_resp):
+            status, body, _ = _http_get(
+                self.port,
+                "/ws/org/repo/1111111111111111111111111111111111111111/file.bin",
+            )
+
+        assert status == 200
+        assert body == b"abc"
+        assert mock_resp.requested_chunk_size == 1024 * 1024
 
     def test_proxy_handles_requests_concurrently(self):
         """A slow upstream request must not block other WebSeed requests."""
         started = threading.Event()
         release = threading.Event()
 
-        def fake_get(url, **kwargs):
+        def fake_get(method, url, **kwargs):
             if url.endswith("/slow.bin"):
                 started.set()
                 release.wait(timeout=5)
@@ -340,7 +401,7 @@ class TestProxyHTTPIntegration:
                 "/ws/org/repo/1111111111111111111111111111111111111111/slow.bin",
             )
 
-        with patch("llmpt.webseed_proxy._requests.get", side_effect=fake_get):
+        with patch.object(self.proxy.server.http_client, "stream", side_effect=fake_get):
             slow_thread = threading.Thread(target=do_slow, daemon=True)
             slow_thread.start()
             assert started.wait(timeout=2), "slow request did not start in time"

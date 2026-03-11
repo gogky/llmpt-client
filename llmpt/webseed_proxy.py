@@ -24,12 +24,20 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from typing import Optional
 from urllib.parse import quote
 
-import requests as _requests
+import httpx as _httpx
 
 logger = logging.getLogger(__name__)
 
-# Chunk size for streaming proxy responses (64 KB).
-_STREAM_CHUNK_SIZE = 65536
+# Chunk size for streaming proxy responses (1 MB).
+#
+# The previous 64 KB default kept memory usage low but caused excessive
+# Python-level loop iterations and socket writes when proxying large files.
+# A 1 MB chunk is still modest per in-flight request while significantly
+# reducing overhead in the hot path.
+_STREAM_CHUNK_SIZE = 1024 * 1024
+
+# Per-request timeout for the upstream HF/CDN request.
+_UPSTREAM_TIMEOUT = 120.0
 
 # Headers to forward from upstream to the client (lowercase).
 _FORWARDED_HEADERS = frozenset({
@@ -40,6 +48,14 @@ _FORWARDED_HEADERS = frozenset({
     'etag',
     'last-modified',
 })
+
+
+def _build_http_client() -> _httpx.Client:
+    """Create the shared upstream client used by the proxy server."""
+    return _httpx.Client(
+        follow_redirects=True,
+        timeout=_UPSTREAM_TIMEOUT,
+    )
 
 
 class WebSeedProxyHandler(BaseHTTPRequestHandler):
@@ -85,7 +101,7 @@ class WebSeedProxyHandler(BaseHTTPRequestHandler):
         hf_endpoint = self.server.hf_endpoint
         # URL-encode the file_path segments but keep '/' as-is.
         encoded_file_path = "/".join(quote(seg, safe="") for seg in file_path.split("/"))
-        
+
         if repo_type == "dataset":
             upstream_url = f"{hf_endpoint}/datasets/{repo_id}/resolve/{commit_hash}/{encoded_file_path}"
         elif repo_type == "space":
@@ -106,35 +122,34 @@ class WebSeedProxyHandler(BaseHTTPRequestHandler):
             upstream_headers["Range"] = range_header
 
         # ── 4. Make the upstream request ──────────────────────────────────
+        client = self.server.http_client
+        if client is None:
+            logger.error("WebSeedProxy: shared upstream client is unavailable")
+            self.send_error(500, "Proxy client unavailable")
+            return
+
         try:
-            resp = _requests.get(
-                upstream_url,
-                headers=upstream_headers,
-                stream=True,
-                timeout=120,
-                allow_redirects=True,
-            )
-        except _requests.RequestException as exc:
+            with client.stream("GET", upstream_url, headers=upstream_headers) as resp:
+                # ── 5. Forward upstream response ──────────────────────────
+                self.send_response(resp.status_code)
+                for header_name, header_value in resp.headers.items():
+                    if header_name.lower() in _FORWARDED_HEADERS:
+                        self.send_header(header_name, header_value)
+                self.end_headers()
+
+                try:
+                    for chunk in resp.iter_bytes(chunk_size=_STREAM_CHUNK_SIZE):
+                        if chunk:
+                            self.wfile.write(chunk)
+                except _httpx.HTTPError as exc:
+                    logger.warning("WebSeedProxy: upstream stream failed: %s", exc)
+                except (BrokenPipeError, ConnectionResetError):
+                    # Client (libtorrent) closed the connection early — not an error.
+                    pass
+        except _httpx.HTTPError as exc:
             logger.warning("WebSeedProxy: upstream request failed: %s", exc)
             self.send_error(502, "Upstream request failed")
             return
-
-        # ── 5. Forward upstream response ──────────────────────────────────
-        self.send_response(resp.status_code)
-        for header_name, header_value in resp.headers.items():
-            if header_name.lower() in _FORWARDED_HEADERS:
-                self.send_header(header_name, header_value)
-        self.end_headers()
-
-        try:
-            for chunk in resp.iter_content(chunk_size=_STREAM_CHUNK_SIZE):
-                if chunk:
-                    self.wfile.write(chunk)
-        except (BrokenPipeError, ConnectionResetError):
-            # Client (libtorrent) closed the connection early — not an error.
-            pass
-        finally:
-            resp.close()
 
     # ── Path parsing ──────────────────────────────────────────────────────
 
@@ -195,6 +210,7 @@ class _WebSeedHTTPServer(ThreadingHTTPServer):
 
     hf_token: Optional[str] = None
     hf_endpoint: str = "https://huggingface.co"
+    http_client: Optional[_httpx.Client] = None
 
 
 class WebSeedProxy:
@@ -235,6 +251,7 @@ class WebSeedProxy:
         self.server = _WebSeedHTTPServer(("127.0.0.1", 0), WebSeedProxyHandler)
         self.server.hf_token = self.token
         self.server.hf_endpoint = self.hf_endpoint.rstrip("/")
+        self.server.http_client = _build_http_client()
         self.port = self.server.server_address[1]
 
         self.thread = threading.Thread(
@@ -255,6 +272,10 @@ class WebSeedProxy:
         self.server.shutdown()
         if self.thread is not None:
             self.thread.join(timeout=5)
+
+        if self.server.http_client is not None:
+            self.server.http_client.close()
+            self.server.http_client = None
 
         self.server.server_close()
         logger.info("WebSeedProxy stopped (was on port %d)", self.port)

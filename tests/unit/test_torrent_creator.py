@@ -179,8 +179,8 @@ class TestCreateTorrent:
             local_dir=str(local_dir),
         )
         mock_lt.add_files.assert_not_called()
-        mock_fs.add_file.assert_any_call(f"{revision}/config.json", 16)
-        mock_fs.add_file.assert_any_call(f"{revision}/model.bin", 1000)
+        mock_fs.add_file.assert_any_call("local_dir/config.json", 16)
+        mock_fs.add_file.assert_any_call("local_dir/model.bin", 1000)
         assert mock_fs.add_file.call_count == 2
         mock_lt.set_piece_hashes.assert_called_once_with(mock_torrent_obj, str(local_dir.parent))
 

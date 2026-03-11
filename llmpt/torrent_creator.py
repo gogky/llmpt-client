@@ -34,7 +34,10 @@ def _build_local_dir_file_storage(
         return None, None
 
     source_root = Path(local_dir)
-    torrent_root = revision if _COMMIT_HASH_RE.match(revision or "") else source_root.name
+    # Piece hashing must read files from the real local_dir layout on disk.
+    # We rewrite the torrent root to ``revision`` after generation so the
+    # resulting torrent still matches the hub-cache swarm identity.
+    torrent_root = source_root.name
     fs = lt.file_storage()
 
     for relative_path in manifest:
