@@ -64,6 +64,36 @@ def _setup_successful_init(ctx, mock_lt):
     return mock_handle, mock_ti
 
 
+class TestLiveTransferPostfix:
+
+    def test_shows_peers_only_after_real_p2p_bytes(self):
+        from llmpt.session_context import _format_live_transfer_postfix
+
+        text = _format_live_transfer_postfix({
+            'active_p2p_peers': 2,
+            'peer_download': 1024,
+            'webseed_download': 0,
+        })
+
+        assert text == "peers=2"
+
+    def test_shows_webseed_when_only_webseed_has_bytes(self):
+        from llmpt.session_context import _format_live_transfer_postfix
+
+        text = _format_live_transfer_postfix({
+            'active_p2p_peers': 2,
+            'peer_download': 0,
+            'webseed_download': 2048,
+        })
+
+        assert text == "webseed"
+
+    def test_hides_status_before_source_is_known(self):
+        from llmpt.session_context import _format_live_transfer_postfix
+
+        assert _format_live_transfer_postfix({}) == ""
+
+
 # ─── _find_file_index ─────────────────────────────────────────────────────────
 
 class TestFindFileIndex:

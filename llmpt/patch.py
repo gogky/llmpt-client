@@ -161,17 +161,26 @@ def _truncate_temp_file(temp_file, filename: str) -> None:
         logger.warning(f"[P2P] Could not truncate temp_file for {filename}: {e}")
 
 
-def _format_snapshot_p2p_postfix(stats: Optional[dict]) -> str:
-    """Format live repo-level P2P stats for the snapshot progress bar."""
+def _format_snapshot_p2p_postfix(
+    stats: Optional[dict],
+    download_stats: Optional[dict] = None,
+) -> str:
+    """Format a short, user-facing snapshot status for the shared progress bar."""
     stats = stats or {}
+    download_stats = download_stats or {}
+
+    active_peers = int(stats.get('active_p2p_peers', 0) or 0)
     peer_bytes = int(stats.get('peer_download', 0) or 0)
     webseed_bytes = int(stats.get('webseed_download', 0) or 0)
-    peers = int(stats.get('active_p2p_peers', stats.get('max_p2p_peers', 0)) or 0)
-    return (
-        f"P2P {_format_bytes(peer_bytes)} | "
-        f"WebSeed {_format_bytes(webseed_bytes)} | "
-        f"Active peers {peers}"
-    )
+    http_seen = bool(download_stats.get('http'))
+
+    if active_peers > 0 or peer_bytes > 0:
+        return f"peers={active_peers}"
+    if http_seen:
+        return "http"
+    if webseed_bytes > 0:
+        return "webseed"
+    return ""
 
 
 class _SnapshotProgressReporter:
@@ -217,7 +226,10 @@ class _SnapshotProgressReporter:
                 self.revision,
                 self.repo_type,
             )
-            postfix = _format_snapshot_p2p_postfix(stats)
+            postfix = _format_snapshot_p2p_postfix(
+                stats,
+                download_stats=get_download_stats(),
+            )
             if hasattr(self.progress_bar, 'set_postfix_str'):
                 self.progress_bar.set_postfix_str(postfix, refresh=False)
         except Exception as e:

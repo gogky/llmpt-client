@@ -443,9 +443,9 @@ class P2PBatchManager:
                         total_peer_download += stats.get('peer_download', 0)
                         total_webseed_download += stats.get('webseed_download', 0)
                         total_payload_download += stats.get('total_payload_download', 0)
-                        active_p2p_peers += stats.get('num_p2p_peers', 0)
+                        active_p2p_peers += stats.get('active_p2p_peers', 0)
                         max_p2p_peers = max(
-                            max_p2p_peers, stats.get('num_p2p_peers', 0)
+                            max_p2p_peers, stats.get('peak_p2p_peers', 0)
                         )
 
         return {

@@ -17,6 +17,7 @@ from llmpt.patch import (
     remove_patch,
     get_download_stats,
     reset_download_stats,
+    _format_snapshot_p2p_postfix,
     _truncate_temp_file,
     _patched_http_get,
     _patched_hf_hub_download,
@@ -94,6 +95,32 @@ class TestResetDownloadStats:
         reset_download_stats()
         stats = get_download_stats()
         assert stats == {'p2p': set(), 'http': set()}
+
+
+class TestSnapshotPostfix:
+
+    def test_prefers_current_peers_when_p2p_is_active(self):
+        text = _format_snapshot_p2p_postfix({
+            'active_p2p_peers': 3,
+            'peer_download': 1024,
+            'webseed_download': 2048,
+        })
+        assert text == "peers=3"
+
+    def test_shows_http_when_http_fallback_was_observed(self):
+        text = _format_snapshot_p2p_postfix(
+            {'webseed_download': 2048},
+            {'http': {'config.json'}},
+        )
+        assert text == "http"
+
+    def test_shows_webseed_for_pure_webseed_transfers(self):
+        text = _format_snapshot_p2p_postfix({'webseed_download': 2048})
+        assert text == "webseed"
+
+    def test_hides_postfix_when_source_is_not_yet_known(self):
+        text = _format_snapshot_p2p_postfix({})
+        assert text == ""
 
 
 # ─── _truncate_temp_file ─────────────────────────────────────────────────────
@@ -386,6 +413,7 @@ class TestPatchedSnapshotDownload:
 
         mock_manager = MagicMock()
         mock_manager.get_repo_p2p_stats.return_value = {
+            'active_p2p_peers': 3,
             'peer_download': 1024,
             'webseed_download': 2048,
             'max_p2p_peers': 3,
@@ -407,7 +435,7 @@ class TestPatchedSnapshotDownload:
         assert bar.total == 8
         assert bar.closed is True
         assert any(
-            text == "P2P 1.02kB | WebSeed 2.05kB | Active peers 3"
+            text == "peers=3"
             for text, _ in bar.postfixes
         )
 
@@ -442,6 +470,7 @@ class TestPatchedSnapshotDownload:
 
         mock_manager = MagicMock()
         mock_manager.get_repo_p2p_stats.return_value = {
+            'active_p2p_peers': 3,
             'peer_download': 1024,
             'webseed_download': 2048,
             'max_p2p_peers': 3,

@@ -562,6 +562,7 @@ class TestStackFrameInspection:
         patched_tqdm = patch_mod._wrap_snapshot_tqdm_class_auto(RecordingTqdm)
         mock_manager = MagicMock()
         mock_manager.get_repo_p2p_stats.return_value = {
+            'active_p2p_peers': 3,
             'peer_download': 1024,
             'webseed_download': 2048,
             'max_p2p_peers': 3,
@@ -589,7 +590,7 @@ class TestStackFrameInspection:
 
         assert bar.closed is True
         assert any(
-            text == "P2P 1.02kB | WebSeed 2.05kB | Active peers 3"
+            text == "peers=3"
             for text, _ in bar.postfixes
         )
 

@@ -24,6 +24,20 @@ from .utils import lt, LIBTORRENT_AVAILABLE, strip_torrent_root
 logger = logging.getLogger(__name__)
 
 
+def _format_live_transfer_postfix(stats: Optional[dict]) -> str:
+    """Format a lightweight, user-facing transfer status for single-file bars."""
+    stats = stats or {}
+    active_peers = int(stats.get('active_p2p_peers', 0) or 0)
+    peer_bytes = int(stats.get('peer_download', 0) or 0)
+    webseed_bytes = int(stats.get('webseed_download', 0) or 0)
+
+    if peer_bytes > 0:
+        return f"peers={active_peers}"
+    if webseed_bytes > 0:
+        return "webseed"
+    return ""
+
+
 class SessionContext:
     """
     Manages a single libtorrent torrent_handle for a specific repo/revision.
@@ -394,9 +408,11 @@ class SessionContext:
                         # Sample peer stats while peers are still connected
                         self._snapshot_peer_stats()
 
-                        if hasattr(pbar, 'set_postfix'):
-                            s = self.handle.status()
-                            pbar.set_postfix({"peers": s.num_peers})
+                        postfix = _format_live_transfer_postfix(self.get_p2p_stats())
+                        if hasattr(pbar, 'set_postfix_str'):
+                            pbar.set_postfix_str(postfix, refresh=False)
+                        elif postfix and hasattr(pbar, 'set_postfix'):
+                            pbar.set_postfix({"status": postfix})
                     except Exception:
                         pass
 
@@ -470,7 +486,7 @@ class SessionContext:
 
         Returns:
             Dictionary with peer_download, webseed_download, total_payload_download,
-            num_p2p_peers, num_webseeds, num_peers, num_seeds.
+            active_p2p_peers, peak_p2p_peers, num_webseeds, num_peers, num_seeds.
             Empty dict if handle is invalid and no accumulated data exists.
         """
         with self.lock:
@@ -479,7 +495,7 @@ class SessionContext:
         # Try live data first
         peer_download = 0
         webseed_download = 0
-        num_p2p_peers = 0
+        active_p2p_peers = 0
         num_webseeds = 0
         total_payload_download = 0
         num_peers = 0
@@ -502,7 +518,7 @@ class SessionContext:
                         num_webseeds += 1
                     else:
                         peer_download += dl
-                        num_p2p_peers += 1
+                        active_p2p_peers += 1
             except Exception as e:
                 logger.debug(f"[{self.repo_id}] Failed to collect live P2P stats: {e}")
 
@@ -515,14 +531,14 @@ class SessionContext:
         peer_download = max(peer_download, acc_peer_download)
         webseed_download = max(webseed_download, acc_webseed_download)
         total_payload_download = max(total_payload_download, acc_total_payload_download)
-        num_p2p_peers = max(num_p2p_peers, acc_peak_p2p_peers)
+        peak_p2p_peers = max(active_p2p_peers, acc_peak_p2p_peers)
 
         # ``total_payload_download`` is the most trustworthy all-time byte count.
         # ``get_peer_info()`` can undercount WebSeed after disconnects, so
         # reconcile the source breakdown against the authoritative total.
         if total_payload_download > 0:
             peer_download = min(peer_download, total_payload_download)
-            if num_p2p_peers == 0:
+            if peak_p2p_peers == 0:
                 webseed_download = max(webseed_download, total_payload_download)
             else:
                 webseed_download = max(
@@ -537,7 +553,8 @@ class SessionContext:
             'total_payload_download': total_payload_download,
             'peer_download': peer_download,
             'webseed_download': webseed_download,
-            'num_p2p_peers': num_p2p_peers,
+            'active_p2p_peers': active_p2p_peers,
+            'peak_p2p_peers': peak_p2p_peers,
             'num_webseeds': num_webseeds,
             'num_peers': num_peers,
             'num_seeds': num_seeds,
