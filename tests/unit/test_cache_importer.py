@@ -117,6 +117,10 @@ def test_import_local_dir_candidate(monkeypatch, tmp_path):
     monkeypatch.setattr("llmpt.completed_registry.COMPLETED_SOURCES_FILE", str(completed_file))
     monkeypatch.setattr("llmpt.cache_importer._collect_hub_candidates", lambda: [])
     monkeypatch.setattr("llmpt.cache_importer._collect_local_dir_candidates", lambda: [source])
+    monkeypatch.setattr(
+        "huggingface_hub.snapshot_download",
+        lambda **kwargs: [SimpleNamespace(filename="weights.bin")],
+    )
 
     summary = importer.import_verified_cache_sources()
 

@@ -240,8 +240,8 @@ class TestDeferredDaemonNotification:
                     time.sleep(2.5)
                     mock_notify.assert_not_called()
 
-    def test_hf_hub_download_deferred_marks_completed_snapshot_for_local_dir(self):
-        """When old snapshot_download calls patched hf_hub_download, deferred notify must keep completed_snapshot."""
+    def test_hf_hub_download_deferred_does_not_mark_completed_snapshot_for_local_dir(self):
+        """Import-order fallback must not claim a local_dir snapshot completed."""
         import llmpt.patch as patch_mod
         from unittest.mock import MagicMock, patch as mock_patch
         import time
@@ -277,10 +277,10 @@ class TestDeferredDaemonNotification:
                 assert call_args[0][0] == 'seed'
                 assert call_args[1]['repo_id'] == 'org/local-model'
                 assert call_args[1]['local_dir'] == '/tmp/local-model'
-                assert call_args[1]['completed_snapshot'] is True
+                assert 'completed_snapshot' not in call_args[1]
 
-    def test_hf_hub_download_deferred_marks_completed_snapshot_for_cache_dir(self):
-        """Import-order snapshot_download(cache_dir=...) should also carry completed_snapshot."""
+    def test_hf_hub_download_deferred_does_not_mark_completed_snapshot_for_cache_dir(self):
+        """Import-order fallback must not claim a cache_dir snapshot completed."""
         import llmpt.patch as patch_mod
         from unittest.mock import MagicMock, patch as mock_patch
         import time
@@ -316,7 +316,7 @@ class TestDeferredDaemonNotification:
                 assert call_args[0][0] == 'seed'
                 assert call_args[1]['repo_id'] == 'org/cache-model'
                 assert call_args[1]['cache_dir'] == '/tmp/custom-cache'
-                assert call_args[1]['completed_snapshot'] is True
+                assert 'completed_snapshot' not in call_args[1]
 
 
 # ---------------------------------------------------------------------------
@@ -686,8 +686,8 @@ class TestStackFrameInspection:
                 time.sleep(2.5)
                 mock_notify.assert_not_called()
 
-    def test_http_get_deferred_notification_marks_completed_snapshot_for_local_dir(self):
-        """Import-order fallback should mark snapshot_download(local_dir=...) as completed."""
+    def test_http_get_deferred_notification_does_not_mark_completed_snapshot_for_local_dir(self):
+        """Import-order HTTP fallback must not mark local_dir snapshots completed."""
         import llmpt.patch as patch_mod
         apply_patch({'tracker_url': 'http://test-tracker'})
 
@@ -730,10 +730,10 @@ class TestStackFrameInspection:
                 assert call_args[1]['repo_id'] == 'org/local-model'
                 assert call_args[1]['revision'] == '1' * 40
                 assert call_args[1]['local_dir'] == '/tmp/local-model'
-                assert call_args[1]['completed_snapshot'] is True
+                assert 'completed_snapshot' not in call_args[1]
 
-    def test_http_get_deferred_notification_marks_completed_snapshot_for_cache_dir(self):
-        """Import-order fallback should mark snapshot_download(cache_dir=...) as completed."""
+    def test_http_get_deferred_notification_does_not_mark_completed_snapshot_for_cache_dir(self):
+        """Import-order HTTP fallback must not mark cache_dir snapshots completed."""
         import llmpt.patch as patch_mod
         apply_patch({'tracker_url': 'http://test-tracker'})
 
@@ -776,4 +776,4 @@ class TestStackFrameInspection:
                 assert call_args[1]['repo_id'] == 'org/cache-model'
                 assert call_args[1]['revision'] == '2' * 40
                 assert call_args[1]['cache_dir'] == '/tmp/custom-cache'
-                assert call_args[1]['completed_snapshot'] is True
+                assert 'completed_snapshot' not in call_args[1]

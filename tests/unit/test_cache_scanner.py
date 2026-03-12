@@ -14,7 +14,9 @@ from llmpt.cache_scanner import (
 )
 from llmpt.completed_registry import (
     forget_completed_source,
+    load_completed_sources,
     register_completed_source,
+    save_completed_sources,
 )
 
 
@@ -218,10 +220,17 @@ class TestRegisteredSeedableSources:
         )
 
         monkeypatch.setattr("llmpt.completed_registry.COMPLETED_SOURCES_FILE", str(registry_file))
+        monkeypatch.setattr(
+            "huggingface_hub.try_to_load_from_cache",
+            lambda repo_id, filename, cache_dir=None, revision=None, repo_type=None: str(
+                custom_cache / "models--gpt2" / "snapshots" / commit / filename
+            ),
+        )
         register_completed_source(
             repo_id="gpt2",
             revision=commit,
             cache_dir=str(custom_cache),
+            manifest=["config.json", "model.bin"],
         )
 
         def fake_try_to_load_from_cache(repo_id, filename, cache_dir=None, revision=None, repo_type=None):
@@ -259,6 +268,7 @@ class TestRegisteredSeedableSources:
             revision=commit,
             repo_type="model",
             local_dir=str(local_dir),
+            manifest=["weights.bin"],
         )
 
         result = scan_seedable_sources()
@@ -268,6 +278,76 @@ class TestRegisteredSeedableSources:
             and item.local_dir == str(local_dir.resolve())
             for item in result
         )
+
+    def test_stale_local_dir_subset_is_pruned(self, tmp_path, monkeypatch):
+        registry_file = tmp_path / "completed_sources.json"
+        local_dir = tmp_path / "local-model"
+        commit = "c" * 40
+
+        for filename in ("config.json", "weights.bin"):
+            file_path = local_dir / filename
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text("{}")
+            metadata_path = (
+                local_dir
+                / ".cache"
+                / "huggingface"
+                / "download"
+                / f"{filename}.metadata"
+            )
+            metadata_path.parent.mkdir(parents=True, exist_ok=True)
+            metadata_path.write_text(f"{commit}\netag\n123.0\n")
+
+        monkeypatch.setattr("llmpt.completed_registry.COMPLETED_SOURCES_FILE", str(registry_file))
+        save_completed_sources(
+            [
+                {
+                    "repo_type": "model",
+                    "repo_id": "org/model",
+                    "revision": commit,
+                    "storage_kind": "local_dir",
+                    "storage_root": str(local_dir),
+                    "local_dir": str(local_dir),
+                    "manifest": ["config.json"],
+                }
+            ]
+        )
+
+        assert scan_seedable_sources() == []
+        assert load_completed_sources() == []
+
+    def test_stale_hub_cache_subset_is_pruned(self, tmp_path, monkeypatch):
+        registry_file = tmp_path / "completed_sources.json"
+        custom_cache = tmp_path / "custom-hub"
+        commit = "d" * 40
+        self._create_mock_cache(
+            custom_cache,
+            {"models--gpt2": {commit: ["config.json", "model.bin"]}},
+        )
+
+        monkeypatch.setattr("llmpt.completed_registry.COMPLETED_SOURCES_FILE", str(registry_file))
+        monkeypatch.setattr(
+            "huggingface_hub.try_to_load_from_cache",
+            lambda repo_id, filename, cache_dir=None, revision=None, repo_type=None: str(
+                custom_cache / "models--gpt2" / "snapshots" / commit / filename
+            ),
+        )
+        save_completed_sources(
+            [
+                {
+                    "repo_type": "model",
+                    "repo_id": "gpt2",
+                    "revision": commit,
+                    "storage_kind": "hub_cache",
+                    "storage_root": str(custom_cache),
+                    "cache_dir": str(custom_cache),
+                    "manifest": ["config.json"],
+                }
+            ]
+        )
+
+        assert scan_seedable_sources() == []
+        assert load_completed_sources() == []
 
 
 class TestForgetCompletedSource:
@@ -293,10 +373,17 @@ class TestForgetCompletedSource:
         )
 
         monkeypatch.setattr("llmpt.completed_registry.COMPLETED_SOURCES_FILE", str(registry_file))
+        monkeypatch.setattr(
+            "huggingface_hub.try_to_load_from_cache",
+            lambda repo_id, filename, cache_dir=None, revision=None, repo_type=None: str(
+                custom_cache / "models--gpt2" / "snapshots" / commit / filename
+            ),
+        )
         register_completed_source(
             repo_id="gpt2",
             revision=commit,
             cache_dir=str(custom_cache),
+            manifest=["config.json"],
         )
 
         removed = forget_completed_source(
@@ -331,6 +418,7 @@ class TestForgetCompletedSource:
             revision=commit,
             repo_type="dataset",
             local_dir=str(local_dir),
+            manifest=["weights.bin"],
         )
 
         removed = forget_completed_source(

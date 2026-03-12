@@ -16,7 +16,12 @@ from .cache_scanner import (
     _local_dir_matches_revision,
     _scan_hf_cache_root,
 )
-from .completed_registry import has_completed_source, register_completed_source
+from .completed_registry import (
+    get_current_storage_manifest,
+    has_completed_source,
+    load_upstream_manifest,
+    register_completed_source,
+)
 
 logger = logging.getLogger("llmpt.cache_importer")
 
@@ -224,24 +229,29 @@ def _classify_exception(exc: Exception) -> Tuple[str, str]:
 
 
 def _verify_hub_candidate(source: SeedableSource) -> Tuple[str, Optional[List[str]], str]:
-    from huggingface_hub import snapshot_download, try_to_load_from_cache
+    from huggingface_hub import try_to_load_from_cache
 
     try:
-        dry_run = snapshot_download(
-            repo_id=source.repo_id,
-            revision=source.revision,
+        manifest = load_upstream_manifest(
+            source.repo_id,
+            source.revision,
             repo_type=source.repo_type,
-            cache_dir=source.cache_dir,
-            dry_run=True,
-            tqdm_class=_QuietTqdm,
         )
     except Exception as exc:
         status, reason = _classify_exception(exc)
         return status, None, reason
 
-    manifest = sorted({item.filename for item in dry_run if getattr(item, "filename", None)})
     if not manifest:
         return "error", None, "empty_manifest"
+
+    current_manifest = get_current_storage_manifest(
+        source.repo_id,
+        source.revision,
+        repo_type=source.repo_type,
+        cache_dir=source.cache_dir,
+    )
+    if current_manifest != manifest:
+        return "partial", manifest, f"manifest_mismatch:{len(current_manifest)}/{len(manifest)}"
 
     lookup_repo_type = source.repo_type if source.repo_type != "model" else None
     missing = []
@@ -265,11 +275,32 @@ def _verify_hub_candidate(source: SeedableSource) -> Tuple[str, Optional[List[st
 def _import_local_dir_candidate(source: SeedableSource) -> Tuple[str, Optional[List[str]], str]:
     if not source.local_dir or not _local_dir_matches_revision(source.local_dir, source.revision):
         return "partial", None, "metadata_mismatch"
+
+    try:
+        manifest = load_upstream_manifest(
+            source.repo_id,
+            source.revision,
+            repo_type=source.repo_type,
+        )
+    except Exception as exc:
+        status, reason = _classify_exception(exc)
+        return status, None, reason
+
+    current_manifest = get_current_storage_manifest(
+        source.repo_id,
+        source.revision,
+        repo_type=source.repo_type,
+        local_dir=source.local_dir,
+    )
+    if current_manifest != manifest:
+        return "partial", manifest, f"manifest_mismatch:{len(current_manifest)}/{len(manifest)}"
+
     if register_completed_source(
         repo_id=source.repo_id,
         revision=source.revision,
         repo_type=source.repo_type,
         local_dir=source.local_dir,
+        manifest=manifest,
     ):
         return "imported", None, "ok"
     return "error", None, "register_failed"

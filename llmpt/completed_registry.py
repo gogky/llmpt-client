@@ -35,6 +35,16 @@ def _normalize_path(path: str) -> str:
     return os.path.realpath(os.path.abspath(os.path.expanduser(path)))
 
 
+def _normalize_manifest(manifest: Optional[Iterable[str]]) -> List[str]:
+    return sorted(
+        {
+            str(path).replace("\\", "/")
+            for path in (manifest or [])
+            if isinstance(path, str) and path
+        }
+    )
+
+
 def _load_payload() -> List[dict]:
     if not os.path.exists(COMPLETED_SOURCES_FILE):
         return []
@@ -53,9 +63,6 @@ def _load_payload() -> List[dict]:
     for item in payload:
         if not isinstance(item, dict):
             continue
-        manifest = item.get("manifest")
-        if not isinstance(manifest, list):
-            manifest = []
         normalized = {
             "repo_type": item.get("repo_type", "model"),
             "repo_id": item.get("repo_id"),
@@ -64,13 +71,7 @@ def _load_payload() -> List[dict]:
             "storage_root": item.get("storage_root"),
             "cache_dir": item.get("cache_dir"),
             "local_dir": item.get("local_dir"),
-            "manifest": sorted(
-                {
-                    str(path).replace("\\", "/")
-                    for path in manifest
-                    if isinstance(path, str) and path
-                }
-            ),
+            "manifest": _normalize_manifest(item.get("manifest")),
             "captured_at": float(item.get("captured_at", 0.0) or 0.0),
         }
         if not (
@@ -101,14 +102,7 @@ def save_completed_sources(entries: Iterable[dict]) -> None:
             normalized["cache_dir"] = _normalize_path(normalized["cache_dir"])
         if normalized.get("local_dir"):
             normalized["local_dir"] = _normalize_path(normalized["local_dir"])
-        manifest = normalized.get("manifest") or []
-        normalized["manifest"] = sorted(
-            {
-                str(path).replace("\\", "/")
-                for path in manifest
-                if isinstance(path, str) and path
-            }
-        )
+        normalized["manifest"] = _normalize_manifest(normalized.get("manifest"))
         normalized["captured_at"] = float(normalized.get("captured_at", 0.0) or time.time())
         payload.append(normalized)
 
@@ -170,6 +164,124 @@ def _local_dir_manifest(local_dir: str, revision: str) -> List[str]:
     return manifest
 
 
+def load_upstream_manifest(
+    repo_id: str,
+    revision: str,
+    *,
+    repo_type: str = "model",
+) -> List[str]:
+    from huggingface_hub import snapshot_download
+
+    dry_run = snapshot_download(
+        repo_id=repo_id,
+        revision=revision,
+        repo_type=repo_type,
+        dry_run=True,
+    )
+    manifest = _normalize_manifest(
+        item.filename
+        for item in dry_run
+        if getattr(item, "filename", None)
+    )
+    if not manifest:
+        raise ValueError(f"empty upstream manifest for {repo_id}@{revision}")
+    return manifest
+
+
+def get_current_storage_manifest(
+    repo_id: str,
+    revision: str,
+    *,
+    repo_type: str = "model",
+    cache_dir: Optional[str] = None,
+    local_dir: Optional[str] = None,
+) -> List[str]:
+    if local_dir:
+        return _normalize_manifest(_local_dir_manifest(_normalize_path(local_dir), revision))
+
+    snapshot_dir = _hub_snapshot_dir(
+        repo_id,
+        revision,
+        repo_type=repo_type,
+        cache_dir=cache_dir,
+    )
+    return _normalize_manifest(_snapshot_manifest(snapshot_dir))
+
+
+def _hub_cache_files_present(
+    repo_id: str,
+    revision: str,
+    manifest: List[str],
+    *,
+    repo_type: str = "model",
+    cache_dir: Optional[str] = None,
+) -> bool:
+    try:
+        from huggingface_hub import try_to_load_from_cache
+    except ImportError:
+        return False
+
+    lookup_repo_type = repo_type if repo_type != "model" else None
+    for filename in manifest:
+        resolved = try_to_load_from_cache(
+            repo_id=repo_id,
+            filename=filename,
+            revision=revision,
+            repo_type=lookup_repo_type,
+            cache_dir=cache_dir,
+        )
+        if not resolved or not os.path.exists(resolved):
+            return False
+    return True
+
+
+def is_completed_entry_current(entry: dict) -> bool:
+    if not isinstance(entry, dict):
+        return False
+
+    repo_type = entry.get("repo_type", "model")
+    repo_id = entry.get("repo_id")
+    revision = entry.get("revision")
+    storage_kind = entry.get("storage_kind")
+    manifest = _normalize_manifest(entry.get("manifest"))
+    if not (repo_id and revision and storage_kind and manifest):
+        return False
+
+    if storage_kind == "local_dir":
+        local_dir = entry.get("local_dir") or entry.get("storage_root")
+        if not local_dir or not os.path.isdir(local_dir):
+            return False
+        current_manifest = get_current_storage_manifest(
+            repo_id,
+            revision,
+            repo_type=repo_type,
+            local_dir=local_dir,
+        )
+        return current_manifest == manifest
+
+    if storage_kind == "hub_cache":
+        cache_dir = entry.get("cache_dir") or entry.get("storage_root")
+        if not cache_dir or not os.path.isdir(cache_dir):
+            return False
+        current_manifest = get_current_storage_manifest(
+            repo_id,
+            revision,
+            repo_type=repo_type,
+            cache_dir=cache_dir,
+        )
+        if current_manifest != manifest:
+            return False
+        return _hub_cache_files_present(
+            repo_id,
+            revision,
+            manifest,
+            repo_type=repo_type,
+            cache_dir=cache_dir,
+        )
+
+    return False
+
+
 def register_completed_source(
     repo_id: str,
     revision: str,
@@ -182,29 +294,51 @@ def register_completed_source(
     if local_dir:
         storage_kind = "local_dir"
         storage_root = _normalize_path(local_dir)
-        derived_manifest = _local_dir_manifest(storage_root, revision)
     else:
         storage_kind = "hub_cache"
         storage_root = _normalize_path(cache_dir or HF_HUB_CACHE)
-        derived_manifest = _snapshot_manifest(
-            _hub_snapshot_dir(
+    current_manifest = get_current_storage_manifest(
+        repo_id,
+        revision,
+        repo_type=repo_type,
+        cache_dir=storage_root if storage_kind == "hub_cache" else None,
+        local_dir=storage_root if storage_kind == "local_dir" else None,
+    )
+    manifest_list = _normalize_manifest(manifest)
+    if not manifest_list:
+        try:
+            manifest_list = load_upstream_manifest(
                 repo_id,
                 revision,
                 repo_type=repo_type,
-                cache_dir=storage_root,
             )
-        )
-
-    manifest_list = sorted(
-        {
-            str(path).replace("\\", "/")
-            for path in (manifest if manifest is not None else derived_manifest)
-            if isinstance(path, str) and path
-        }
-    )
+        except Exception as exc:
+            logger.warning(
+                f"Refusing to register completed source without upstream manifest: "
+                f"{repo_id}@{revision} ({exc})"
+            )
+            return False
     if not manifest_list:
         logger.warning(
             f"Refusing to register completed source without manifest: {repo_id}@{revision}"
+        )
+        return False
+    if current_manifest != manifest_list:
+        logger.warning(
+            f"Refusing to register completed source with mismatched manifest: "
+            f"{repo_id}@{revision} (current={len(current_manifest)}, expected={len(manifest_list)})"
+        )
+        return False
+    if storage_kind == "hub_cache" and not _hub_cache_files_present(
+        repo_id,
+        revision,
+        manifest_list,
+        repo_type=repo_type,
+        cache_dir=storage_root,
+    ):
+        logger.warning(
+            f"Refusing to register completed hub_cache source with unresolved files: "
+            f"{repo_id}@{revision}"
         )
         return False
 
@@ -255,7 +389,7 @@ def has_completed_source(
             and item.get("storage_kind") == storage_kind
             and item.get("storage_root") == storage_root
         ):
-            return True
+            return is_completed_entry_current(item)
     return False
 
 
@@ -277,12 +411,9 @@ def get_completed_manifest(
             and item.get("storage_kind") == storage_kind
             and item.get("storage_root") == storage_root
         ):
-            manifest = item.get("manifest") or []
-            return [
-                str(path).replace("\\", "/")
-                for path in manifest
-                if isinstance(path, str) and path
-            ]
+            if not is_completed_entry_current(item):
+                return None
+            return _normalize_manifest(item.get("manifest"))
     return None
 
 

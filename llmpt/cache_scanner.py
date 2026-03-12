@@ -29,7 +29,11 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from .completed_registry import load_completed_sources, save_completed_sources
+from .completed_registry import (
+    is_completed_entry_current,
+    load_completed_sources,
+    save_completed_sources,
+)
 
 logger = logging.getLogger("llmpt.cache_scanner")
 
@@ -383,32 +387,6 @@ def _local_dir_matches_revision(local_dir: str, revision: str) -> bool:
     return False
 
 
-def _local_dir_manifest_matches(local_dir: str, revision: str, manifest: List[str]) -> bool:
-    """Return True when every manifest file exists with matching metadata."""
-    if not manifest:
-        return False
-
-    metadata_root = Path(local_dir) / ".cache" / "huggingface" / "download"
-    if not metadata_root.exists():
-        return False
-
-    valid_files = set()
-    for metadata_path in metadata_root.rglob("*.metadata"):
-        try:
-            with metadata_path.open("r") as f:
-                commit_hash = f.readline().strip()
-            if commit_hash != revision:
-                continue
-            relative = metadata_path.relative_to(metadata_root).with_suffix("")
-            file_relative = relative.as_posix()
-            if (Path(local_dir) / relative).exists():
-                valid_files.add(file_relative)
-        except OSError:
-            continue
-
-    return all(path in valid_files for path in manifest)
-
-
 def _validate_completed_entry(item: dict) -> Optional[SeedableSource]:
     repo_type = item.get("repo_type", "model")
     repo_id = item.get("repo_id")
@@ -424,28 +402,12 @@ def _validate_completed_entry(item: dict) -> Optional[SeedableSource]:
         cache_dir = _normalize_path(item.get("cache_dir") or storage_root)
         if not os.path.isdir(cache_dir):
             return None
-
-        try:
-            from huggingface_hub import try_to_load_from_cache
-        except ImportError:
-            return None
-
-        lookup_repo_type = repo_type if repo_type != "model" else None
-        for filename in manifest:
-            resolved = try_to_load_from_cache(
-                repo_id=repo_id,
-                filename=filename,
-                revision=revision,
-                repo_type=lookup_repo_type,
-                cache_dir=cache_dir,
+        if not is_completed_entry_current(item):
+            logger.info(
+                f"Completed hub_cache source no longer matches manifest, pruning: "
+                f"{repo_id}@{revision[:8]}... in {cache_dir}"
             )
-            if not resolved or not os.path.exists(resolved):
-                logger.info(
-                    f"Completed source missing cached file, pruning: "
-                    f"{repo_id}@{revision[:8]}... ({filename})"
-                )
-                return None
-
+            return None
         return SeedableSource(
             repo_type=repo_type,
             repo_id=repo_id,
@@ -459,7 +421,7 @@ def _validate_completed_entry(item: dict) -> Optional[SeedableSource]:
         local_dir = _normalize_path(item.get("local_dir") or storage_root)
         if not os.path.isdir(local_dir):
             return None
-        if not _local_dir_manifest_matches(local_dir, revision, manifest):
+        if not is_completed_entry_current(item):
             logger.info(
                 f"Completed local_dir source no longer matches manifest, pruning: "
                 f"{repo_id}@{revision[:8]}... in {local_dir}"

@@ -119,7 +119,6 @@ def _flush_deferred_notifications():
                 repo_type=ctx['repo_type'],
                 cache_dir=ctx.get('cache_dir'),
                 local_dir=ctx.get('local_dir'),
-                completed_snapshot=bool(ctx.get('completed_snapshot')),
             )
         except Exception:
             pass
@@ -533,7 +532,6 @@ def _fire_deferred_notification(key: tuple[str, str, str, str, str]) -> None:
             repo_type=ctx['repo_type'],
             cache_dir=ctx.get('cache_dir'),
             local_dir=ctx.get('local_dir'),
-            completed_snapshot=bool(ctx.get('completed_snapshot')),
         )
         logger.debug(
             f"[P2P] Deferred daemon notification sent for "
@@ -549,8 +547,6 @@ def _schedule_deferred_notification(
     repo_type: str,
     cache_dir: Optional[str] = None,
     local_dir: Optional[str] = None,
-    *,
-    completed_snapshot: bool = False,
 ) -> None:
     """Schedule (or reschedule) a deferred daemon notification.
 
@@ -574,9 +570,6 @@ def _schedule_deferred_notification(
             'repo_type': repo_type,
             'cache_dir': cache_dir,
             'local_dir': local_dir,
-            'completed_snapshot': (
-                completed_snapshot or bool(existing and existing.get('completed_snapshot'))
-            ),
             'start_time': existing['start_time'] if existing else time.time(),
         }
         
@@ -666,12 +659,10 @@ def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
     _context.local_dir = local_dir
 
     download_succeeded = False
-    completed_snapshot = False
     try:
         # Call original function (will trigger patched http_get)
         result = _original_hf_hub_download(repo_id, filename, **kwargs)
         download_succeeded = True
-        completed_snapshot = _extract_snapshot_context_from_stack() is not None
         return result
     finally:
         # Restore previous context instead of clearing it (supports recursion)
@@ -702,7 +693,6 @@ def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
                 repo_type,
                 cache_dir,
                 local_dir,
-                completed_snapshot=completed_snapshot,
             )
 
 
@@ -718,7 +708,6 @@ def _patched_http_get(url: str, temp_file, **kwargs):
     cache_dir = getattr(_context, 'cache_dir', None)
     local_dir = getattr(_context, 'local_dir', None)
     schedule_deferred = False
-    deferred_completed_snapshot = False
     truncated = False
 
     # Fallback: if _patched_hf_hub_download was bypassed (import-order issue),
@@ -745,7 +734,6 @@ def _patched_http_get(url: str, temp_file, **kwargs):
             # deferred daemon notification here so the daemon knows to seed it.
             # Do this only after the file transfer succeeds.
             schedule_deferred = not _is_wrapper_active(repo_id)
-            deferred_completed_snapshot = bool(stack_ctx.get('from_snapshot_download'))
 
     if repo_id and filename and tracker and revision:
         try:
@@ -790,7 +778,6 @@ def _patched_http_get(url: str, temp_file, **kwargs):
                         repo_type,
                         cache_dir,
                         local_dir,
-                        completed_snapshot=deferred_completed_snapshot,
                     )
                 return  # Skip original http_get completely!
             else:
@@ -821,7 +808,6 @@ def _patched_http_get(url: str, temp_file, **kwargs):
             repo_type,
             cache_dir,
             local_dir,
-            completed_snapshot=deferred_completed_snapshot,
         )
     return result
 

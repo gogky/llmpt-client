@@ -22,6 +22,10 @@ def test_source_status_verified_beats_import_state(monkeypatch, tmp_path):
 
     monkeypatch.setattr("llmpt.completed_registry.COMPLETED_SOURCES_FILE", str(completed_file))
     monkeypatch.setattr("llmpt.cache_importer.IMPORT_STATE_FILE", str(import_state_file))
+    monkeypatch.setattr(
+        "huggingface_hub.try_to_load_from_cache",
+        lambda repo_id, filename, cache_dir=None, revision=None, repo_type=None: str(snapshot / filename),
+    )
 
     register_completed_source(
         "org/model",
@@ -93,6 +97,10 @@ def test_summarize_status_aggregates_three_layers(monkeypatch, tmp_path):
     snapshot = cache_root / "models--org--model" / "snapshots" / commit
     snapshot.mkdir(parents=True)
     (snapshot / "config.json").write_text("{}")
+    monkeypatch.setattr(
+        "huggingface_hub.try_to_load_from_cache",
+        lambda repo_id, filename, cache_dir=None, revision=None, repo_type=None: str(snapshot / filename),
+    )
 
     register_completed_source(
         "org/model",
