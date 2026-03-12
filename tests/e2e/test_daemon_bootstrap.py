@@ -238,7 +238,7 @@ def _bootstrap_with_running_daemon(
     snapshot_kwargs,
     restart_daemon=False,
 ):
-    from llmpt.ipc import notify_daemon
+    from llmpt.ipc import query_daemon
     from llmpt.utils import resolve_commit_hash
 
     time.sleep(10)
@@ -275,14 +275,18 @@ def _bootstrap_with_running_daemon(
     resolved_revision = resolve_commit_hash(repo_id, revision, repo_type=repo_type)
 
     print("[Test] Notifying daemon to seed downloaded snapshot...", flush=True)
-    assert notify_daemon(
+    seed_result = query_daemon(
         "seed",
         repo_id=repo_id,
         revision=resolved_revision,
         repo_type=repo_type,
         cache_dir=snapshot_kwargs.get("cache_dir"),
         local_dir=snapshot_kwargs.get("local_dir"),
-    ), "Failed to notify daemon to seed downloaded snapshot"
+        completed_snapshot=True,
+    )
+    assert seed_result and seed_result.get("status") == "ok", (
+        f"Daemon rejected seed request: {seed_result}"
+    )
 
     print("[Test] Waiting for daemon to create torrent and register...", flush=True)
     assert _wait_for_torrent_on_tracker(tracker_url, repo_id, timeout=180), (

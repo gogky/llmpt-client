@@ -541,6 +541,14 @@ def _fire_deferred_notification(key: tuple[str, str, str, str, str]) -> None:
         )
     except Exception as e:
         logger.debug(f"[P2P] Deferred daemon notification failed: {e}")
+    finally:
+        _release_on_demand_session(
+            repo_id=ctx['repo_id'],
+            revision=ctx['revision'],
+            repo_type=ctx['repo_type'],
+            cache_dir=ctx.get('cache_dir'),
+            local_dir=ctx.get('local_dir'),
+        )
 
 
 def _schedule_deferred_notification(
@@ -580,6 +588,41 @@ def _schedule_deferred_notification(
         new_timer.daemon = True
         new_timer.start()
         _deferred_timers[key] = new_timer
+
+
+def _release_on_demand_session(
+    *,
+    repo_id: str,
+    revision: str,
+    repo_type: str,
+    cache_dir: Optional[str] = None,
+    local_dir: Optional[str] = None,
+) -> None:
+    """Release the client-side on-demand session after handoff completes."""
+    try:
+        from .p2p_batch import P2PBatchManager
+
+        manager = P2PBatchManager._instance
+        if manager is None:
+            return
+
+        released = manager.release_on_demand_session(
+            repo_id=repo_id,
+            revision=revision,
+            repo_type=repo_type,
+            cache_dir=cache_dir,
+            local_dir=local_dir,
+        )
+        if released:
+            logger.debug(
+                f"[P2P] Released on-demand session for "
+                f"{repo_id}@{revision[:8]}..."
+            )
+    except Exception as e:
+        logger.debug(
+            f"[P2P] Failed to release on-demand session for "
+            f"{repo_id}@{revision[:8]}...: {e}"
+        )
 
 
 def _notify_seed_daemon(
@@ -684,17 +727,30 @@ def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
                 _active_download_counts.pop(repo_id, None)
             else:
                 _active_download_counts[repo_id] = count - 1
+        downloads_finished = _active_download_counts.get(repo_id, 0) == 0
+        wrapper_active = _is_wrapper_active(repo_id)
 
-        # Fallback daemon notification: if _patched_snapshot_download is not
-        # wrapping this call (import-order issue), schedule a deferred
-        # notification so the daemon still learns about this download.
-        if download_succeeded and not _is_wrapper_active(repo_id):
-            _schedule_deferred_notification(
-                repo_id,
-                revision,
-                repo_type,
-                cache_dir,
-                local_dir,
+        # Single-file downloads should hand off to the daemon immediately once
+        # the outer hf_hub_download call finishes. snapshot_download() uses its
+        # own wrapper-level handoff, so we skip this branch while a wrapper is active.
+        if not wrapper_active and downloads_finished:
+            if download_succeeded:
+                try:
+                    _notify_seed_daemon(
+                        repo_id=repo_id,
+                        revision=revision,
+                        repo_type=repo_type,
+                        cache_dir=cache_dir,
+                        local_dir=local_dir,
+                    )
+                except Exception as e:
+                    logger.debug(f"[P2P] Immediate daemon notification failed: {e}")
+            _release_on_demand_session(
+                repo_id=repo_id,
+                revision=revision,
+                repo_type=repo_type,
+                cache_dir=cache_dir,
+                local_dir=local_dir,
             )
 
 
@@ -1000,6 +1056,8 @@ def _patched_snapshot_download(*args, **kwargs):
                 _deferred_contexts.pop(key, None)
 
         stats = get_download_stats()
+        cache_dir = kwargs.get('cache_dir')
+        local_dir = kwargs.get('local_dir')
 
         # Only a download that transferred at least one file is strong enough
         # evidence to mark a snapshot as complete. Pure cache hits are handled
@@ -1009,20 +1067,33 @@ def _patched_snapshot_download(*args, **kwargs):
                 f"[P2P] Skipping daemon seed notification for {repo_id}@{resolved[:8]}... "
                 f"(no transferred files observed)"
             )
+            _release_on_demand_session(
+                repo_id=repo_id,
+                revision=resolved,
+                repo_type=repo_type,
+                cache_dir=cache_dir,
+                local_dir=local_dir,
+            )
             return result
 
-        # Notify the daemon (fire-and-forget — safe even if daemon isn't running)
-        cache_dir = kwargs.get('cache_dir')
-        local_dir = kwargs.get('local_dir')
-        _notify_seed_daemon(
-            repo_id=repo_id,
-            revision=resolved,
-            repo_type=repo_type,
-            cache_dir=cache_dir,
-            local_dir=local_dir,
-            completed_snapshot=True,
-        )
-        logger.debug(f"[P2P] Notified daemon to seed {repo_id}@{resolved[:8]}...")
+        try:
+            _notify_seed_daemon(
+                repo_id=repo_id,
+                revision=resolved,
+                repo_type=repo_type,
+                cache_dir=cache_dir,
+                local_dir=local_dir,
+                completed_snapshot=True,
+            )
+            logger.debug(f"[P2P] Notified daemon to seed {repo_id}@{resolved[:8]}...")
+        finally:
+            _release_on_demand_session(
+                repo_id=repo_id,
+                revision=resolved,
+                repo_type=repo_type,
+                cache_dir=cache_dir,
+                local_dir=local_dir,
+            )
 
     except Exception as e:
         # Never let notification failures break the download flow

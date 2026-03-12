@@ -298,6 +298,37 @@ class P2PBatchManager:
         # Register the file with the session context and wait for it
         return session_ctx.download_file(filename, temp_file_path, tqdm_class=tqdm_class)
 
+    def release_on_demand_session(
+        self,
+        repo_id: str,
+        revision: str,
+        *,
+        repo_type: str = 'model',
+        cache_dir: Optional[str] = None,
+        local_dir: Optional[str] = None,
+    ) -> bool:
+        """Remove an idle on-demand session after handoff to the daemon.
+
+        This is intended for the download client process only. The long-lived
+        background seeding role belongs to the daemon's ``full_seed`` session;
+        once a user-facing download operation completes, the temporary
+        on-demand session should go away promptly to avoid duplicate seeders.
+        """
+        storage_kind, storage_root = _storage_identity(cache_dir=cache_dir, local_dir=local_dir)
+        repo_key = (repo_type, repo_id, revision, storage_kind, storage_root)
+        worker = None
+
+        with self._lock:
+            ctx = self.sessions.get(repo_key)
+            if ctx is None or ctx.session_mode != 'on_demand':
+                return False
+            ctx = self.sessions.pop(repo_key)
+            worker = self._teardown_session(ctx)
+
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(timeout=3)
+        return True
+
     # ── Session lifecycle management ──────────────────────────────────────
 
     def _teardown_session(self, ctx: 'SessionContext') -> Optional[Any]:

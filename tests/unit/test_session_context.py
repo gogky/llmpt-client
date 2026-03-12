@@ -236,6 +236,24 @@ class TestDeliverFile:
 
 class TestInitTorrent:
 
+    def test_fastresume_path_is_storage_scoped(self):
+        from llmpt.session_context import _build_fastresume_filename
+
+        default_name = _build_fastresume_filename("test/repo", "a" * 40)
+        cache_name = _build_fastresume_filename(
+            "test/repo",
+            "a" * 40,
+            cache_dir="/tmp/custom_cache",
+        )
+        local_name = _build_fastresume_filename(
+            "test/repo",
+            "a" * 40,
+            local_dir="/tmp/local_dir",
+        )
+
+        assert default_name != cache_name
+        assert cache_name != local_name
+
     def test_already_initialized(self, make_ctx, mock_lt):
         """If handle is not None, should return True immediately."""
         ctx = make_ctx()

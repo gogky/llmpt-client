@@ -29,6 +29,12 @@ from llmpt.patch import (
 def clean_patch_state():
     """Ensure patch state is clean before and after each test."""
     remove_patch()
+    for timer in patch_module._deferred_timers.values():
+        timer.cancel()
+    patch_module._deferred_timers.clear()
+    patch_module._deferred_contexts.clear()
+    patch_module._active_wrapper_counts.clear()
+    patch_module._active_download_counts.clear()
     patch_module._original_hf_hub_download = None
     patch_module._original_http_get = None
     patch_module._original_snapshot_download = None
@@ -41,6 +47,12 @@ def clean_patch_state():
             delattr(patch_module._context, attr)
     yield
     remove_patch()
+    for timer in patch_module._deferred_timers.values():
+        timer.cancel()
+    patch_module._deferred_timers.clear()
+    patch_module._deferred_contexts.clear()
+    patch_module._active_wrapper_counts.clear()
+    patch_module._active_download_counts.clear()
     patch_module._original_hf_hub_download = None
     patch_module._original_http_get = None
     patch_module._original_snapshot_download = None
@@ -338,6 +350,49 @@ class TestPatchedHfHubDownload:
         assert patch_module._context.repo_id == "prev/repo"
         assert patch_module._context.filename == "prev.bin"
 
+    def test_successful_single_file_hands_off_and_releases(self):
+        patch_module._original_hf_hub_download = MagicMock(return_value="/path/to/file")
+        patch_module._config = {'tracker_url': 'http://tracker.example.com'}
+        mock_manager = MagicMock()
+
+        with patch('llmpt.tracker_client.TrackerClient'), \
+             patch('llmpt.utils.resolve_commit_hash', side_effect=lambda r, rev, **kw: rev), \
+             patch('llmpt.patch._notify_seed_daemon') as mock_notify, \
+             patch('llmpt.p2p_batch.P2PBatchManager._instance', mock_manager):
+            result = _patched_hf_hub_download("test/repo", "model.bin", revision="main")
+
+        assert result == "/path/to/file"
+        mock_notify.assert_called_once_with(
+            repo_id="test/repo",
+            revision="main",
+            repo_type="model",
+            cache_dir=None,
+            local_dir=None,
+        )
+        mock_manager.release_on_demand_session.assert_called_once_with(
+            repo_id="test/repo",
+            revision="main",
+            repo_type="model",
+            cache_dir=None,
+            local_dir=None,
+        )
+
+    def test_wrapper_active_skips_single_file_handoff(self):
+        patch_module._original_hf_hub_download = MagicMock(return_value="/path/to/file")
+        patch_module._config = {'tracker_url': 'http://tracker.example.com'}
+        patch_module._active_wrapper_counts["test/repo"] = 1
+        mock_manager = MagicMock()
+
+        with patch('llmpt.tracker_client.TrackerClient'), \
+             patch('llmpt.utils.resolve_commit_hash', side_effect=lambda r, rev, **kw: rev), \
+             patch('llmpt.patch._notify_seed_daemon') as mock_notify, \
+             patch('llmpt.p2p_batch.P2PBatchManager._instance', mock_manager):
+            result = _patched_hf_hub_download("test/repo", "model.bin", revision="main")
+
+        assert result == "/path/to/file"
+        mock_notify.assert_not_called()
+        mock_manager.release_on_demand_session.assert_not_called()
+
 
 # ─── apply_patch / remove_patch integration ───────────────────────────────────
 
@@ -493,9 +548,11 @@ class TestPatchedSnapshotDownload:
         """Pure cache hits must not auto-register a completed snapshot."""
         patch_module._config = {'verbose': False}
         patch_module._original_snapshot_download = MagicMock(return_value="/tmp/model")
+        mock_manager = MagicMock()
 
         with patch('llmpt.utils.resolve_commit_hash', return_value='a' * 40), \
-             patch('llmpt.patch._notify_seed_daemon') as mock_notify:
+             patch('llmpt.patch._notify_seed_daemon') as mock_notify, \
+             patch('llmpt.p2p_batch.P2PBatchManager._instance', mock_manager):
             result = _patched_snapshot_download(
                 repo_id="test/repo",
                 revision="main",
@@ -503,10 +560,18 @@ class TestPatchedSnapshotDownload:
 
         assert result == "/tmp/model"
         mock_notify.assert_not_called()
+        mock_manager.release_on_demand_session.assert_called_once_with(
+            repo_id="test/repo",
+            revision='a' * 40,
+            repo_type="model",
+            cache_dir=None,
+            local_dir=None,
+        )
 
     def test_notifies_daemon_for_transferred_snapshot(self):
         """A snapshot that transferred files should mark the source complete."""
         patch_module._config = {'verbose': False}
+        mock_manager = MagicMock()
 
         def fake_snapshot_download(*args, **kwargs):
             with patch_module._stats_lock:
@@ -516,7 +581,8 @@ class TestPatchedSnapshotDownload:
         patch_module._original_snapshot_download = MagicMock(side_effect=fake_snapshot_download)
 
         with patch('llmpt.utils.resolve_commit_hash', return_value='a' * 40), \
-             patch('llmpt.patch._notify_seed_daemon') as mock_notify:
+             patch('llmpt.patch._notify_seed_daemon') as mock_notify, \
+             patch('llmpt.p2p_batch.P2PBatchManager._instance', mock_manager):
             result = _patched_snapshot_download(
                 repo_id="test/repo",
                 revision="main",
@@ -530,4 +596,46 @@ class TestPatchedSnapshotDownload:
             cache_dir=None,
             local_dir=None,
             completed_snapshot=True,
+        )
+        mock_manager.release_on_demand_session.assert_called_once_with(
+            repo_id="test/repo",
+            revision='a' * 40,
+            repo_type="model",
+            cache_dir=None,
+            local_dir=None,
+        )
+
+
+class TestDeferredNotification:
+
+    def test_deferred_notification_releases_on_demand_session(self):
+        mock_manager = MagicMock()
+        key = patch_module._deferred_key("test/repo", "a" * 40, "model")
+        patch_module._deferred_contexts[key] = {
+            'repo_id': "test/repo",
+            'revision': "a" * 40,
+            'repo_type': "model",
+            'cache_dir': None,
+            'local_dir': None,
+            'start_time': time.time(),
+        }
+        patch_module._deferred_timers[key] = MagicMock()
+
+        with patch('llmpt.patch._notify_seed_daemon') as mock_notify, \
+             patch('llmpt.p2p_batch.P2PBatchManager._instance', mock_manager):
+            patch_module._fire_deferred_notification(key)
+
+        mock_notify.assert_called_once_with(
+            repo_id="test/repo",
+            revision="a" * 40,
+            repo_type="model",
+            cache_dir=None,
+            local_dir=None,
+        )
+        mock_manager.release_on_demand_session.assert_called_once_with(
+            repo_id="test/repo",
+            revision="a" * 40,
+            repo_type="model",
+            cache_dir=None,
+            local_dir=None,
         )
