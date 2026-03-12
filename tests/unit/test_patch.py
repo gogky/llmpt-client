@@ -17,6 +17,7 @@ from huggingface_hub import file_download
 
 import llmpt
 from llmpt.patch import apply_patch, remove_patch
+from llmpt.utils import get_hf_hub_cache
 
 
 @pytest.fixture(autouse=True)
@@ -150,3 +151,13 @@ def test_snapshot_download_notification_handles_storage_key_shape():
             local_dir="/tmp/model",
             completed_snapshot=True,
         )
+
+
+def test_deferred_key_normalizes_default_hub_cache():
+    import llmpt.patch as patch_module
+
+    assert patch_module._deferred_key(
+        repo_id="demo/repo",
+        revision="main",
+        repo_type="model",
+    ) == ("model", "demo/repo", "main", "hub_cache", get_hf_hub_cache())

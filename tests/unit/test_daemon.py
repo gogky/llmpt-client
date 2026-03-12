@@ -11,12 +11,14 @@ import pytest
 
 from llmpt.daemon import (
     _read_pid,
+    _seeding_key,
     _write_pid,
     _remove_pid,
     _is_process_running,
     is_daemon_running,
     PID_FILE,
 )
+from llmpt.utils import get_hf_hub_cache
 
 
 @pytest.fixture
@@ -121,3 +123,13 @@ class TestProcessSeedable:
             cache_dir=None,
             local_dir=None,
         )
+
+
+def test_seeding_key_normalizes_default_hub_cache():
+    assert _seeding_key("model", "demo/repo", "a" * 40) == (
+        "model",
+        "demo/repo",
+        "a" * 40,
+        "hub_cache",
+        get_hf_hub_cache(),
+    )

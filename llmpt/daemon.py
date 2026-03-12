@@ -23,7 +23,7 @@ import sys
 import time
 from typing import Dict, Optional, Set, Tuple
 
-from .utils import LIBTORRENT_AVAILABLE, lt
+from .utils import LIBTORRENT_AVAILABLE, lt, get_hf_hub_cache
 
 logger = logging.getLogger("llmpt.daemon")
 
@@ -101,7 +101,7 @@ def _seeding_key(
         storage_root = _normalize_storage_path(cache_dir)
     else:
         storage_kind = "hub_cache"
-        storage_root = ""
+        storage_root = get_hf_hub_cache()
     return (repo_type, repo_id, revision, storage_kind, storage_root)
 
 

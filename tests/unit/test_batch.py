@@ -46,6 +46,7 @@ def test_register_request_success(mock_lt_all_modules):
     """Test successfully registering a request and creating a session context."""
     from llmpt.p2p_batch import P2PBatchManager
     from llmpt.p2p_batch import SessionContext
+    from llmpt.utils import get_hf_hub_cache
 
     tracker = MagicMock()
     tracker.download_torrent.return_value = b'fake_torrent_bytes'
@@ -65,7 +66,7 @@ def test_register_request_success(mock_lt_all_modules):
 
         assert success is True
         mock_download.assert_called_once_with("model.bin", "/tmp/fake", tqdm_class=None)
-        assert ("model", "demo", "main", "hub_cache", "") in manager.sessions
+        assert ("model", "demo", "main", "hub_cache", get_hf_hub_cache()) in manager.sessions
 
 
 def test_session_context_init_torrent(mock_lt_all_modules):
@@ -115,4 +116,3 @@ def test_session_context_init_torrent(mock_lt_all_modules):
     mock_lt_all_modules.bdecode.assert_called_once_with(b'fake_torrent_bytes')
     mock_lt_all_modules.torrent_info.assert_called_once()
     mock_lt_all_modules.parse_magnet_uri.assert_not_called()
-

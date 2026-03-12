@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Dict, Any, Optional
 if TYPE_CHECKING:
     from .tracker_client import TrackerClient
 
-from .utils import lt, LIBTORRENT_AVAILABLE
+from .utils import lt, LIBTORRENT_AVAILABLE, get_hf_hub_cache
 
 # Re-export SessionContext for backward compatibility.
 # All existing imports like ``from llmpt.p2p_batch import SessionContext`` continue to work.
@@ -40,7 +40,7 @@ def _storage_identity(
         return ("local_dir", os.path.realpath(os.path.abspath(os.path.expanduser(local_dir))))
     if cache_dir:
         return ("hub_cache", os.path.realpath(os.path.abspath(os.path.expanduser(cache_dir))))
-    return ("hub_cache", "")
+    return ("hub_cache", get_hf_hub_cache())
 
 
 def _is_port_available(port: int) -> bool:

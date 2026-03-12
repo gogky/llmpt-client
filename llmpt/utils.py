@@ -4,6 +4,7 @@ Utility functions.
 
 import hashlib
 import logging
+import os
 import re
 import threading
 
@@ -29,6 +30,22 @@ _COMMIT_HASH_RE = re.compile(r'^[0-9a-f]{40}$')
 # because commit hashes are immutable.
 _revision_cache: dict = {}
 _revision_cache_lock = threading.Lock()
+
+
+def get_hf_hub_cache() -> str:
+    """Return the normalized default HuggingFace hub cache path."""
+    try:
+        from huggingface_hub import constants
+
+        hub_cache = constants.HF_HUB_CACHE
+    except (ImportError, AttributeError):
+        hf_home = os.getenv(
+            "HF_HOME",
+            os.path.join(os.path.expanduser("~"), ".cache", "huggingface"),
+        )
+        hub_cache = os.path.join(hf_home, "hub")
+
+    return os.path.realpath(os.path.abspath(os.path.expanduser(hub_cache)))
 
 
 def resolve_commit_hash(

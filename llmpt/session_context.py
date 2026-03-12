@@ -107,6 +107,15 @@ class SessionContext:
         self.full_mapping: bool = False
         self.seeding_hardlinks = []
 
+    def get_file_progress(self, *, verified_only: bool = False):
+        """Return file progress, optionally counting only hash-verified pieces."""
+        if not self.handle:
+            return []
+        flags = 0
+        if verified_only and hasattr(lt.torrent_handle, "piece_granularity"):
+            flags = lt.torrent_handle.piece_granularity
+        return self.handle.file_progress(flags)
+
     def _init_torrent(self, initial_filename: str = None) -> bool:
         """Initialize the libtorrent handle if not already done."""
         if self.handle is not None:
@@ -219,7 +228,7 @@ class SessionContext:
                     return False
                 status = self.handle.status()
                 if status.state in (4, 5):
-                    progresses = self.handle.file_progress()
+                    progresses = self.get_file_progress(verified_only=True)
                     if sum(progresses) >= self.torrent_info_obj.total_size():
                         return True
             except Exception:
@@ -307,7 +316,7 @@ class SessionContext:
                     status = self.handle.status()
                     if status.state in (4, 5):  # 4=finished, 5=seeding
                         files = self.torrent_info_obj.files()
-                        file_progress = self.handle.file_progress()
+                        file_progress = self.get_file_progress(verified_only=True)
                         file_size = files.file_size(file_index)
                         if file_progress[file_index] == file_size and file_size > 0:
                             src = self._get_lt_disk_path(file_index)
@@ -736,7 +745,7 @@ class SessionContext:
         # Remove destination if it already exists (e.g., stale .incomplete file)
         if os.path.exists(dst):
             os.unlink(dst)
-        
+
         try:
             # Hard link: instant, no extra disk space on same filesystem
             os.link(src, dst)

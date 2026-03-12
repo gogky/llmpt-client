@@ -59,8 +59,10 @@ def _deferred_key(
     identity is tracked separately so simultaneous downloads of the same repo
     into different roots do not stomp each other.
     """
+    from .utils import get_hf_hub_cache
+
     storage_kind = "local_dir" if local_dir else "hub_cache"
-    storage_root = local_dir or cache_dir or ""
+    storage_root = local_dir or cache_dir or get_hf_hub_cache()
     return (repo_type or "model", repo_id, revision or "main", storage_kind, storage_root)
 
 

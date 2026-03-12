@@ -323,7 +323,7 @@ def _collect_ready_files(ctx: "SessionContext") -> list:
     if not ctx.torrent_info_obj:
         return []
 
-    file_progress = ctx.handle.file_progress()
+    file_progress = ctx.get_file_progress(verified_only=True)
     files = ctx.torrent_info_obj.files()
     ready = []
 

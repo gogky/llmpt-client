@@ -94,6 +94,23 @@ class TestLiveTransferPostfix:
         assert _format_live_transfer_postfix({}) == ""
 
 
+# ─── get_file_progress ───────────────────────────────────────────────────────
+
+class TestGetFileProgress:
+
+    def test_verified_progress_uses_piece_granularity(self, make_ctx, mock_lt):
+        ctx = make_ctx()
+        ctx.handle = MagicMock()
+        piece_flag = object()
+        mock_lt.torrent_handle.piece_granularity = piece_flag
+        ctx.handle.file_progress.return_value = [123]
+
+        result = ctx.get_file_progress(verified_only=True)
+
+        assert result == [123]
+        ctx.handle.file_progress.assert_called_once_with(piece_flag)
+
+
 # ─── _find_file_index ─────────────────────────────────────────────────────────
 
 class TestFindFileIndex:
@@ -459,6 +476,8 @@ class TestDownloadFile:
         ctx = make_ctx(timeout=5)
         ctx.handle = MagicMock()
         ctx.is_valid = True
+        piece_flag = object()
+        mock_lt.torrent_handle.piece_granularity = piece_flag
 
         mock_files = MagicMock()
         mock_files.num_files.return_value = 1
@@ -485,6 +504,42 @@ class TestDownloadFile:
 
         assert result is True
         assert dst.exists()
+        ctx.handle.file_progress.assert_called_once_with(piece_flag)
+
+    def test_immediate_delivery_waits_for_verified_piece_completion(self, make_ctx, mock_lt, tmp_path):
+        """Raw file bytes are insufficient until the shared piece is hash-verified."""
+        ctx = make_ctx(timeout=0.01)
+        ctx.handle = MagicMock()
+        ctx.is_valid = True
+        piece_flag = object()
+        mock_lt.torrent_handle.piece_granularity = piece_flag
+
+        mock_files = MagicMock()
+        mock_files.num_files.return_value = 1
+        mock_files.file_path.side_effect = lambda i: "root/model.bin"
+        mock_files.file_size.return_value = 100
+
+        mock_ti = MagicMock()
+        mock_ti.files.return_value = mock_files
+        ctx.torrent_info_obj = mock_ti
+        ctx.temp_dir = str(tmp_path)
+
+        ctx.handle.status.return_value.state = 4
+        ctx.handle.file_progress.side_effect = lambda flags=0: [0] if flags is piece_flag else [100]
+
+        src_dir = tmp_path / "root"
+        src_dir.mkdir()
+        src_file = src_dir / "model.bin"
+        src_file.write_bytes(b"x" * 100)
+
+        dst = tmp_path / "dest" / "model.bin"
+
+        with patch.object(ctx, '_init_torrent', return_value=True):
+            result = ctx.download_file("model.bin", str(dst))
+
+        assert result is False
+        assert not dst.exists()
+        assert ctx.handle.file_progress.call_args_list[0] == call(piece_flag)
 
 
 # ─── map_all_files_for_seeding ────────────────────────────────────────────────

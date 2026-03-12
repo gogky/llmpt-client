@@ -269,7 +269,7 @@ class TestCheckPendingFiles:
         ctx._find_file_index.return_value = 0
 
         # File is 100% done
-        ctx.handle.file_progress.return_value = [1000]
+        ctx.get_file_progress.return_value = [1000]
         ctx.handle.file_priorities.return_value = [1]
 
         # _get_lt_disk_path and _deliver_file
@@ -281,6 +281,7 @@ class TestCheckPendingFiles:
         assert result is False
         assert event.is_set()
         ctx._deliver_file.assert_called_once_with("/tmp/p2p/root/model.bin", "/dest/model.bin")
+        ctx.get_file_progress.assert_called_once_with(verified_only=True)
 
     @patch('llmpt.monitor.lt')
     def test_file_not_yet_complete(self, mock_lt):
@@ -304,7 +305,7 @@ class TestCheckPendingFiles:
         ctx.torrent_info_obj = mock_ti
 
         ctx._find_file_index.return_value = 0
-        ctx.handle.file_progress.return_value = [500]  # Only 50%
+        ctx.get_file_progress.return_value = [500]  # Only 50%
         ctx.handle.file_priorities.return_value = [1]
 
         result = _check_pending_files(ctx)
@@ -312,6 +313,7 @@ class TestCheckPendingFiles:
         assert result is False
         assert not event.is_set()
         ctx._deliver_file.assert_not_called()
+        ctx.get_file_progress.assert_called_once_with(verified_only=True)
 
     @patch('llmpt.monitor.lt')
     def test_checking_state_skips_progress_check(self, mock_lt):
@@ -351,13 +353,14 @@ class TestCheckPendingFiles:
 
         # After metadata loads, _find_file_index returns None → no delivery
         ctx._find_file_index.return_value = None
-        ctx.handle.file_progress.return_value = [0, 0]
+        ctx.get_file_progress.return_value = [0, 0]
 
         _check_pending_files(ctx)
 
         # torrent_info_obj should now be set
         assert ctx.torrent_info_obj is mock_ti
         ctx.handle.prioritize_files.assert_called_once_with([0, 0])
+        ctx.get_file_progress.assert_called_once_with(verified_only=True)
 
 
 # ─── _check_session_health ───────────────────────────────────────────────────
@@ -468,7 +471,7 @@ class TestCollectReadyFiles:
         ctx.torrent_info_obj = mock_ti
 
         ctx._find_file_index.return_value = 0
-        ctx.handle.file_progress.return_value = [1000]
+        ctx.get_file_progress.return_value = [1000]
         ctx.handle.file_priorities.return_value = [1]
         ctx._get_lt_disk_path.return_value = "/tmp/p2p/model.bin"
 
@@ -476,6 +479,7 @@ class TestCollectReadyFiles:
 
         assert len(result) == 1
         assert result[0] == ("/tmp/p2p/model.bin", "/dest/model.bin", "model.bin")
+        ctx.get_file_progress.assert_called_once_with(verified_only=True)
 
     def test_skips_incomplete_files(self):
         ctx = make_mock_ctx()
@@ -492,11 +496,12 @@ class TestCollectReadyFiles:
         ctx.torrent_info_obj = mock_ti
 
         ctx._find_file_index.return_value = 0
-        ctx.handle.file_progress.return_value = [500]  # 50%
+        ctx.get_file_progress.return_value = [500]  # 50%
         ctx.handle.file_priorities.return_value = [1]
 
         result = _collect_ready_files(ctx)
         assert result == []
+        ctx.get_file_progress.assert_called_once_with(verified_only=True)
 
 
 # ─── Integration: deliver outside lock ───────────────────────────────────────
@@ -525,7 +530,7 @@ class TestDeliverOutsideLock:
         ctx.torrent_info_obj = mock_ti
 
         ctx._find_file_index.return_value = 0
-        ctx.handle.file_progress.return_value = [1000]
+        ctx.get_file_progress.return_value = [1000]
         ctx.handle.file_priorities.return_value = [1]
         ctx._get_lt_disk_path.return_value = "/tmp/p2p/model.bin"
 
@@ -554,3 +559,4 @@ class TestDeliverOutsideLock:
         assert lock_was_held_during_deliver[0] is False, \
             "_deliver_file was called while ctx.lock was held! This blocks download_file() callers."
         assert event.is_set()
+        ctx.get_file_progress.assert_called_once_with(verified_only=True)
