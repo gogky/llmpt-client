@@ -674,6 +674,39 @@ def _extract_snapshot_context_from_stack() -> Optional[dict]:
     return None
 
 
+def _matches_snapshot_download_context(
+    *,
+    repo_id: str,
+    revision: str,
+    repo_type: str,
+    cache_dir: Optional[str] = None,
+    local_dir: Optional[str] = None,
+) -> bool:
+    """Return True when the current stack still belongs to this snapshot_download."""
+    snapshot_ctx = _extract_snapshot_context_from_stack()
+    if snapshot_ctx is None:
+        return False
+
+    if snapshot_ctx.get("repo_id") != repo_id:
+        return False
+    if (snapshot_ctx.get("repo_type") or "model") != (repo_type or "model"):
+        return False
+    if (snapshot_ctx.get("revision") or "main") != (revision or "main"):
+        return False
+
+    expected_local_dir = _normalize_storage_root(local_dir)
+    actual_local_dir = _normalize_storage_root(snapshot_ctx.get("local_dir"))
+    if expected_local_dir or actual_local_dir:
+        return expected_local_dir == actual_local_dir
+
+    expected_cache_dir = _normalize_storage_root(cache_dir)
+    actual_cache_dir = _normalize_storage_root(snapshot_ctx.get("cache_dir"))
+    if expected_cache_dir or actual_cache_dir:
+        return expected_cache_dir == actual_cache_dir
+
+    return True
+
+
 def _fire_deferred_notification(key: tuple[str, str, str, str, str]) -> None:
     """Called by the debounce timer — sends a daemon seed notification.
 
@@ -733,6 +766,7 @@ def _fire_deferred_notification(key: tuple[str, str, str, str, str]) -> None:
             repo_type=ctx['repo_type'],
             cache_dir=ctx.get('cache_dir'),
             local_dir=ctx.get('local_dir'),
+            completed_snapshot=bool(ctx.get('completed_snapshot')),
         )
         logger.debug(
             f"[P2P] Deferred daemon notification sent for "
@@ -764,6 +798,7 @@ def _schedule_deferred_notification(
     repo_type: str,
     cache_dir: Optional[str] = None,
     local_dir: Optional[str] = None,
+    completed_snapshot: bool = False,
 ) -> None:
     """Schedule (or reschedule) a deferred daemon notification.
 
@@ -787,6 +822,9 @@ def _schedule_deferred_notification(
             'repo_type': repo_type,
             'cache_dir': cache_dir,
             'local_dir': local_dir,
+            'completed_snapshot': bool(
+                completed_snapshot or (existing or {}).get('completed_snapshot')
+            ),
             'start_time': existing['start_time'] if existing else time.time(),
         }
         
@@ -949,6 +987,13 @@ def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
         # own wrapper-level handoff, so we skip this branch while a wrapper is active.
         if not wrapper_active and downloads_finished:
             if download_succeeded:
+                completed_snapshot = _matches_snapshot_download_context(
+                    repo_id=repo_id,
+                    revision=revision,
+                    repo_type=repo_type,
+                    cache_dir=cache_dir,
+                    local_dir=local_dir,
+                )
                 try:
                     _notify_seed_daemon(
                         repo_id=repo_id,
@@ -956,6 +1001,7 @@ def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
                         repo_type=repo_type,
                         cache_dir=cache_dir,
                         local_dir=local_dir,
+                        completed_snapshot=completed_snapshot,
                     )
                 except Exception as e:
                     logger.debug(f"[P2P] Immediate daemon notification failed: {e}")
@@ -981,6 +1027,7 @@ def _patched_http_get(url: str, temp_file, **kwargs):
     cache_dir = getattr(_context, 'cache_dir', None)
     local_dir = getattr(_context, 'local_dir', None)
     schedule_deferred = False
+    deferred_completed_snapshot = False
     stats_key = None
 
     # Fallback: if _patched_hf_hub_download was bypassed (import-order issue),
@@ -1007,6 +1054,7 @@ def _patched_http_get(url: str, temp_file, **kwargs):
             # deferred daemon notification here so the daemon knows to seed it.
             # Do this only after the file transfer succeeds.
             schedule_deferred = not _is_wrapper_active(repo_id)
+            deferred_completed_snapshot = bool(stack_ctx.get('from_snapshot_download'))
 
     if repo_id and revision:
         stats_key = _snapshot_stats_key(
@@ -1060,6 +1108,7 @@ def _patched_http_get(url: str, temp_file, **kwargs):
                         repo_type,
                         cache_dir,
                         local_dir,
+                        completed_snapshot=deferred_completed_snapshot,
                     )
                 return  # Skip original http_get completely!
             else:
@@ -1082,6 +1131,7 @@ def _patched_http_get(url: str, temp_file, **kwargs):
             repo_type,
             cache_dir,
             local_dir,
+            completed_snapshot=deferred_completed_snapshot,
         )
     return result
 
