@@ -1,0 +1,63 @@
+# Docker Compose for breakpoint-resume E2E tests.
+#
+# Covers:
+#   1. HTTP fallback resume with no available torrent
+#   2. P2P resume with preserved p2p_root + fastresume state
+#   3. local_dir resume for both paths
+#
+# Uses a small whole-repository model so the seeder matches the product's
+# current whole-repository seeding semantics while the downloader still
+# interrupts after only a small amount of transferred data.
+#
+# Usage:
+#   docker compose -f docker-compose.test-resume.yml up --build
+
+networks:
+  llmpt_test:
+    driver: bridge
+
+services:
+  resume-seeder:
+    build:
+      context: .
+      dockerfile: tests/e2e/Dockerfile.test
+    container_name: llmpt-resume-seeder
+    volumes:
+      - .:/app
+    environment:
+      - HF_HOME=/tmp/hf_cache_resume_seeder
+      - TRACKER_URL=http://118.195.159.242
+      - HF_P2P_PORT=6881
+      - RESUME_REPO_ID=prajjwal1/bert-tiny
+      - RESUME_ALLOW_PATTERN=pytorch_model.bin
+    networks:
+      - llmpt_test
+    command: >
+      python -m pytest
+      tests/e2e/run_resume_seeder.py
+      --run-integration -v -s --log-cli-level=INFO
+
+  resume-downloader:
+    build:
+      context: .
+      dockerfile: tests/e2e/Dockerfile.test
+    container_name: llmpt-resume-downloader
+    depends_on:
+      resume-seeder:
+        condition: service_started
+    volumes:
+      - .:/app
+    environment:
+      - HF_HOME=/tmp/hf_cache_resume_downloader
+      - TRACKER_URL=http://118.195.159.242
+      - TEST_SEEDER_PEER=llmpt-resume-seeder:6881
+      - HF_P2P_WEBSEED=1
+      - RESUME_REPO_ID=prajjwal1/bert-tiny
+      - RESUME_ALLOW_PATTERN=pytorch_model.bin
+      - RESUME_PARTIAL_THRESHOLD=131072
+    networks:
+      - llmpt_test
+    command: >
+      python -m pytest
+      tests/e2e/test_resume.py
+      --run-integration -v -s --log-cli-level=INFO

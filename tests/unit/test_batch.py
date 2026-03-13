@@ -116,3 +116,62 @@ def test_session_context_init_torrent(mock_lt_all_modules):
     mock_lt_all_modules.bdecode.assert_called_once_with(b'fake_torrent_bytes')
     mock_lt_all_modules.torrent_info.assert_called_once()
     mock_lt_all_modules.parse_magnet_uri.assert_not_called()
+
+
+def test_release_on_demand_session_completed_purges_state(mock_lt_all_modules):
+    from llmpt.p2p_batch import P2PBatchManager
+    from llmpt.utils import get_hf_hub_cache
+
+    manager = P2PBatchManager()
+    ctx = MagicMock(session_mode='on_demand', worker_thread=None)
+    key = ("model", "demo", "main", "hub_cache", get_hf_hub_cache())
+    manager.sessions[key] = ctx
+
+    with patch.object(manager, '_checkpoint_on_demand_session') as mock_checkpoint, \
+         patch.object(manager, '_teardown_session', return_value=None) as mock_teardown:
+        released = manager.release_on_demand_session("demo", "main", completed=True)
+
+    assert released is True
+    mock_checkpoint.assert_not_called()
+    mock_teardown.assert_called_once_with(ctx, purge_resumable_state=True)
+
+
+def test_release_on_demand_session_incomplete_preserves_state(mock_lt_all_modules):
+    from llmpt.p2p_batch import P2PBatchManager
+    from llmpt.utils import get_hf_hub_cache
+
+    manager = P2PBatchManager()
+    ctx = MagicMock(session_mode='on_demand', worker_thread=None)
+    key = ("model", "demo", "main", "hub_cache", get_hf_hub_cache())
+    manager.sessions[key] = ctx
+
+    with patch.object(manager, '_checkpoint_on_demand_session') as mock_checkpoint, \
+         patch.object(manager, '_teardown_session', return_value=None) as mock_teardown:
+        released = manager.release_on_demand_session("demo", "main", completed=False)
+
+    assert released is True
+    mock_checkpoint.assert_called_once_with(ctx)
+    mock_teardown.assert_called_once_with(ctx, purge_resumable_state=False)
+
+
+def test_remove_all_sessions_preserves_on_demand_partials(mock_lt_all_modules):
+    from llmpt.p2p_batch import P2PBatchManager
+
+    manager = P2PBatchManager()
+    on_demand = MagicMock(session_mode='on_demand', worker_thread=None)
+    full_seed = MagicMock(session_mode='full_seed', worker_thread=None)
+    manager.sessions = {
+        ("model", "demo", "main", "hub_cache", "/tmp/a"): on_demand,
+        ("model", "demo", "rev2", "hub_cache", "/tmp/b"): full_seed,
+    }
+
+    with patch.object(manager, '_checkpoint_on_demand_session') as mock_checkpoint, \
+         patch.object(manager, '_teardown_session', side_effect=[None, None]) as mock_teardown:
+        count = manager.remove_all_sessions()
+
+    assert count == 2
+    mock_checkpoint.assert_called_once_with(on_demand)
+    assert mock_teardown.call_args_list == [
+        ((on_demand,), {'purge_resumable_state': False}),
+        ((full_seed,), {'purge_resumable_state': True}),
+    ]

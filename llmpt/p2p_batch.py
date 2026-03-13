@@ -7,6 +7,7 @@ dynamic file prioritization.
 """
 
 import os
+import time
 import threading
 import logging
 from typing import TYPE_CHECKING, Dict, Any, Optional
@@ -306,6 +307,7 @@ class P2PBatchManager:
         repo_type: str = 'model',
         cache_dir: Optional[str] = None,
         local_dir: Optional[str] = None,
+        completed: bool = False,
     ) -> bool:
         """Remove an idle on-demand session after handoff to the daemon.
 
@@ -322,8 +324,19 @@ class P2PBatchManager:
             ctx = self.sessions.get(repo_key)
             if ctx is None or ctx.session_mode != 'on_demand':
                 return False
+
+        if not completed:
+            self._checkpoint_on_demand_session(ctx)
+
+        with self._lock:
+            ctx = self.sessions.get(repo_key)
+            if ctx is None or ctx.session_mode != 'on_demand':
+                return False
             ctx = self.sessions.pop(repo_key)
-            worker = self._teardown_session(ctx)
+            worker = self._teardown_session(
+                ctx,
+                purge_resumable_state=completed,
+            )
 
         if worker is not None and worker is not threading.current_thread():
             worker.join(timeout=3)
@@ -331,7 +344,73 @@ class P2PBatchManager:
 
     # ── Session lifecycle management ──────────────────────────────────────
 
-    def _teardown_session(self, ctx: 'SessionContext') -> Optional[Any]:
+    def _checkpoint_on_demand_session(
+        self,
+        ctx: 'SessionContext',
+        *,
+        timeout: float = 1.5,
+    ) -> None:
+        """Best-effort final fastresume save before tearing down an incomplete session."""
+        if ctx.session_mode != 'on_demand':
+            return
+
+        with ctx.lock:
+            handle = ctx.handle
+
+        if not handle:
+            return
+
+        try:
+            if not handle.is_valid():
+                return
+        except Exception:
+            return
+
+        fastresume_path = getattr(ctx, 'fastresume_path', None)
+        baseline_mtime = None
+        if fastresume_path and os.path.exists(fastresume_path):
+            try:
+                baseline_mtime = os.stat(fastresume_path).st_mtime_ns
+            except OSError:
+                baseline_mtime = None
+
+        try:
+            handle.save_resume_data(lt.save_resume_flags_t.flush_disk_cache)
+        except Exception as exc:
+            logger.debug(f"[{ctx.repo_id}] Final save_resume_data skipped: {exc}")
+            return
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                self.dispatch_alerts()
+            except Exception:
+                pass
+
+            try:
+                from .monitor import _process_alerts
+
+                _process_alerts(ctx)
+            except Exception:
+                pass
+
+            if fastresume_path:
+                try:
+                    if os.path.exists(fastresume_path):
+                        current_mtime = os.stat(fastresume_path).st_mtime_ns
+                        if baseline_mtime is None or current_mtime != baseline_mtime:
+                            return
+                except OSError:
+                    pass
+
+            time.sleep(0.05)
+
+    def _teardown_session(
+        self,
+        ctx: 'SessionContext',
+        *,
+        purge_resumable_state: bool = True,
+    ) -> Optional[Any]:
         """Teardown a single session (called while self._lock is held).
 
         Cleans up hardlinks, invalidates
@@ -352,9 +431,11 @@ class P2PBatchManager:
         if handle:
             try:
                 self.lt_session.remove_torrent(handle)
-                ctx.cleanup_temp_dir()
             except Exception:
                 pass
+        if purge_resumable_state:
+            ctx.cleanup_temp_dir()
+            ctx.cleanup_fastresume()
         return ctx.worker_thread
 
     def remove_session(self, repo_id: str, revision: str, *, repo_type: str = 'model', cache_dir: Optional[str] = None, local_dir: Optional[str] = None) -> bool:
@@ -392,9 +473,17 @@ class P2PBatchManager:
         """
         threads_to_join = []
         with self._lock:
+            contexts = list(self.sessions.values())
+        for ctx in contexts:
+            if ctx.session_mode == 'on_demand':
+                self._checkpoint_on_demand_session(ctx)
+        with self._lock:
             count = len(self.sessions)
             for ctx in self.sessions.values():
-                worker = self._teardown_session(ctx)
+                worker = self._teardown_session(
+                    ctx,
+                    purge_resumable_state=(ctx.session_mode != 'on_demand'),
+                )
                 if worker is not None:
                     threads_to_join.append(worker)
             self.sessions.clear()

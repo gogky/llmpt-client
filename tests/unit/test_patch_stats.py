@@ -1,7 +1,7 @@
 """
 Tests for patch.py statistics and utility functions.
 
-Covers: get_download_stats, reset_download_stats, _truncate_temp_file,
+Covers: get_download_stats, reset_download_stats,
 _patched_hf_hub_download context management, and _patched_http_get
 P2P-success / P2P-failure / no-context branches.
 """
@@ -22,7 +22,6 @@ from llmpt.patch import (
     _record_download_stat,
     _format_snapshot_p2p_postfix,
     _snapshot_stats_key,
-    _truncate_temp_file,
     _patched_http_get,
     _patched_hf_hub_download,
     _patched_snapshot_download,
@@ -139,24 +138,6 @@ class TestSnapshotPostfix:
         assert text == ""
 
 
-# ─── _truncate_temp_file ─────────────────────────────────────────────────────
-
-class TestTruncateTempFile:
-
-    def test_successful_truncate(self):
-        temp_file = MagicMock()
-        _truncate_temp_file(temp_file, "model.bin")
-        temp_file.seek.assert_called_once_with(0)
-        temp_file.truncate.assert_called_once_with(0)
-
-    def test_exception_does_not_raise(self):
-        """Should swallow exceptions gracefully."""
-        temp_file = MagicMock()
-        temp_file.seek.side_effect = OSError("file descriptor closed")
-        # Should NOT raise
-        _truncate_temp_file(temp_file, "model.bin")
-
-
 # ─── _patched_http_get: P2P success path ─────────────────────────────────────
 
 class TestPatchedHttpGetP2PSuccess:
@@ -197,7 +178,7 @@ class TestPatchedHttpGetP2PSuccess:
 class TestPatchedHttpGetP2PFailure:
 
     def test_p2p_failure_falls_back_to_http(self):
-        """When P2P fails, should truncate temp file and call original http_get."""
+        """When P2P fails, should preserve HF resume state and call original http_get."""
         mock_original = MagicMock()
         patch_module._original_http_get = mock_original
 
@@ -216,14 +197,12 @@ class TestPatchedHttpGetP2PFailure:
         with patch('llmpt.patch.P2PBatchManager', return_value=mock_manager, create=True):
             _patched_http_get("http://example.com/model.bin", temp_file=temp_file)
 
-        # Temp file should be truncated
-        temp_file.seek.assert_called_with(0)
-        temp_file.truncate.assert_called_with(0)
+        temp_file.seek.assert_not_called()
+        temp_file.truncate.assert_not_called()
 
-        # Original http_get should be called with resume_size=0
         mock_original.assert_called_once()
         _, kwargs = mock_original.call_args
-        assert kwargs['resume_size'] == 0
+        assert 'resume_size' not in kwargs
 
         # Stats should record HTTP fallback
         stats = get_download_stats()
@@ -354,6 +333,26 @@ class TestPatchedHfHubDownload:
         assert patch_module._context.repo_id == "prev/repo"
         assert patch_module._context.filename == "prev.bin"
 
+    def test_failed_single_file_preserves_resumable_state(self):
+        patch_module._original_hf_hub_download = MagicMock(side_effect=RuntimeError("fail"))
+        patch_module._config = {'tracker_url': 'http://tracker.example.com'}
+        mock_manager = MagicMock()
+
+        with patch('llmpt.tracker_client.TrackerClient'), \
+             patch('llmpt.utils.resolve_commit_hash', side_effect=lambda r, rev, **kw: rev), \
+             patch('llmpt.p2p_batch.P2PBatchManager._instance', mock_manager):
+            with pytest.raises(RuntimeError):
+                _patched_hf_hub_download("test/repo", "model.bin", revision="main")
+
+        mock_manager.release_on_demand_session.assert_called_once_with(
+            repo_id="test/repo",
+            revision="main",
+            repo_type="model",
+            cache_dir=None,
+            local_dir=None,
+            completed=False,
+        )
+
     def test_successful_single_file_hands_off_and_releases(self):
         patch_module._original_hf_hub_download = MagicMock(return_value="/path/to/file")
         patch_module._config = {'tracker_url': 'http://tracker.example.com'}
@@ -379,6 +378,7 @@ class TestPatchedHfHubDownload:
             repo_type="model",
             cache_dir=None,
             local_dir=None,
+            completed=True,
         )
 
     def test_wrapper_active_skips_single_file_handoff(self):
@@ -599,6 +599,7 @@ class TestPatchedSnapshotDownload:
             repo_type="model",
             cache_dir=None,
             local_dir=None,
+            completed=True,
         )
 
     def test_notifies_daemon_for_transferred_snapshot(self):
@@ -640,6 +641,7 @@ class TestPatchedSnapshotDownload:
             repo_type="model",
             cache_dir=None,
             local_dir=None,
+            completed=True,
         )
 
     def test_snapshot_completion_ignores_foreign_stats_bucket(self):
@@ -666,6 +668,7 @@ class TestPatchedSnapshotDownload:
             repo_type="model",
             cache_dir=None,
             local_dir=None,
+            completed=True,
         )
 
     def test_retries_transient_snapshot_metadata_error(self):
@@ -733,4 +736,5 @@ class TestDeferredNotification:
             repo_type="model",
             cache_dir=None,
             local_dir=None,
+            completed=True,
         )

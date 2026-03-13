@@ -332,20 +332,6 @@ def reset_download_stats(
             _download_stats.pop(stats_key, None)
 
 
-def _truncate_temp_file(temp_file, filename: str) -> None:
-    """Truncate temp file before HTTP fallback to prevent double-write.
-
-    When P2P fails, libtorrent may have partially written data to temp_file.
-    Truncating ensures the subsequent HTTP download starts from scratch.
-    """
-    try:
-        temp_file.seek(0)
-        temp_file.truncate(0)
-        logger.debug(f"[P2P] Truncated temp_file for clean HTTP fallback: {filename}")
-    except Exception as e:
-        logger.warning(f"[P2P] Could not truncate temp_file for {filename}: {e}")
-
-
 def _format_snapshot_p2p_postfix(
     stats: Optional[dict],
     download_stats: Optional[dict] = None,
@@ -761,6 +747,7 @@ def _fire_deferred_notification(key: tuple[str, str, str, str, str]) -> None:
             repo_type=ctx['repo_type'],
             cache_dir=ctx.get('cache_dir'),
             local_dir=ctx.get('local_dir'),
+            completed=True,
         )
         reset_download_stats(
             repo_id=ctx['repo_id'],
@@ -817,6 +804,7 @@ def _release_on_demand_session(
     repo_type: str,
     cache_dir: Optional[str] = None,
     local_dir: Optional[str] = None,
+    completed: bool = False,
 ) -> None:
     """Release the client-side on-demand session after handoff completes."""
     try:
@@ -832,6 +820,7 @@ def _release_on_demand_session(
             repo_type=repo_type,
             cache_dir=cache_dir,
             local_dir=local_dir,
+            completed=completed,
         )
         if released:
             logger.debug(
@@ -976,6 +965,7 @@ def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
                 repo_type=repo_type,
                 cache_dir=cache_dir,
                 local_dir=local_dir,
+                completed=download_succeeded,
             )
 
 
@@ -991,7 +981,6 @@ def _patched_http_get(url: str, temp_file, **kwargs):
     cache_dir = getattr(_context, 'cache_dir', None)
     local_dir = getattr(_context, 'local_dir', None)
     schedule_deferred = False
-    truncated = False
     stats_key = None
 
     # Fallback: if _patched_hf_hub_download was bypassed (import-order issue),
@@ -1075,23 +1064,16 @@ def _patched_http_get(url: str, temp_file, **kwargs):
                 return  # Skip original http_get completely!
             else:
                 logger.warning(f"[P2P] P2P fulfillment failed for {filename}. Falling back to HTTP.")
-                _truncate_temp_file(temp_file, filename)
-                truncated = True
 
         except Exception as e:
             logger.warning(f"[P2P] Exception in P2P intercept: {e}. Falling back to HTTP.")
-            _truncate_temp_file(temp_file, filename)
-            truncated = True
 
     # Fall back to original HTTP download if P2P failed or unavailable.
-    # Only force resume_size=0 if we actually truncated the file after a
-    # failed P2P attempt.  Otherwise, preserve the original resume_size so
-    # that HuggingFace's native resume mechanism works correctly.
+    # Preserve HuggingFace's native resume_size so interrupted HTTP transfers
+    # can continue from existing partial data.
     if filename and stats_key is not None:
         _record_download_stat(stats_key, 'http', filename)
     fallback_kwargs = {**kwargs}
-    if truncated:
-        fallback_kwargs['resume_size'] = 0
     result = _original_http_get(url, temp_file, **fallback_kwargs)
     if schedule_deferred:
         _schedule_deferred_notification(
@@ -1325,6 +1307,7 @@ def _patched_snapshot_download(*args, **kwargs):
                 repo_type=repo_type,
                 cache_dir=cache_dir,
                 local_dir=local_dir,
+                completed=True,
             )
             return result
 
@@ -1345,6 +1328,7 @@ def _patched_snapshot_download(*args, **kwargs):
                 repo_type=repo_type,
                 cache_dir=cache_dir,
                 local_dir=local_dir,
+                completed=True,
             )
             if stats_key is not None:
                 reset_download_stats(stats_key=stats_key)

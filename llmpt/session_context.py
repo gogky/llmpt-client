@@ -812,3 +812,14 @@ class SessionContext:
                 logger.debug(f"[{self.repo_id}] Cleaned up torrent dir: {torrent_subdir}")
         except Exception as e:
             logger.debug(f"[{self.repo_id}] Failed to clean torrent dir: {e}")
+
+    def cleanup_fastresume(self):
+        """Remove the persisted fastresume file for this session."""
+        if not self.fastresume_path:
+            return
+        try:
+            if os.path.exists(self.fastresume_path):
+                os.unlink(self.fastresume_path)
+                logger.debug(f"[{self.repo_id}] Removed fastresume: {self.fastresume_path}")
+        except Exception as e:
+            logger.debug(f"[{self.repo_id}] Failed to remove fastresume: {e}")
