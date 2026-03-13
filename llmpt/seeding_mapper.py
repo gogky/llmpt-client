@@ -58,11 +58,15 @@ def is_padding_file(target_norm: str) -> bool:
 
 
 def create_padding_file(expected_path: str, size: int) -> None:
-    """Create a zero-filled padding file if it doesn't already exist."""
+    """Create a zero-filled padding file if it doesn't already exist.
+
+    We use ``truncate()`` instead of writing explicit zero bytes so large pad
+    files can stay sparse on filesystems that support holes.
+    """
     os.makedirs(os.path.dirname(expected_path), exist_ok=True)
     if not os.path.exists(expected_path):
         with open(expected_path, 'wb') as f:
-            f.write(b'\x00' * size)
+            f.truncate(size)
 
 
 # ── Hardlink strategy (fast seed_mode startup) ───────────────────────────────

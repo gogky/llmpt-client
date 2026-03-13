@@ -130,6 +130,7 @@ class TrackerClient:
         piece_length: int,
         torrent_data: bytes,
         files: list,
+        announce_key: Optional[str] = None,
     ) -> bool:
         """
         Register a new torrent with the tracker.
@@ -139,12 +140,14 @@ class TrackerClient:
             revision: Git commit hash or branch name.
             repo_type: "model", "dataset", or "space".
             name: Display name for the model.
-            info_hash: BitTorrent info hash.
+            info_hash: Canonical torrent identity stored by the application.
             total_size: Total size in bytes.
             file_count: Number of files in the torrent.
             piece_length: Piece length in bytes.
             torrent_data: Raw .torrent file bytes (will be base64-encoded for transport).
             files: List of dicts with 'path' and 'size' keys.
+            announce_key: Optional tracker announce key. For pure v2 torrents this
+                is the 20-byte truncated swarm key used on the wire.
 
         Returns:
             True if registration successful, False otherwise.
@@ -165,6 +168,8 @@ class TrackerClient:
                 'torrent_data': base64.b64encode(torrent_data).decode('ascii'),
                 'files': files,
             }
+            if announce_key:
+                data['announce_key'] = announce_key
 
             logger.debug(f"Registering torrent: {url}")
 

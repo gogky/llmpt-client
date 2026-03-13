@@ -64,6 +64,46 @@ def _setup_successful_init(ctx, mock_lt):
     return mock_handle, mock_ti
 
 
+def _build_chain_overlap_torrent_info():
+    """Build the piece layout from the failing tiny-random-GPTJ torrent.
+
+    piece_length = 256 KiB
+
+    Relevant chain:
+      special_tokens_map.json -> piece 0
+      tf_model.h5             -> pieces 0-2
+      pytorch_model.bin       -> pieces 2-9
+
+    A one-hop overlap expansion from ``special_tokens_map.json`` reaches only
+    ``tf_model.h5``. In the real failure, libtorrent then touches piece 2 while
+    fetching ``tf_model.h5`` and still hits ``pytorch_model.bin`` as priority 0,
+    producing ``partfile_write ... End of file``.
+    """
+    entries = [
+        ("7362d24ca596daa0c15c0caad7407413599c78d4/config.json", 804, 0),
+        ("7362d24ca596daa0c15c0caad7407413599c78d4/special_tokens_map.json", 438, 804),
+        ("7362d24ca596daa0c15c0caad7407413599c78d4/.gitattributes", 1477, 1242),
+        ("7362d24ca596daa0c15c0caad7407413599c78d4/tf_model.h5", 603176, 2719),
+        ("7362d24ca596daa0c15c0caad7407413599c78d4/pytorch_model.bin", 1847348, 605895),
+        ("7362d24ca596daa0c15c0caad7407413599c78d4/vocab.json", 14640, 2453243),
+        ("7362d24ca596daa0c15c0caad7407413599c78d4/tokenizer.json", 31086, 2467883),
+        ("7362d24ca596daa0c15c0caad7407413599c78d4/tokenizer_config.json", 769, 2498969),
+        ("7362d24ca596daa0c15c0caad7407413599c78d4/merges.txt", 4573, 2499738),
+        ("7362d24ca596daa0c15c0caad7407413599c78d4/onnx/model.onnx", 959526, 2504311),
+    ]
+    mock_files = MagicMock()
+    mock_files.num_files.return_value = len(entries)
+    mock_files.file_path.side_effect = lambda i: entries[i][0]
+    mock_files.file_size.side_effect = lambda i: entries[i][1]
+    mock_files.file_offset.side_effect = lambda i: entries[i][2]
+
+    mock_info = MagicMock()
+    mock_info.num_files.return_value = len(entries)
+    mock_info.files.return_value = mock_files
+    mock_info.piece_length.return_value = 262144
+    return mock_info
+
+
 class TestLiveTransferPostfix:
 
     def test_shows_peers_only_after_real_p2p_bytes(self):
@@ -189,21 +229,27 @@ class TestGetLtDiskPath:
 class TestDeliverFile:
 
     def test_hard_link_success(self, make_ctx, tmp_path):
-        """Source file should be cleaned up after delivery."""
+        """Source file should stay in place and the fast path should avoid copy fallback."""
         ctx = make_ctx()
 
         src = tmp_path / "src.bin"
         src.write_bytes(b"hello")
-        src_inode = os.stat(str(src)).st_ino
         dst = tmp_path / "subdir" / "dst.bin"
 
-        ctx._deliver_file(str(src), str(dst))
+        def fake_link(src_path, dst_path):
+            with open(src_path, "rb") as src_f, open(dst_path, "wb") as dst_f:
+                dst_f.write(src_f.read())
+
+        with patch("os.link", side_effect=fake_link) as mock_link, \
+             patch("shutil.copy2") as mock_copy:
+            ctx._deliver_file(str(src), str(dst))
 
         assert dst.exists()
         assert dst.read_bytes() == b"hello"
         # src MUST NOT be deleted so Libtorrent can continue reading chunks
         assert src.exists()
-        assert os.stat(str(dst)).st_ino == src_inode
+        mock_link.assert_called_once_with(str(src), str(dst))
+        mock_copy.assert_not_called()
 
     def test_cross_device_fallback(self, make_ctx, tmp_path):
         """When os.link fails with OSError, should fall back to shutil.copy2."""
@@ -453,6 +499,37 @@ class TestInitTorrent:
         assert result is True
         mock_dns.assert_called_once_with('::1')
         assert ctx.test_peer_addr == ('::1', 7000)
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "Current priority expansion is only one hop. In the real local_dir "
+            "failure, requesting special_tokens_map.json reaches tf_model.h5 "
+            "first, then still hits pytorch_model.bin as priority 0 and triggers "
+            "partfile_write EOF."
+        ),
+    )
+    def test_initial_priorities_do_not_cover_transitive_piece_chain(self, make_ctx):
+        ctx = make_ctx()
+        mock_params = MagicMock()
+        mock_params.flags = 0
+        mock_info = _build_chain_overlap_torrent_info()
+        mock_handle = MagicMock()
+        mock_handle.torrent_file.return_value = mock_info
+        ctx.lt_session.add_torrent.return_value = mock_handle
+
+        with patch('llmpt.session_context.run_monitor_loop'), \
+             patch('os.makedirs'), \
+             patch('llmpt.torrent_init.acquire_torrent_data', return_value=b'fake_torrent'), \
+             patch('llmpt.torrent_init.build_add_torrent_params', return_value=(mock_params, mock_info)), \
+             patch('llmpt.torrent_init.resolve_test_peer', return_value=None):
+            result = ctx._init_torrent("special_tokens_map.json")
+
+        assert result is True
+        priorities = mock_params.file_priorities
+        assert priorities[1] == 1
+        assert priorities[3] == 1
+        assert priorities[4] == 1
 
 
 
