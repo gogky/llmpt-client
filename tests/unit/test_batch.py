@@ -244,11 +244,13 @@ def test_alert_pump_loop_dispatches_alerts(mock_lt_all_modules):
 
     manager = P2PBatchManager()
     manager.sessions = {('model', 'demo', 'main', 'hub_cache', '/tmp/cache'): MagicMock()}
-    manager.lt_session.wait_for_alert.return_value = None
+    manager.lt_session.wait_for_alert = MagicMock()
 
     stop_event = threading.Event()
-    with patch.object(manager, 'dispatch_alerts', side_effect=lambda: stop_event.set()) as mock_dispatch:
+    with patch.object(manager._alert_pump_wakeup, 'wait', return_value=False) as mock_wait, \
+         patch.object(manager, 'dispatch_alerts', side_effect=lambda: stop_event.set()) as mock_dispatch:
         manager._alert_pump_loop(stop_event)
 
-    manager.lt_session.wait_for_alert.assert_called_once_with(200)
+    mock_wait.assert_called_once_with(0.2)
+    manager.lt_session.wait_for_alert.assert_not_called()
     mock_dispatch.assert_called_once()

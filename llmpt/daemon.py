@@ -145,6 +145,52 @@ def _source_count_by_logical_identity(seedable) -> Dict[tuple[str, str, str], in
     return counts
 
 
+def _source_details_by_logical_identity(seedable) -> Dict[tuple[str, str, str], list[dict[str, Optional[str]]]]:
+    """Describe every verified live source backing each logical torrent."""
+    grouped: Dict[tuple[str, str, str], list[dict[str, Optional[str]]]] = {}
+    for item in seedable:
+        logical_key = _logical_seeding_key(
+            item.repo_type,
+            item.repo_id,
+            item.revision,
+        )
+        grouped.setdefault(logical_key, []).append(
+            {
+                "storage_kind": item.storage_kind,
+                "storage_root": item.storage_root,
+                "cache_dir": item.cache_dir,
+                "local_dir": item.local_dir,
+            }
+        )
+
+    for entries in grouped.values():
+        entries.sort(
+            key=lambda entry: (
+                entry.get("storage_kind") or "",
+                entry.get("storage_root") or "",
+            )
+        )
+    return grouped
+
+
+def _fallback_session_sources(session_info: dict) -> list[dict[str, Optional[str]]]:
+    """Describe the currently active session when a fresh scan is unavailable."""
+    cache_dir = session_info.get("cache_dir")
+    local_dir = session_info.get("local_dir")
+    storage_kind = "local_dir" if local_dir else "hub_cache"
+    storage_root = local_dir or cache_dir
+    if not storage_root:
+        return []
+    return [
+        {
+            "storage_kind": storage_kind,
+            "storage_root": storage_root,
+            "cache_dir": cache_dir,
+            "local_dir": local_dir,
+        }
+    ]
+
+
 def _reconcile_seeding_sessions(
     manager,
     seeding_set: Set[SeedSessionKey],
@@ -669,6 +715,7 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
                     manager, seeding_set, failed_attempts, suppressed_set, seedable
                 )
                 source_counts = _source_count_by_logical_identity(seedable)
+                source_details = _source_details_by_logical_identity(seedable)
                 for item in seedable:
                     _ensure_seedable_session(
                         item,
@@ -681,6 +728,7 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
             except Exception as e:
                 logger.warning(f"Failed to reconcile seeding sessions before status: {e}")
                 source_counts = {}
+                source_details = {}
             status = manager.get_all_session_status()
             from llmpt.torrent_state import get_torrent_state
             from llmpt.status_summary import summarize_status
@@ -730,6 +778,14 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
                                 v.get("revision"),
                             ),
                             1,
+                        ),
+                        "sources": source_details.get(
+                            _logical_seeding_key(
+                                v.get("repo_type", "model"),
+                                v.get("repo_id"),
+                                v.get("revision"),
+                            ),
+                            _fallback_session_sources(v),
                         ),
                         "tracker_registered": session_states[k].get("tracker_registered", False),
                         "last_registration_error": session_states[k].get("last_registration_error"),

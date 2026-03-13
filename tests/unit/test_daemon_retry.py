@@ -343,6 +343,50 @@ def test_scan_and_seed_restarts_dead_logical_session(monkeypatch):
     assert seeding_set == {key}
 
 
+def test_source_details_by_logical_identity_reports_all_live_sources():
+    import llmpt.daemon as daemon
+
+    from llmpt.cache_scanner import SeedableSource
+
+    grouped = daemon._source_details_by_logical_identity(
+        [
+            SeedableSource(
+                repo_type="model",
+                repo_id="org/shared",
+                revision="1" * 40,
+                storage_kind="hub_cache",
+                storage_root="/tmp/cache-a",
+                cache_dir="/tmp/cache-a",
+            ),
+            SeedableSource(
+                repo_type="model",
+                repo_id="org/shared",
+                revision="1" * 40,
+                storage_kind="local_dir",
+                storage_root="/tmp/local-a",
+                local_dir="/tmp/local-a",
+            ),
+        ]
+    )
+
+    assert grouped == {
+        ("model", "org/shared", "1" * 40): [
+            {
+                "storage_kind": "hub_cache",
+                "storage_root": "/tmp/cache-a",
+                "cache_dir": "/tmp/cache-a",
+                "local_dir": None,
+            },
+            {
+                "storage_kind": "local_dir",
+                "storage_root": "/tmp/local-a",
+                "cache_dir": None,
+                "local_dir": "/tmp/local-a",
+            },
+        ]
+    }
+
+
 def test_matching_seeding_keys_can_match_all_revisions_for_repo():
     import llmpt.daemon as daemon
 

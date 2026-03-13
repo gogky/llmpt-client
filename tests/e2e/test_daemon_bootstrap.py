@@ -169,11 +169,36 @@ def _keep_seeding_until(done_signal, timeout=180):
 
 
 def _matching_daemon_session(sessions, repo_id, storage_hint=None):
+    normalized_hint = (
+        os.path.realpath(os.path.abspath(os.path.expanduser(storage_hint)))
+        if storage_hint
+        else None
+    )
     for key, info in sessions.items():
         if repo_id not in key:
             continue
-        if storage_hint and storage_hint not in key:
-            continue
+        if normalized_hint:
+            if normalized_hint in key:
+                return key, info
+
+            matched_source = False
+            for source in info.get("sources", []):
+                for candidate in (
+                    source.get("storage_root"),
+                    source.get("cache_dir"),
+                    source.get("local_dir"),
+                ):
+                    if not candidate:
+                        continue
+                    candidate = os.path.realpath(os.path.abspath(os.path.expanduser(candidate)))
+                    if candidate == normalized_hint:
+                        matched_source = True
+                        break
+                if matched_source:
+                    break
+
+            if not matched_source:
+                continue
         return key, info
     return None, None
 

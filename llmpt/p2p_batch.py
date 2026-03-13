@@ -229,23 +229,10 @@ class P2PBatchManager:
                 with self._lock:
                     if not self.sessions or not self.lt_session:
                         break
-                    has_alertable_session = any(
-                        getattr(ctx, "handle", None) is not None and getattr(ctx, "is_valid", False)
-                        for ctx in self.sessions.values()
-                    )
-                    wait_for_alert = (
-                        getattr(self.lt_session, "wait_for_alert", None)
-                        if has_alertable_session
-                        else None
-                    )
-
-                try:
-                    if callable(wait_for_alert):
-                        wait_for_alert(200)
-                    else:
-                        self._alert_pump_wakeup.wait(0.2)
-                except Exception as exc:
-                    logger.debug(f"Alert pump wait failed: {exc}")
+                # Avoid libtorrent.wait_for_alert() here. In live E2E runs it
+                # can segfault inside the native extension, while a short
+                # Python-side wait preserves the single-owner alert model.
+                self._alert_pump_wakeup.wait(0.2)
 
                 self._alert_pump_wakeup.clear()
 
