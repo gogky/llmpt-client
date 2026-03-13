@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .session_context import SessionContext
 
+from .alert_events import AlertLogEvent, ResumeDataReadyEvent
 from .utils import lt
 
 logger = logging.getLogger(__name__)
@@ -163,44 +164,21 @@ def _save_resume_data(ctx: "SessionContext") -> None:
 
 
 def _process_alerts(ctx: "SessionContext") -> None:
-    """Process alerts from this session's inbox (populated by dispatch_alerts)."""
+    """Process snapshot events from this session's inbox."""
     with ctx.alert_lock:
         alerts = list(ctx.pending_alerts)
         ctx.pending_alerts.clear()
 
     for alert in alerts:
-        if isinstance(alert, lt.save_resume_data_alert):
+        if isinstance(alert, ResumeDataReadyEvent):
             try:
-                # libtorrent 2.x: alert.params is add_torrent_params (C++ object),
-                # use write_resume_data_buf() to serialize it.
-                # libtorrent 1.x: alert.params is a dict, use bencode().
-                if hasattr(lt, 'write_resume_data_buf'):
-                    resume_data = lt.write_resume_data_buf(alert.params)
-                else:
-                    resume_data = lt.bencode(alert.params)
                 with open(ctx.fastresume_path, "wb") as f:
-                    f.write(resume_data)
+                    f.write(alert.resume_data)
                 logger.debug(f"[{ctx.repo_id}] Saved resume data to {ctx.fastresume_path}")
             except Exception as e:
                 logger.warning(f"[{ctx.repo_id}] Failed to write resume data: {e}")
-
-        elif isinstance(alert, lt.save_resume_data_failed_alert):
-            logger.debug(f"[{ctx.repo_id}] Save resume data failed: {alert.message()}")
-            
-        elif isinstance(alert, lt.peer_error_alert):
-            logger.warning(f"[{ctx.repo_id}] PEER ERROR: {alert.message()}")
-            
-        elif isinstance(alert, lt.peer_disconnected_alert):
-            logger.warning(f"[{ctx.repo_id}] PEER DISCONNECTED: {alert.message()}")
-            
-        elif isinstance(alert, lt.torrent_error_alert):
-            logger.warning(f"[{ctx.repo_id}] TORRENT ERROR: {alert.message()}")
-            
-        elif isinstance(alert, lt.hash_failed_alert):
-            logger.warning(f"[{ctx.repo_id}] HASH FAILED: {alert.message()}")
-
-        elif isinstance(alert, lt.file_error_alert):
-            logger.warning(f"[{ctx.repo_id}] FILE ERROR: {alert.message()}")
+        elif isinstance(alert, AlertLogEvent):
+            logger.log(alert.log_level, f"[{ctx.repo_id}] {alert.prefix}: {alert.message}")
 
 
 def _check_pending_files(ctx: "SessionContext") -> bool:

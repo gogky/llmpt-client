@@ -12,11 +12,11 @@ from the inbox instead of the global session.
 """
 
 import threading
-from collections import deque
 from unittest.mock import patch, MagicMock, mock_open
 
+from llmpt.alert_events import ResumeDataReadyEvent
 from llmpt.monitor import _process_alerts
-from tests.unit.conftest import make_mock_lt, make_mock_ctx
+from tests.unit.conftest import make_mock_ctx
 
 
 class TestDispatchAlerts:
@@ -38,11 +38,17 @@ class TestDispatchAlerts:
         ctx_b = make_mock_ctx(repo_id="owner/repo_b")
         ctx_b.handle = handle_b
 
+        SaveResumeAlert = type('save_resume_data_alert', (), {})
+
         alert_for_a = MagicMock()
+        alert_for_a.__class__ = SaveResumeAlert
         alert_for_a.handle = handle_a
+        alert_for_a.params = {'info': 'aaa'}
 
         alert_for_b = MagicMock()
+        alert_for_b.__class__ = SaveResumeAlert
         alert_for_b.handle = handle_b
+        alert_for_b.params = {'info': 'bbb'}
 
         # Setup: create a manager with a mock lt_session
         manager = P2PBatchManager.__new__(P2PBatchManager)
@@ -54,14 +60,17 @@ class TestDispatchAlerts:
             ("owner/repo_b", "main"): ctx_b,
         }
 
-        manager.dispatch_alerts()
+        with patch('llmpt.p2p_batch.lt') as mock_lt:
+            mock_lt.save_resume_data_alert = SaveResumeAlert
+            mock_lt.write_resume_data_buf.side_effect = lambda params: params['info'].encode()
+            manager.dispatch_alerts()
 
         # Each context should have received exactly its own alert
         assert len(ctx_a.pending_alerts) == 1
-        assert ctx_a.pending_alerts[0] is alert_for_a
+        assert ctx_a.pending_alerts[0] == ResumeDataReadyEvent(b'aaa')
 
         assert len(ctx_b.pending_alerts) == 1
-        assert ctx_b.pending_alerts[0] is alert_for_b
+        assert ctx_b.pending_alerts[0] == ResumeDataReadyEvent(b'bbb')
 
     def test_alerts_not_stolen_across_sessions(self):
         """
@@ -102,21 +111,21 @@ class TestDispatchAlerts:
         }
 
         # Dispatch (centralized pop + route)
-        manager.dispatch_alerts()
+        with patch('llmpt.p2p_batch.lt') as mock_lt:
+            mock_lt.save_resume_data_alert = SaveResumeAlert
+            mock_lt.write_resume_data_buf.side_effect = lambda params: params['info-hash'].encode()
+            manager.dispatch_alerts()
 
         # Now process_alerts for each session should only handle its own alerts
-        with patch('llmpt.monitor.lt') as mock_lt:
-            mock_lt.save_resume_data_alert = SaveResumeAlert
-            mock_lt.save_resume_data_failed_alert = type('FailedAlert', (), {})
-            mock_lt.bencode.return_value = b'encoded_resume_data'
+        with patch('builtins.open', mock_open()) as mock_file:
+            _process_alerts(ctx_a)
+            mock_file.assert_called_once_with(ctx_a.fastresume_path, "wb")
+            mock_file().write.assert_called_once_with(b'aaa')
 
-            with patch('builtins.open', mock_open()) as mock_file:
-                _process_alerts(ctx_a)
-                mock_file.assert_called_once_with(ctx_a.fastresume_path, "wb")
-
-            with patch('builtins.open', mock_open()) as mock_file:
-                _process_alerts(ctx_b)
-                mock_file.assert_called_once_with(ctx_b.fastresume_path, "wb")
+        with patch('builtins.open', mock_open()) as mock_file:
+            _process_alerts(ctx_b)
+            mock_file.assert_called_once_with(ctx_b.fastresume_path, "wb")
+            mock_file().write.assert_called_once_with(b'bbb')
 
     def test_concurrent_dispatch_safe(self):
         """
@@ -174,41 +183,34 @@ class TestDispatchAlerts:
             manager.dispatch_alerts()
 
         threads = [threading.Thread(target=dispatch_thread) for _ in range(4)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=5)
+        with patch('llmpt.p2p_batch.lt') as mock_lt:
+            mock_lt.save_resume_data_alert = SaveResumeAlert
+            mock_lt.write_resume_data_buf.side_effect = lambda params: params['info'].encode()
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=5)
 
         # Each session should have exactly 1 alert (no duplication, no loss)
         assert len(ctx_a.pending_alerts) == 1, \
             f"Expected 1 alert for A, got {len(ctx_a.pending_alerts)}"
-        assert ctx_a.pending_alerts[0] is alert_a
+        assert ctx_a.pending_alerts[0] == ResumeDataReadyEvent(b'a')
 
         assert len(ctx_b.pending_alerts) == 1, \
             f"Expected 1 alert for B, got {len(ctx_b.pending_alerts)}"
-        assert ctx_b.pending_alerts[0] is alert_b
+        assert ctx_b.pending_alerts[0] == ResumeDataReadyEvent(b'b')
 
     def test_process_alerts_reads_from_inbox(self):
         """_process_alerts() should consume from pending_alerts, not lt_session."""
         ctx = make_mock_ctx()
 
-        SaveResumeAlert = type('save_resume_data_alert', (), {})
-        alert = MagicMock()
-        alert.__class__ = SaveResumeAlert
-        alert.params = {'info-hash': 'xyz'}
-
         # Pre-populate the inbox (as dispatch_alerts would)
-        ctx.pending_alerts.append(alert)
+        ctx.pending_alerts.append(ResumeDataReadyEvent(b'resume_bytes'))
 
-        with patch('llmpt.monitor.lt') as mock_lt:
-            mock_lt.save_resume_data_alert = SaveResumeAlert
-            mock_lt.save_resume_data_failed_alert = type('FailedAlert', (), {})
-            mock_lt.bencode.return_value = b'resume_bytes'
+        with patch('builtins.open', mock_open()) as mock_file:
+            _process_alerts(ctx)
 
-            with patch('builtins.open', mock_open()) as mock_file:
-                _process_alerts(ctx)
-
-            mock_file.assert_called_once_with(ctx.fastresume_path, "wb")
+        mock_file.assert_called_once_with(ctx.fastresume_path, "wb")
 
         # Inbox should be empty after processing
         assert len(ctx.pending_alerts) == 0
@@ -232,4 +234,5 @@ class TestDispatchAlerts:
         manager.sessions = {}
 
         # Should not raise
-        manager.dispatch_alerts()
+        with patch('llmpt.p2p_batch.lt') as mock_lt:
+            manager.dispatch_alerts()

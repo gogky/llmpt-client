@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Dict, Any, Optional
 if TYPE_CHECKING:
     from .tracker_client import TrackerClient
 
+from .alert_events import snapshot_alert
 from .utils import lt, LIBTORRENT_AVAILABLE, get_hf_hub_cache
 
 # Re-export SessionContext for backward compatibility.
@@ -179,8 +180,10 @@ class P2PBatchManager:
 
         This method should be called by each monitor thread before processing
         its own alerts.  It is safe to call concurrently — the _lock ensures
-        only one thread pops at a time, and alerts are deposited into each
-        SessionContext's thread-safe ``pending_alerts`` inbox.
+        only one thread pops at a time, and raw libtorrent alerts are
+        immediately converted into snapshot-safe Python events before they are
+        deposited into each SessionContext's thread-safe ``pending_alerts``
+        inbox.
         """
         if not self.lt_session:
             return
@@ -197,11 +200,25 @@ class P2PBatchManager:
                     handle_to_ctx[ctx.handle] = ctx
 
             for alert in alerts:
-                target_handle = getattr(alert, 'handle', None)
+                try:
+                    target_handle = getattr(alert, 'handle', None)
+                except Exception as exc:
+                    logger.debug(f"Skipping alert with unreadable handle: {exc}")
+                    continue
                 target_ctx = handle_to_ctx.get(target_handle)
                 if target_ctx is not None:
+                    try:
+                        event = snapshot_alert(alert, lt)
+                    except Exception as exc:
+                        logger.warning(
+                            f"[{target_ctx.repo_id}] Failed to snapshot "
+                            f"{type(alert).__name__}: {exc}"
+                        )
+                        continue
+                    if event is None:
+                        continue
                     with target_ctx.alert_lock:
-                        target_ctx.pending_alerts.append(alert)
+                        target_ctx.pending_alerts.append(event)
                 # Alerts without a matching handle (e.g. session-level alerts
                 # like listen_succeeded_alert) are intentionally dropped here;
                 # they are informational and not required for correctness.
