@@ -8,7 +8,7 @@ individual command functions with all external dependencies mocked.
 import pytest
 from unittest.mock import patch, MagicMock
 
-from llmpt.cli import main, cmd_download, cmd_scan, cmd_unseed
+from llmpt.cli import main, cmd_download, cmd_scan, cmd_status, cmd_unseed
 
 # ─── main() argument parsing & dispatch ───────────────────────────────────────
 
@@ -20,6 +20,14 @@ class TestMainDispatch:
             with pytest.raises(SystemExit) as exc_info:
                 main()
             assert exc_info.value.code == 1
+
+    def test_help_hides_internal_daemon_command(self, capsys):
+        with patch('sys.argv', ['llmpt-cli', '--help']):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 0
+        output = capsys.readouterr().out
+        assert '_internal_daemon_start' not in output
 
     @patch('llmpt.cli.cmd_download')
     def test_download_command(self, mock_cmd):
@@ -69,6 +77,19 @@ class TestMainDispatch:
         assert args.revision is None
         assert args.repo_type is None
         assert args.forget is True
+
+    @patch('llmpt.cli.cmd_unseed')
+    def test_unseed_target_command(self, mock_cmd):
+        with patch('sys.argv', [
+            'llmpt-cli', 'unseed',
+            'model/org/repo@7362d24',
+        ]):
+            main()
+        args = mock_cmd.call_args[0][0]
+        assert args.repo_id == 'model/org/repo@7362d24'
+        assert args.revision is None
+        assert args.repo_type is None
+        assert args.forget is False
 
 
 
@@ -179,6 +200,50 @@ class TestCmdUnseed:
             forget=True,
         )
 
+    @patch('llmpt.utils.resolve_commit_hash')
+    @patch('llmpt.ipc.query_daemon', return_value={
+        'status': 'ok',
+        'removed_count': 2,
+        'removed_sessions': [
+            {
+                'repo_type': 'model',
+                'repo_id': 'org/repo',
+                'revision': '7362d24ca596daa0c15c0caad7407413599c78d4',
+                'storage_kind': 'hub_cache',
+                'storage_root': '/tmp/a',
+            },
+            {
+                'repo_type': 'model',
+                'repo_id': 'org/repo',
+                'revision': '7362d24ca596daa0c15c0caad7407413599c78d4',
+                'storage_kind': 'hub_cache',
+                'storage_root': '/tmp/b',
+            },
+        ],
+        'forgotten': {'hub_cache_roots_removed': 0, 'local_dir_sources_removed': 0},
+    })
+    @patch('llmpt.daemon.is_daemon_running', return_value=12345)
+    def test_unseed_target_success(self, mock_is_running, mock_query, mock_resolve, capsys):
+        args = MagicMock()
+        args.repo_id = 'model/org/repo@7362d24'
+        args.revision = None
+        args.repo_type = None
+        args.forget = False
+
+        cmd_unseed(args)
+
+        mock_resolve.assert_not_called()
+        mock_query.assert_called_once_with(
+            'unseed',
+            repo_id='org/repo',
+            revision='7362d24',
+            repo_type='model',
+            forget=False,
+        )
+        output = capsys.readouterr().out
+        assert 'model/org/repo@7362d24' in output
+        assert '(2 sources)' in output
+
     @patch('llmpt.utils.resolve_commit_hash', side_effect=RuntimeError('network down'))
     @patch('llmpt.ipc.query_daemon', return_value={
         'status': 'ok',
@@ -217,6 +282,70 @@ class TestCmdUnseed:
             cmd_unseed(args)
 
         assert exc_info.value.code == 1
+
+
+class TestCmdStatus:
+
+    @patch('llmpt.ipc.query_daemon', return_value={
+        'status': 'ok',
+        'tracker_url': 'http://localhost:8080',
+        'port': 6881,
+        'sessions': {
+            'a': {
+                'repo_type': 'model',
+                'repo_id': 'hf-internal-testing/tiny-random-GPTJForCausalLM',
+                'revision': '7362d24ca596daa0c15c0caad7407413599c78d4',
+                'uploaded': 1024,
+                'peers': 0,
+                'upload_rate': 4,
+                'mapped_files': 10,
+                'total_files': 10,
+                'full_mapping': True,
+                'source_status': 'verified',
+                'torrent_status': 'local_only',
+                'session_status': 'degraded',
+            },
+            'b': {
+                'repo_type': 'model',
+                'repo_id': 'hf-internal-testing/tiny-random-GPTJForCausalLM',
+                'revision': '7362d24ca596daa0c15c0caad7407413599c78d4',
+                'uploaded': 2048,
+                'peers': 0,
+                'upload_rate': 8,
+                'mapped_files': 10,
+                'total_files': 10,
+                'full_mapping': True,
+                'source_status': 'verified',
+                'torrent_status': 'local_only',
+                'session_status': 'degraded',
+            },
+            'c': {
+                'repo_type': 'model',
+                'repo_id': 'hf-internal-testing/tiny-random-gpt2',
+                'revision': '71034c5d8bde858ff824298bdedc65515b97d2b9',
+                'uploaded': 4096,
+                'peers': 0,
+                'upload_rate': 0,
+                'mapped_files': 10,
+                'total_files': 10,
+                'full_mapping': True,
+                'source_status': 'verified',
+                'torrent_status': 'local_only',
+                'session_status': 'degraded',
+            },
+        },
+    })
+    @patch('llmpt.daemon.is_daemon_running', return_value=12345)
+    def test_status_aggregates_sources(self, mock_is_running, mock_query, capsys):
+        args = MagicMock()
+
+        cmd_status(args)
+
+        output = capsys.readouterr().out
+        assert 'Active seeding: 2' in output
+        assert 'model/hf-internal-testing/tiny-random-GPTJForCausalLM@7362d24' in output
+        assert 'model/hf-internal-testing/tiny-random-gpt2@71034c5' in output
+        assert 'local-only  2 sources' in output
 
 
 class TestCmdScan:

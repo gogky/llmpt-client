@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import random
+import re
 import signal
 import sys
 import time
@@ -39,6 +40,7 @@ RETRY_MAX_DELAY = 3600  # cap backoff at 1h
 RETRY_JITTER_RATIO = 0.10
 
 SeedSessionKey = Tuple[str, str, str, str, str]
+_COMMIT_PREFIX_RE = re.compile(r"^[0-9a-f]{7,40}$")
 
 
 # ---------------------------------------------------------------------------
@@ -169,8 +171,13 @@ def _matching_seeding_keys(
             continue
         if repo_type is not None and key_repo_type != repo_type:
             continue
-        if revision is not None and key_revision != revision:
-            continue
+        if revision is not None:
+            if key_revision == revision:
+                pass
+            elif _COMMIT_PREFIX_RE.match(revision) and key_revision.startswith(revision):
+                pass
+            else:
+                continue
         matches.append(key)
     return matches
 
@@ -212,6 +219,25 @@ def _unseed_matching_sessions(
             "message": (
                 "multiple repo types match this repo_id; "
                 f"please specify --repo-type ({', '.join(matched_repo_types)})"
+            ),
+            "removed_count": 0,
+            "forgotten": {
+                "hub_cache_roots_removed": 0,
+                "local_dir_sources_removed": 0,
+                "completed_sources_removed": 0,
+            },
+        }
+
+    matched_revisions = sorted({key[2] for key in matches})
+    if revision is not None and len(matched_revisions) > 1:
+        preview = ", ".join(item[:12] for item in matched_revisions[:3])
+        if len(matched_revisions) > 3:
+            preview += ", ..."
+        return {
+            "status": "error",
+            "message": (
+                "revision prefix is ambiguous; "
+                f"matches multiple active revisions ({preview})"
             ),
             "removed_count": 0,
             "forgotten": {
@@ -571,6 +597,11 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
                 "seeding_count": len(status),
                 "sessions": {
                     k: {
+                        "repo_type": v.get("repo_type", "model"),
+                        "repo_id": v.get("repo_id"),
+                        "revision": v.get("revision"),
+                        "cache_dir": v.get("cache_dir"),
+                        "local_dir": v.get("local_dir"),
                         "progress": v.get("progress", 0),
                         "state": v.get("state", "unknown"),
                         "uploaded": v.get("uploaded", 0),

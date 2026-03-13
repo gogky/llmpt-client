@@ -354,6 +354,78 @@ def test_unseed_matching_sessions_requires_repo_type_when_ambiguous():
     assert "multiple repo types match this repo_id" in result["message"]
 
 
+def test_unseed_matching_sessions_accepts_revision_prefix(monkeypatch):
+    import llmpt.daemon as daemon
+
+    removed = []
+
+    class FakeManager:
+        def remove_session(self, repo_id, revision, *, repo_type="model", cache_dir=None, local_dir=None):
+            removed.append((repo_type, repo_id, revision, cache_dir, local_dir))
+            return True
+
+    revision = "7362d24ca596daa0c15c0caad7407413599c78d4"
+    key_a = ("model", "org/shared", revision, "hub_cache", "/tmp/cache-a")
+    key_b = ("model", "org/shared", revision, "hub_cache", "/tmp/cache-b")
+    seeding_set = {key_a, key_b}
+    suppressed_set = set()
+    failed = {}
+
+    result = daemon._unseed_matching_sessions(
+        FakeManager(),
+        seeding_set,
+        failed,
+        suppressed_set,
+        repo_type="model",
+        repo_id="org/shared",
+        revision="7362d24",
+        forget=False,
+    )
+
+    assert result["status"] == "ok"
+    assert result["removed_count"] == 2
+    assert {item["storage_root"] for item in result["removed_sessions"]} == {
+        "/tmp/cache-a",
+        "/tmp/cache-b",
+    }
+    assert removed == [
+        ("model", "org/shared", revision, "/tmp/cache-a", None),
+        ("model", "org/shared", revision, "/tmp/cache-b", None),
+    ] or removed == [
+        ("model", "org/shared", revision, "/tmp/cache-b", None),
+        ("model", "org/shared", revision, "/tmp/cache-a", None),
+    ]
+
+
+def test_unseed_matching_sessions_rejects_ambiguous_revision_prefix():
+    import llmpt.daemon as daemon
+
+    class FakeManager:
+        def remove_session(self, *args, **kwargs):
+            raise AssertionError("remove_session should not be called on ambiguity")
+
+    seeding_set = {
+        ("model", "org/shared", "7362d24ca596daa0c15c0caad7407413599c78d4", "hub_cache", "/tmp/cache-a"),
+        ("model", "org/shared", "7362d24fffffffffffffffffffffffffffffffff", "hub_cache", "/tmp/cache-b"),
+    }
+    suppressed_set = set()
+    failed = {}
+
+    result = daemon._unseed_matching_sessions(
+        FakeManager(),
+        seeding_set,
+        failed,
+        suppressed_set,
+        repo_type="model",
+        repo_id="org/shared",
+        revision="7362d24",
+        forget=False,
+    )
+
+    assert result["status"] == "error"
+    assert "revision prefix is ambiguous" in result["message"]
+
+
 def test_scan_and_seed_skips_suppressed_keys(monkeypatch):
     import llmpt.daemon as daemon
 

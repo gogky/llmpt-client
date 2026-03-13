@@ -4,9 +4,11 @@ CLI tool for llmpt.
 
 import sys
 import os
+import re
 import argparse
 import logging
 import signal
+from collections import defaultdict
 
 
 def main():
@@ -27,6 +29,7 @@ Examples:
   llmpt-cli scan
   llmpt-cli status
   llmpt-cli unseed gpt2
+  llmpt-cli unseed model/gpt2@71034c5
         """
     )
 
@@ -42,7 +45,11 @@ Examples:
         help='Enable verbose logging'
     )
 
-    subparsers = parser.add_subparsers(dest='command', help='Commands')
+    subparsers = parser.add_subparsers(
+        dest='command',
+        help='Commands',
+        metavar='{download,start,status,scan,unseed,stop,restart}',
+    )
 
     # Download command
     download_parser = subparsers.add_parser(
@@ -131,7 +138,7 @@ Examples:
     )
     unseed_parser.add_argument(
         'repo_id',
-        help='Repository ID'
+        help='Repository ID or target like model/org/repo@7362d24'
     )
     unseed_parser.add_argument(
         '--revision',
@@ -175,6 +182,11 @@ Examples:
     )
     internal_daemon_parser.add_argument('--tracker', required=True)
     internal_daemon_parser.add_argument('--port', type=int, default=None)
+    subparsers._choices_actions = [
+        action
+        for action in subparsers._choices_actions
+        if action.dest != '_internal_daemon_start'
+    ]
 
     args = parser.parse_args()
 
@@ -314,6 +326,172 @@ def _resolve_port(explicit_port):
     return int(port_env) if port_env else None
 
 
+_TARGET_REPO_TYPES = {"model", "dataset", "space"}
+_COMMIT_PREFIX_RE = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+def _parse_unseed_target(target: str) -> tuple[bool, str | None, str, str | None]:
+    """Parse ``repo_id`` or ``repo_type/repo_id@revision_prefix`` syntax."""
+    if "/" not in target:
+        return False, None, target, None
+
+    repo_type, remainder = target.split("/", 1)
+    if repo_type not in _TARGET_REPO_TYPES:
+        return False, None, target, None
+
+    if "@" not in remainder:
+        return True, repo_type, remainder, None
+
+    repo_id, revision = remainder.rsplit("@", 1)
+    if not repo_id or not revision:
+        raise ValueError(
+            "invalid target syntax; expected <repo_type>/<repo_id>@<revision-prefix>"
+        )
+    return True, repo_type, repo_id, revision
+
+
+def _revision_prefix_lengths(items, *, minimum: int = 7) -> dict[tuple[str, str, str], int]:
+    """Compute the shortest unique revision prefix per ``repo_type/repo_id``."""
+    grouped: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for item in items:
+        grouped[(item["repo_type"], item["repo_id"])].append(item["revision"])
+
+    result: dict[tuple[str, str, str], int] = {}
+    for (repo_type, repo_id), revisions in grouped.items():
+        unique_revisions = sorted(set(revisions))
+        for revision in unique_revisions:
+            prefix_len = minimum
+            while prefix_len < len(revision):
+                prefix = revision[:prefix_len]
+                clashes = [
+                    candidate
+                    for candidate in unique_revisions
+                    if candidate != revision and candidate.startswith(prefix)
+                ]
+                if not clashes:
+                    break
+                prefix_len += 1
+            result[(repo_type, repo_id, revision)] = min(prefix_len, len(revision))
+    return result
+
+
+def _format_target(
+    repo_type: str,
+    repo_id: str,
+    revision: str,
+    prefix_lengths: dict[tuple[str, str, str], int],
+) -> str:
+    prefix_len = prefix_lengths.get((repo_type, repo_id, revision), min(7, len(revision)))
+    return f"{repo_type}/{repo_id}@{revision[:prefix_len]}"
+
+
+def _aggregate_status_rows(sessions: dict[str, dict]) -> list[dict]:
+    """Collapse multiple storage-backed sessions into logical repo/revision rows."""
+    groups: dict[tuple[str, str, str], dict] = {}
+    for info in sessions.values():
+        repo_type = info.get("repo_type", "model")
+        repo_id = info.get("repo_id")
+        revision = info.get("revision")
+        if not repo_id or not revision:
+            continue
+
+        key = (repo_type, repo_id, revision)
+        group = groups.setdefault(
+            key,
+            {
+                "repo_type": repo_type,
+                "repo_id": repo_id,
+                "revision": revision,
+                "uploaded": 0,
+                "peers": 0,
+                "upload_rate": 0,
+                "source_count": 0,
+                "source_statuses": set(),
+                "torrent_statuses": set(),
+                "session_statuses": set(),
+                "mapping_complete": True,
+            },
+        )
+        group["uploaded"] += int(info.get("uploaded", 0) or 0)
+        group["peers"] += int(info.get("peers", 0) or 0)
+        group["upload_rate"] += int(info.get("upload_rate", 0) or 0)
+        group["source_count"] += 1
+        group["source_statuses"].add(info.get("source_status", "unknown"))
+        group["torrent_statuses"].add(info.get("torrent_status", "unknown"))
+        group["session_statuses"].add(info.get("session_status", "unknown"))
+
+        mapped_files = info.get("mapped_files")
+        total_files = info.get("total_files")
+        if total_files and mapped_files is not None and int(mapped_files) < int(total_files):
+            group["mapping_complete"] = False
+        elif info.get("full_mapping") is False:
+            group["mapping_complete"] = False
+
+    rows = list(groups.values())
+    prefix_lengths = _revision_prefix_lengths(rows)
+    for row in rows:
+        row["target"] = _format_target(
+            row["repo_type"],
+            row["repo_id"],
+            row["revision"],
+            prefix_lengths,
+        )
+    rows.sort(key=lambda row: row["target"])
+    return rows
+
+
+def _display_status_label(row: dict) -> str:
+    source_statuses = row.get("source_statuses", set())
+    torrent_statuses = row.get("torrent_statuses", set())
+    session_statuses = row.get("session_statuses", set())
+
+    if "blocked" in source_statuses:
+        return "blocked"
+    if "partial" in source_statuses:
+        return "partial"
+    if "error" in source_statuses:
+        return "error"
+    if not row.get("mapping_complete", True):
+        return "partial-map"
+    if "registered" in torrent_statuses and "active" in session_statuses:
+        return "active"
+    if "local_only" in torrent_statuses:
+        return "local-only"
+    if "absent" in torrent_statuses and "degraded" in session_statuses:
+        return "unregistered"
+    if "degraded" in session_statuses:
+        return "degraded"
+    if "inactive" in session_statuses:
+        return "inactive"
+    return "unknown"
+
+
+def _print_removed_targets(removed_sessions: list[dict]) -> None:
+    if not removed_sessions:
+        return
+
+    rows = _aggregate_status_rows(
+        {
+            str(index): {
+                "repo_type": item.get("repo_type", "model"),
+                "repo_id": item.get("repo_id"),
+                "revision": item.get("revision"),
+                "uploaded": 0,
+                "peers": 0,
+                "upload_rate": 0,
+                "source_status": "unknown",
+                "torrent_status": "unknown",
+                "session_status": "inactive",
+                "mapped_files": 0,
+                "total_files": 0,
+                "full_mapping": True,
+            }
+            for index, item in enumerate(removed_sessions)
+        }
+    )
+    for row in rows:
+        suffix = f" ({row['source_count']} sources)" if row["source_count"] > 1 else ""
+        print(f"  {row['target']}{suffix}")
 def cmd_status(args):
     """Execute status command."""
     from llmpt.daemon import is_daemon_running
@@ -347,31 +525,21 @@ def cmd_status(args):
         print("  No active seeding tasks")
         return
 
-    print(f"\nActive seeding sessions: {len(sessions)}\n")
-    for repo_key, info in sessions.items():
-        uploaded = info.get('uploaded', 0)
-        peers = info.get('peers', 0)
-        rate = info.get('upload_rate', 0)
-        mapped_files = info.get('mapped_files')
-        total_files = info.get('total_files')
-        source_status = info.get('source_status', 'unknown')
-        torrent_status = info.get('torrent_status', 'unknown')
-        session_status = info.get('session_status', 'unknown')
-        state_summary = (
-            f"source:{source_status} │ "
-            f"torrent:{torrent_status} │ "
-            f"session:{session_status}"
-        )
-        mapping_suffix = ""
-        if total_files:
-            mapping_suffix = f" │ mapped {mapped_files}/{total_files}"
+    rows = _aggregate_status_rows(sessions)
+    if not rows:
+        print("Error: daemon status format is outdated; restart the daemon")
+        sys.exit(1)
+    print(f"\nActive seeding: {len(rows)}\n")
+    width = max(len(row["target"]) for row in rows)
+    for row in rows:
+        sources_suffix = f"  {row['source_count']} sources" if row["source_count"] > 1 else ""
         print(
-            f"  {repo_key:<45} "
-            f"↑ {format_bytes(uploaded):>8}  │ "
-            f"{peers} peers │ "
-            f"{format_bytes(rate)}/s │ "
-            f"{state_summary}"
-            f"{mapping_suffix}"
+            f"  {row['target']:<{width}}  "
+            f"↑{format_bytes(row['uploaded'])}  "
+            f"{row['peers']} peers  "
+            f"{format_bytes(row['upload_rate'])}/s  "
+            f"{_display_status_label(row)}"
+            f"{sources_suffix}"
         )
 
 
@@ -410,24 +578,42 @@ def cmd_unseed(args):
         print("  Start with: llmpt-cli start")
         return
 
-    revision = None
-    if args.revision is not None:
-        raw_revision = args.revision
-        try:
-            revision = resolve_commit_hash(
-                args.repo_id, raw_revision, repo_type=args.repo_type or "model"
-            )
-        except Exception:
-            revision = raw_revision
+    try:
+        used_target_syntax, target_repo_type, repo_id, target_revision = _parse_unseed_target(args.repo_id)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
 
-        if revision != raw_revision:
-            print(f"Resolved revision: {raw_revision} → {revision}")
+    if used_target_syntax and args.repo_type and args.repo_type != target_repo_type:
+        print("Error: target repo type conflicts with --repo-type")
+        sys.exit(1)
+    if used_target_syntax and args.revision and target_revision and args.revision != target_revision:
+        print("Error: target revision conflicts with --revision")
+        sys.exit(1)
+
+    repo_type = target_repo_type or args.repo_type
+    raw_revision = target_revision if target_revision is not None else args.revision
+    revision = None
+    if raw_revision is not None:
+        normalized_raw_revision = raw_revision.lower() if _COMMIT_PREFIX_RE.match(raw_revision.lower()) else raw_revision
+        if used_target_syntax or _COMMIT_PREFIX_RE.match(normalized_raw_revision):
+            revision = normalized_raw_revision
+        else:
+            try:
+                revision = resolve_commit_hash(
+                    repo_id, normalized_raw_revision, repo_type=repo_type or "model"
+                )
+            except Exception:
+                revision = normalized_raw_revision
+
+            if revision != normalized_raw_revision:
+                print(f"Resolved revision: {normalized_raw_revision} → {revision}")
 
     response = query_daemon(
         "unseed",
-        repo_id=args.repo_id,
+        repo_id=repo_id,
         revision=revision,
-        repo_type=args.repo_type,
+        repo_type=repo_type,
         forget=args.forget,
     )
     if not response:
@@ -441,6 +627,7 @@ def cmd_unseed(args):
     removed_count = response.get("removed_count", 0)
     forgotten = response.get("forgotten", {})
     print(f"✓ Removed {removed_count} active seeding session(s)")
+    _print_removed_targets(response.get("removed_sessions", []))
     if args.forget:
         print(
             "  Forgot registry entries: "
