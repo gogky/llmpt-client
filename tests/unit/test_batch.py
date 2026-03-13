@@ -136,6 +136,35 @@ def test_release_on_demand_session_completed_purges_state(mock_lt_all_modules):
     mock_teardown.assert_called_once_with(ctx, purge_resumable_state=True)
 
 
+def test_register_seeding_task_reuses_existing_logical_session(mock_lt_all_modules):
+    from llmpt.p2p_batch import P2PBatchManager
+
+    tracker = MagicMock()
+    manager = P2PBatchManager()
+
+    existing_ctx = MagicMock()
+    existing_ctx.handle = MagicMock()
+    existing_ctx.handle.is_valid.return_value = True
+    existing_ctx.is_valid = True
+    manager.sessions = {
+        ("model", "demo", "main", "hub_cache", "/tmp/cache-a"): existing_ctx,
+    }
+
+    success = manager.register_seeding_task(
+        repo_id="demo",
+        revision="main",
+        repo_type="model",
+        tracker_client=tracker,
+        torrent_data=b"fake",
+        cache_dir="/tmp/cache-b",
+    )
+
+    assert success is True
+    assert set(manager.sessions) == {
+        ("model", "demo", "main", "hub_cache", "/tmp/cache-a"),
+    }
+
+
 def test_release_on_demand_session_incomplete_preserves_state(mock_lt_all_modules):
     from llmpt.p2p_batch import P2PBatchManager
     from llmpt.utils import get_hf_hub_cache

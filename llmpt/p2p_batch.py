@@ -44,6 +44,15 @@ def _storage_identity(
     return ("hub_cache", get_hf_hub_cache())
 
 
+def _logical_identity(
+    repo_type: str,
+    repo_id: str,
+    revision: str,
+) -> tuple[str, str, str]:
+    """Return the identity shared by all storage-backed copies of one torrent."""
+    return (repo_type, repo_id, revision)
+
+
 def _is_port_available(port: int) -> bool:
     """Check whether *port* is free on **both** IPv4 and IPv6.
 
@@ -197,6 +206,27 @@ class P2PBatchManager:
                 # like listen_succeeded_alert) are intentionally dropped here;
                 # they are informational and not required for correctness.
 
+    def has_valid_logical_session(
+        self,
+        repo_id: str,
+        revision: str,
+        *,
+        repo_type: str = 'model',
+    ) -> bool:
+        """Return True when any storage source has a live session for this torrent."""
+        logical_key = _logical_identity(repo_type, repo_id, revision)
+        with self._lock:
+            for session_key, ctx in self.sessions.items():
+                if session_key[:3] != logical_key:
+                    continue
+                handle = getattr(ctx, "handle", None)
+                try:
+                    if handle and handle.is_valid():
+                        return True
+                except Exception:
+                    continue
+        return False
+
     def register_seeding_task(self, repo_id: str, revision: str, tracker_client: 'TrackerClient', torrent_data: Optional[bytes] = None, *, repo_type: str = 'model', cache_dir: Optional[str] = None, local_dir: Optional[str] = None) -> bool:
         """
         Register a repository to be tracked for background seeding.
@@ -207,21 +237,71 @@ class P2PBatchManager:
 
         storage_kind, storage_root = _storage_identity(cache_dir=cache_dir, local_dir=local_dir)
         repo_key = (repo_type, repo_id, revision, storage_kind, storage_root)
+        logical_key = _logical_identity(repo_type, repo_id, revision)
+        workers_to_join = []
+        reuse_existing = False
         with self._lock:
-            if repo_key not in self.sessions:
-                self.sessions[repo_key] = SessionContext(
-                    repo_id=repo_id,
-                    revision=revision,
-                    repo_type=repo_type,
-                    tracker_client=tracker_client,
-                    lt_session=self.lt_session,
-                    session_mode='full_seed',
-                    timeout=0,  # unused: seeding path never calls download_file()
-                    torrent_data=torrent_data,
-                    cache_dir=cache_dir,
-                    local_dir=local_dir,
-                )
-            session_ctx = self.sessions[repo_key]
+            session_ctx = self.sessions.get(repo_key)
+            if session_ctx is not None:
+                handle = getattr(session_ctx, "handle", None)
+                try:
+                    if handle is not None and not handle.is_valid():
+                        ctx = self.sessions.pop(repo_key)
+                        worker = self._teardown_session(ctx)
+                        if worker is not None:
+                            workers_to_join.append(worker)
+                        session_ctx = None
+                except Exception:
+                    ctx = self.sessions.pop(repo_key)
+                    worker = self._teardown_session(ctx)
+                    if worker is not None:
+                        workers_to_join.append(worker)
+                    session_ctx = None
+
+            if session_ctx is None:
+                for existing_key, existing_ctx in list(self.sessions.items()):
+                    if existing_key[:3] != logical_key:
+                        continue
+
+                    existing_handle = getattr(existing_ctx, "handle", None)
+                    try:
+                        if existing_handle and existing_handle.is_valid():
+                            logger.info(
+                                f"[{repo_id}] Reusing active seeding session from "
+                                f"{existing_key[3]}={existing_key[4]}"
+                            )
+                            reuse_existing = True
+                            break
+                    except Exception:
+                        pass
+
+                    ctx = self.sessions.pop(existing_key)
+                    worker = self._teardown_session(ctx)
+                    if worker is not None:
+                        workers_to_join.append(worker)
+
+                if not reuse_existing:
+                    self.sessions[repo_key] = SessionContext(
+                        repo_id=repo_id,
+                        revision=revision,
+                        repo_type=repo_type,
+                        tracker_client=tracker_client,
+                        lt_session=self.lt_session,
+                        session_mode='full_seed',
+                        timeout=0,  # unused: seeding path never calls download_file()
+                        torrent_data=torrent_data,
+                        cache_dir=cache_dir,
+                        local_dir=local_dir,
+                    )
+
+            session_ctx = self.sessions.get(repo_key)
+
+        for worker in workers_to_join:
+            if worker is not threading.current_thread():
+                worker.join(timeout=3)
+
+        if reuse_existing:
+            return True
             
         # Ensure torrent is initialized with .torrent data from tracker
         if not session_ctx.is_valid:

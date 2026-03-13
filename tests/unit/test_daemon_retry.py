@@ -236,6 +236,113 @@ def test_scan_and_seed_dedupes_by_storage_root(monkeypatch):
     ]
 
 
+def test_ensure_seedable_session_tracks_additional_source_without_restarting(monkeypatch):
+    import llmpt.daemon as daemon
+
+    from llmpt.cache_scanner import SeedableSource
+
+    source = SeedableSource(
+        repo_type="model",
+        repo_id="org/shared",
+        revision="9" * 40,
+        storage_kind="hub_cache",
+        storage_root="/tmp/cache-b",
+        cache_dir="/tmp/cache-b",
+    )
+    key = ("model", "org/shared", "9" * 40, "hub_cache", "/tmp/cache-b")
+    seeding_set = set()
+    failed = {}
+    suppressed = set()
+
+    class FakeManager:
+        def has_valid_logical_session(self, repo_id, revision, *, repo_type="model"):
+            return True
+
+    monkeypatch.setattr(
+        daemon,
+        "_process_seedable",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not reseed live logical torrent")),
+    )
+
+    result = daemon._ensure_seedable_session(
+        source,
+        None,
+        FakeManager(),
+        seeding_set,
+        failed,
+        suppressed,
+    )
+
+    assert result is True
+    assert seeding_set == {key}
+
+
+def test_scan_and_seed_restarts_dead_logical_session(monkeypatch):
+    import llmpt.daemon as daemon
+
+    from llmpt.cache_scanner import SeedableSource
+
+    source = SeedableSource(
+        repo_type="model",
+        repo_id="org/shared",
+        revision="7" * 40,
+        storage_kind="hub_cache",
+        storage_root="/tmp/cache-a",
+        cache_dir="/tmp/cache-a",
+    )
+    key = ("model", "org/shared", "7" * 40, "hub_cache", "/tmp/cache-a")
+
+    monkeypatch.setattr("llmpt.cache_scanner.scan_seedable_sources", lambda: [source])
+    monkeypatch.setattr(
+        "llmpt.cache_importer.import_verified_cache_sources",
+        lambda: {
+            "imported": 0,
+            "skipped_completed": 0,
+            "skipped_backoff": 0,
+            "blocked": 0,
+            "partial": 0,
+            "error": 0,
+        },
+    )
+
+    class FakeManager:
+        def has_valid_logical_session(self, repo_id, revision, *, repo_type="model"):
+            return False
+
+        def remove_session(self, *args, **kwargs):
+            return False
+
+    calls = []
+
+    def fake_process_seedable(
+        repo_id,
+        revision,
+        tracker_client,
+        manager,
+        seeding_set,
+        failed_attempts,
+        *,
+        repo_type="model",
+        cache_dir=None,
+        local_dir=None,
+    ):
+        calls.append((repo_type, repo_id, revision, cache_dir, local_dir))
+        seeding_set.add(key)
+        return True
+
+    monkeypatch.setattr(daemon, "_process_seedable", fake_process_seedable)
+
+    seeding_set = {key}
+    failed = {}
+
+    daemon._scan_and_seed(None, FakeManager(), seeding_set, failed, set())
+
+    assert calls == [
+        ("model", "org/shared", "7" * 40, "/tmp/cache-a", None)
+    ]
+    assert seeding_set == {key}
+
+
 def test_matching_seeding_keys_can_match_all_revisions_for_repo():
     import llmpt.daemon as daemon
 

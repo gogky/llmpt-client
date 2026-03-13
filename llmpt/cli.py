@@ -415,7 +415,14 @@ def _aggregate_status_rows(sessions: dict[str, dict]) -> list[dict]:
         group["uploaded"] += int(info.get("uploaded", 0) or 0)
         group["peers"] += int(info.get("peers", 0) or 0)
         group["upload_rate"] += int(info.get("upload_rate", 0) or 0)
-        group["source_count"] += 1
+        reported_source_count = info.get("source_count")
+        if reported_source_count is None:
+            group["source_count"] += 1
+        else:
+            group["source_count"] = max(
+                group["source_count"],
+                int(reported_source_count or 0),
+            )
         group["source_statuses"].add(info.get("source_status", "unknown"))
         group["torrent_statuses"].add(info.get("torrent_status", "unknown"))
         group["session_statuses"].add(info.get("session_status", "unknown"))
@@ -428,6 +435,57 @@ def _aggregate_status_rows(sessions: dict[str, dict]) -> list[dict]:
             group["mapping_complete"] = False
 
     rows = list(groups.values())
+    prefix_lengths = _revision_prefix_lengths(rows)
+    for row in rows:
+        row["target"] = _format_target(
+            row["repo_type"],
+            row["repo_id"],
+            row["revision"],
+            prefix_lengths,
+        )
+    rows.sort(key=lambda row: row["target"])
+    return rows
+
+
+def _status_rows(sessions: dict[str, dict]) -> list[dict]:
+    """Render-ready rows for daemon status responses.
+
+    The daemon now reports one logical torrent session per repo/revision and
+    includes ``source_count`` explicitly, so the CLI no longer needs to
+    aggregate multiple storage-backed sessions here.
+    """
+    rows = []
+    for info in sessions.values():
+        repo_type = info.get("repo_type", "model")
+        repo_id = info.get("repo_id")
+        revision = info.get("revision")
+        if not repo_id or not revision:
+            continue
+
+        mapped_files = info.get("mapped_files")
+        total_files = info.get("total_files")
+        mapping_complete = True
+        if total_files and mapped_files is not None and int(mapped_files) < int(total_files):
+            mapping_complete = False
+        elif info.get("full_mapping") is False:
+            mapping_complete = False
+
+        rows.append(
+            {
+                "repo_type": repo_type,
+                "repo_id": repo_id,
+                "revision": revision,
+                "uploaded": int(info.get("uploaded", 0) or 0),
+                "peers": int(info.get("peers", 0) or 0),
+                "upload_rate": int(info.get("upload_rate", 0) or 0),
+                "source_count": max(1, int(info.get("source_count", 1) or 1)),
+                "source_statuses": {info.get("source_status", "unknown")},
+                "torrent_statuses": {info.get("torrent_status", "unknown")},
+                "session_statuses": {info.get("session_status", "unknown")},
+                "mapping_complete": mapping_complete,
+            }
+        )
+
     prefix_lengths = _revision_prefix_lengths(rows)
     for row in rows:
         row["target"] = _format_target(
@@ -525,7 +583,7 @@ def cmd_status(args):
         print("  No active seeding tasks")
         return
 
-    rows = _aggregate_status_rows(sessions)
+    rows = _status_rows(sessions)
     if not rows:
         print("Error: daemon status format is outdated; restart the daemon")
         sys.exit(1)

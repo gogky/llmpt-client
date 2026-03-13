@@ -107,6 +107,15 @@ def _seeding_key(
     return (repo_type, repo_id, revision, storage_kind, storage_root)
 
 
+def _logical_seeding_key(
+    repo_type: str,
+    repo_id: str,
+    revision: str,
+) -> tuple[str, str, str]:
+    """Return the logical identity shared by all storage copies of one torrent."""
+    return (repo_type, repo_id, revision)
+
+
 def _discovered_seeding_keys(seedable) -> Set[SeedSessionKey]:
     """Build daemon session keys for the current scan result."""
     discovered_keys: Set[SeedSessionKey] = set()
@@ -121,6 +130,19 @@ def _discovered_seeding_keys(seedable) -> Set[SeedSessionKey]:
             )
         )
     return discovered_keys
+
+
+def _source_count_by_logical_identity(seedable) -> Dict[tuple[str, str, str], int]:
+    """Count how many verified live sources exist for each logical torrent."""
+    counts: Dict[tuple[str, str, str], int] = {}
+    for item in seedable:
+        logical_key = _logical_seeding_key(
+            item.repo_type,
+            item.repo_id,
+            item.revision,
+        )
+        counts[logical_key] = counts.get(logical_key, 0) + 1
+    return counts
 
 
 def _reconcile_seeding_sessions(
@@ -154,6 +176,86 @@ def _reconcile_seeding_sessions(
             failed_attempts.pop(stale_key, None)
     suppressed_set.intersection_update(discovered_keys)
     return discovered_keys
+
+
+def _ensure_seedable_session(
+    item,
+    tracker_client,
+    manager,
+    seeding_set: Set[SeedSessionKey],
+    failed_attempts: Dict[SeedSessionKey, Dict[str, object]],
+    suppressed_set: Set[SeedSessionKey],
+    *,
+    now: Optional[float] = None,
+) -> bool:
+    """Ensure one verified source is represented by a live logical torrent session."""
+    repo_type = item.repo_type
+    repo_id = item.repo_id
+    revision = item.revision
+    cache_dir = item.cache_dir
+    local_dir = item.local_dir
+    key = _seeding_key(
+        repo_type,
+        repo_id,
+        revision,
+        cache_dir=cache_dir,
+        local_dir=local_dir,
+    )
+
+    if key in suppressed_set:
+        return False
+
+    logical_alive = False
+    if manager is not None and hasattr(manager, "has_valid_logical_session"):
+        logical_alive = bool(
+            manager.has_valid_logical_session(
+                repo_id,
+                revision,
+                repo_type=repo_type,
+            )
+        )
+    elif key in seeding_set:
+        logical_alive = True
+    if key in seeding_set and logical_alive:
+        return False
+
+    if logical_alive:
+        seeding_set.add(key)
+        failed_attempts.pop(key, None)
+        logger.info(
+            f"[{repo_id}@{revision[:8]}] Tracking additional live source "
+            f"({key[3]}={key[4]}) for existing session"
+        )
+        return True
+
+    if key in seeding_set:
+        logger.warning(
+            f"[{repo_id}@{revision[:8]}] Logical seeding session disappeared; "
+            f"restarting from {key[3]}={key[4]}"
+        )
+        seeding_set.discard(key)
+        failed_attempts.pop(key, None)
+
+    if now is None:
+        now = time.time()
+
+    failure = failed_attempts.get(key)
+    if failure is not None:
+        next_retry_ts = float(failure.get("next_retry_ts", 0.0))
+        if now < next_retry_ts:
+            return False
+
+    return _process_seedable(
+        repo_id,
+        revision,
+        tracker_client,
+        manager,
+        seeding_set,
+        failed_attempts,
+        repo_type=repo_type,
+        cache_dir=cache_dir,
+        local_dir=local_dir,
+    )
 
 
 def _matching_seeding_keys(
@@ -566,8 +668,19 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
                 _reconcile_seeding_sessions(
                     manager, seeding_set, failed_attempts, suppressed_set, seedable
                 )
+                source_counts = _source_count_by_logical_identity(seedable)
+                for item in seedable:
+                    _ensure_seedable_session(
+                        item,
+                        tracker_client,
+                        manager,
+                        seeding_set,
+                        failed_attempts,
+                        suppressed_set,
+                    )
             except Exception as e:
                 logger.warning(f"Failed to reconcile seeding sessions before status: {e}")
+                source_counts = {}
             status = manager.get_all_session_status()
             from llmpt.torrent_state import get_torrent_state
             from llmpt.status_summary import summarize_status
@@ -610,6 +723,14 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
                         "mapped_files": v.get("mapped_files", 0),
                         "total_files": v.get("total_files", 0),
                         "full_mapping": v.get("full_mapping", False),
+                        "source_count": source_counts.get(
+                            _logical_seeding_key(
+                                v.get("repo_type", "model"),
+                                v.get("repo_id"),
+                                v.get("revision"),
+                            ),
+                            1,
+                        ),
                         "tracker_registered": session_states[k].get("tracker_registered", False),
                         "last_registration_error": session_states[k].get("last_registration_error"),
                         "source_status": unified_states[k]["source_status"],
@@ -816,45 +937,24 @@ def _scan_and_seed(
     seedable = scan_seedable_sources()
     new_count = 0
     now = time.time()
-    discovered_keys = _discovered_seeding_keys(seedable)
-
-    for item in seedable:
-        repo_type = item.repo_type
-        repo_id = item.repo_id
-        revision = item.revision
-        cache_dir = item.cache_dir
-        local_dir = item.local_dir
-
-        key = _seeding_key(
-            repo_type,
-            repo_id,
-            revision,
-            cache_dir=cache_dir,
-            local_dir=local_dir,
-        )
-        if key in seeding_set:
-            continue
-        if key in suppressed_set:
-            continue
-
-        failure = failed_attempts.get(key)
-        if failure is not None:
-            next_retry_ts = float(failure.get("next_retry_ts", 0.0))
-            if now < next_retry_ts:
-                continue
-
-        _process_seedable(
-            repo_id, revision, tracker_client, manager,
-            seeding_set, failed_attempts, repo_type=repo_type,
-            cache_dir=cache_dir, local_dir=local_dir
-        )
-        new_count += 1
-
-    if new_count > 0:
-        logger.info(f"Scan processed {new_count} new models")
     _reconcile_seeding_sessions(
         manager, seeding_set, failed_attempts, suppressed_set, seedable
     )
+
+    for item in seedable:
+        if _ensure_seedable_session(
+            item,
+            tracker_client,
+            manager,
+            seeding_set,
+            failed_attempts,
+            suppressed_set,
+            now=now,
+        ):
+            new_count += 1
+
+    if new_count > 0:
+        logger.info(f"Scan processed {new_count} new models")
 
     try:
         from .torrent_cache import cleanup_torrent_cache

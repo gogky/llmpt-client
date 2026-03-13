@@ -115,6 +115,9 @@ llmpt-cli restart                                             # 重启
 当对应 CLI 参数未显式传入时，`llmpt-cli` 会继续读取环境变量作为默认值：
 `HF_P2P_TRACKER`、`HF_P2P_TIMEOUT`、`HF_P2P_PORT`、`HF_P2P_WEBSEED`、`HF_P2P_VERBOSE`、`HF_TOKEN`。
 
+访问私有或受限仓库时，也可以先执行 `hf auth login`。`llmpt` 会自动复用
+`huggingface_hub` 已保存的登录 token。
+
 ### 守护进程
 
 做种运行在独立的后台守护进程中，**不需要保持终端打开**：
@@ -243,7 +246,8 @@ HF_P2P_TIMEOUT=300
 # 启用/禁用 WebSeed（默认：1）
 HF_P2P_WEBSEED=1
 
-# HuggingFace 认证 Token（用于 WebSeed 访问私有/受限仓库）, 当前暂不支持对访问受限的仓库做种
+# HuggingFace 认证 Token（可选：覆盖 `hf auth login` 的本机登录态；用于 WebSeed 访问私有/受限仓库）
+# 当前暂不支持对访问受限的仓库做种
 HF_TOKEN=hf_xxxxx
 
 # 下载完成后显示是否显示统计信息（默认：False）
@@ -262,7 +266,7 @@ enable_p2p(
     tracker_url="http://my-tracker",
     timeout=600,          # 10分钟超时
     port=6881,            # 指定端口
-    hf_token="hf_xxxxx",  # 访问私有仓库
+    hf_token="hf_xxxxx",  # 可选：覆盖本机 `hf auth login` 登录态
     webseed=True,         # 启用 WebSeed（默认）
 )
 
