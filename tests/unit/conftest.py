@@ -86,8 +86,20 @@ def reset_batch_manager_singleton():
     explicitly request it.
     """
     from llmpt.p2p_batch import P2PBatchManager
+    instance = P2PBatchManager._instance
+    if instance is not None:
+        try:
+            instance.shutdown()
+        except Exception:
+            pass
     P2PBatchManager._instance = None
     yield
+    instance = P2PBatchManager._instance
+    if instance is not None:
+        try:
+            instance.shutdown()
+        except Exception:
+            pass
     P2PBatchManager._instance = None
 
 

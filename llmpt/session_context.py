@@ -123,9 +123,8 @@ class SessionContext:
         self.file_events: Dict[str, threading.Event] = {}
         self.file_destinations: Dict[str, str] = {}
         
-        # Thread-safe alert-event inbox: populated by
-        # P2PBatchManager.dispatch_alerts(), consumed by the monitor thread via
-        # _process_alerts().
+        # Thread-safe alert-event inbox: populated by the manager-owned alert
+        # pump, consumed by the monitor thread via _process_alerts().
         self.alert_lock = threading.Lock()
         self.pending_alerts: deque = deque()
         

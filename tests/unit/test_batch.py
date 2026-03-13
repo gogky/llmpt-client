@@ -6,6 +6,7 @@ Uses shared fixtures from conftest.py:
 - ``reset_batch_manager_singleton`` (autouse): isolates the singleton
 """
 
+import threading
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -30,16 +31,18 @@ def test_register_request_no_torrent(mock_lt_all_modules):
 
     manager = P2PBatchManager()
 
-    success = manager.register_request(
-        repo_id="demo",
-        revision="main",
-        filename="model.bin",
-        temp_file_path="/tmp/fake",
-        tracker_client=tracker
-    )
+    with patch.object(manager, '_ensure_alert_pump_running') as mock_pump:
+        success = manager.register_request(
+            repo_id="demo",
+            revision="main",
+            filename="model.bin",
+            temp_file_path="/tmp/fake",
+            tracker_client=tracker
+        )
 
     # Should fail inside SessionContext._init_torrent
     assert success is False
+    mock_pump.assert_called_once()
 
 
 def test_register_request_success(mock_lt_all_modules):
@@ -55,7 +58,8 @@ def test_register_request_success(mock_lt_all_modules):
 
     # We want to mock `download_file` inside `SessionContext` so we don't
     # block on threading events in unit tests.
-    with patch.object(SessionContext, 'download_file', return_value=True) as mock_download:
+    with patch.object(SessionContext, 'download_file', return_value=True) as mock_download, \
+         patch.object(manager, '_ensure_alert_pump_running') as mock_pump:
         success = manager.register_request(
             repo_id="demo",
             revision="main",
@@ -67,6 +71,7 @@ def test_register_request_success(mock_lt_all_modules):
         assert success is True
         mock_download.assert_called_once_with("model.bin", "/tmp/fake", tqdm_class=None)
         assert ("model", "demo", "main", "hub_cache", get_hf_hub_cache()) in manager.sessions
+        mock_pump.assert_called_once()
 
 
 def test_session_context_init_torrent(mock_lt_all_modules):
@@ -150,19 +155,21 @@ def test_register_seeding_task_reuses_existing_logical_session(mock_lt_all_modul
         ("model", "demo", "main", "hub_cache", "/tmp/cache-a"): existing_ctx,
     }
 
-    success = manager.register_seeding_task(
-        repo_id="demo",
-        revision="main",
-        repo_type="model",
-        tracker_client=tracker,
-        torrent_data=b"fake",
-        cache_dir="/tmp/cache-b",
-    )
+    with patch.object(manager, '_ensure_alert_pump_running') as mock_pump:
+        success = manager.register_seeding_task(
+            repo_id="demo",
+            revision="main",
+            repo_type="model",
+            tracker_client=tracker,
+            torrent_data=b"fake",
+            cache_dir="/tmp/cache-b",
+        )
 
     assert success is True
     assert set(manager.sessions) == {
         ("model", "demo", "main", "hub_cache", "/tmp/cache-a"),
     }
+    mock_pump.assert_called_once()
 
 
 def test_release_on_demand_session_incomplete_preserves_state(mock_lt_all_modules):
@@ -195,7 +202,8 @@ def test_remove_all_sessions_preserves_on_demand_partials(mock_lt_all_modules):
     }
 
     with patch.object(manager, '_checkpoint_on_demand_session') as mock_checkpoint, \
-         patch.object(manager, '_teardown_session', side_effect=[None, None]) as mock_teardown:
+         patch.object(manager, '_teardown_session', side_effect=[None, None]) as mock_teardown, \
+         patch.object(manager, '_stop_alert_pump') as mock_stop_pump:
         count = manager.remove_all_sessions()
 
     assert count == 2
@@ -204,3 +212,43 @@ def test_remove_all_sessions_preserves_on_demand_partials(mock_lt_all_modules):
         ((on_demand,), {'purge_resumable_state': False}),
         ((full_seed,), {'purge_resumable_state': True}),
     ]
+    mock_stop_pump.assert_called_once_with(join=True)
+
+
+def test_checkpoint_wakes_alert_pump_instead_of_dispatch(mock_lt_all_modules):
+    from llmpt.p2p_batch import P2PBatchManager
+
+    manager = P2PBatchManager()
+    ctx = MagicMock(session_mode='on_demand', fastresume_path='/tmp/demo.fastresume')
+    ctx.lock = threading.Lock()
+    ctx.handle = MagicMock()
+    ctx.handle.is_valid.return_value = True
+
+    stat_a = type('Stat', (), {'st_mtime_ns': 1})()
+    stat_b = type('Stat', (), {'st_mtime_ns': 2})()
+
+    with patch.object(manager, '_request_alert_pump_wakeup') as mock_wakeup, \
+         patch.object(manager, 'dispatch_alerts') as mock_dispatch, \
+         patch('llmpt.monitor._process_alerts') as mock_process_alerts, \
+         patch('os.path.exists', return_value=True), \
+         patch('os.stat', side_effect=[stat_a, stat_b]):
+        manager._checkpoint_on_demand_session(ctx)
+
+    mock_wakeup.assert_called()
+    mock_dispatch.assert_not_called()
+    mock_process_alerts.assert_called()
+
+
+def test_alert_pump_loop_dispatches_alerts(mock_lt_all_modules):
+    from llmpt.p2p_batch import P2PBatchManager
+
+    manager = P2PBatchManager()
+    manager.sessions = {('model', 'demo', 'main', 'hub_cache', '/tmp/cache'): MagicMock()}
+    manager.lt_session.wait_for_alert.return_value = None
+
+    stop_event = threading.Event()
+    with patch.object(manager, 'dispatch_alerts', side_effect=lambda: stop_event.set()) as mock_dispatch:
+        manager._alert_pump_loop(stop_event)
+
+    manager.lt_session.wait_for_alert.assert_called_once_with(200)
+    mock_dispatch.assert_called_once()

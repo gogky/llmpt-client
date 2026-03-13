@@ -73,11 +73,7 @@ def run_monitor_loop(ctx: "SessionContext") -> None:
                     _save_resume_data(ctx)
                     last_save_time = now
 
-                # --- Dispatch alerts from the global lt_session to per-session inboxes ---
-                from .p2p_batch import P2PBatchManager
-                P2PBatchManager().dispatch_alerts()
-
-                # --- Process this session's alerts from its inbox ---
+                # --- Process snapshot events delivered by the manager-owned alert pump ---
                 _process_alerts(ctx)
 
                 # --- Check pending file completions ---

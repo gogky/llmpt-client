@@ -152,6 +152,9 @@ class P2PBatchManager:
             self._initialized = True
             # Mapping from (repo_id, revision) -> SessionContext
             self.sessions: Dict[tuple, SessionContext] = {}
+            self._alert_pump_thread: Optional[threading.Thread] = None
+            self._alert_pump_stop: Optional[threading.Event] = None
+            self._alert_pump_wakeup = threading.Event()
             if LIBTORRENT_AVAILABLE:
                 from . import get_config
                 config = get_config()
@@ -170,6 +173,92 @@ class P2PBatchManager:
                 self.lt_session = None
                 self.listen_port = None
 
+    def _request_alert_pump_wakeup(self) -> None:
+        """Wake the dedicated alert-pump thread, if it is sleeping."""
+        self._alert_pump_wakeup.set()
+
+    def _ensure_alert_pump_running(self) -> None:
+        """Start the dedicated alert-pump thread when at least one session exists."""
+        thread_to_start = None
+        with self._lock:
+            if not self.lt_session or not self.sessions:
+                return
+
+            existing = self._alert_pump_thread
+            if existing is not None and existing.is_alive():
+                self._alert_pump_wakeup.set()
+                return
+
+            stop_event = threading.Event()
+            self._alert_pump_stop = stop_event
+            self._alert_pump_wakeup.clear()
+            thread_to_start = threading.Thread(
+                target=self._alert_pump_loop,
+                args=(stop_event,),
+                name="llmpt-alert-pump",
+                daemon=True,
+            )
+            self._alert_pump_thread = thread_to_start
+
+        thread_to_start.start()
+
+    def _stop_alert_pump(self, *, join: bool = True) -> None:
+        """Stop the dedicated alert-pump thread."""
+        with self._lock:
+            thread_to_join = self._alert_pump_thread
+            stop_event = self._alert_pump_stop
+            self._alert_pump_thread = None
+            self._alert_pump_stop = None
+            if stop_event is not None:
+                stop_event.set()
+            self._alert_pump_wakeup.set()
+
+        if (
+            join
+            and thread_to_join is not None
+            and thread_to_join is not threading.current_thread()
+            and thread_to_join.is_alive()
+        ):
+            thread_to_join.join(timeout=3)
+
+    def _alert_pump_loop(self, stop_event: threading.Event) -> None:
+        """Own the global libtorrent alert queue for active sessions."""
+        logger.debug("Alert pump started")
+        try:
+            while not stop_event.is_set():
+                with self._lock:
+                    if not self.sessions or not self.lt_session:
+                        break
+                    has_alertable_session = any(
+                        getattr(ctx, "handle", None) is not None and getattr(ctx, "is_valid", False)
+                        for ctx in self.sessions.values()
+                    )
+                    wait_for_alert = (
+                        getattr(self.lt_session, "wait_for_alert", None)
+                        if has_alertable_session
+                        else None
+                    )
+
+                try:
+                    if callable(wait_for_alert):
+                        wait_for_alert(200)
+                    else:
+                        self._alert_pump_wakeup.wait(0.2)
+                except Exception as exc:
+                    logger.debug(f"Alert pump wait failed: {exc}")
+
+                self._alert_pump_wakeup.clear()
+
+                if stop_event.is_set():
+                    break
+
+                try:
+                    self.dispatch_alerts()
+                except Exception as exc:
+                    logger.error(f"Alert pump dispatch failed: {exc}")
+        finally:
+            logger.debug("Alert pump exited")
+
     def dispatch_alerts(self) -> None:
         """Pop alerts from the global lt_session and route each to the correct SessionContext.
 
@@ -178,12 +267,10 @@ class P2PBatchManager:
         independently, causing alerts belonging to *other* handles to be
         silently discarded (the "alert race" bug).
 
-        This method should be called by each monitor thread before processing
-        its own alerts.  It is safe to call concurrently — the _lock ensures
-        only one thread pops at a time, and raw libtorrent alerts are
-        immediately converted into snapshot-safe Python events before they are
-        deposited into each SessionContext's thread-safe ``pending_alerts``
-        inbox.
+        The manager-owned alert-pump thread is the intended owner of this
+        method. It remains concurrency-safe for tests and fallback paths —
+        the _lock ensures only one caller pops at a time — but production code
+        should route all alert draining through the dedicated pump.
         """
         if not self.lt_session:
             return
@@ -318,7 +405,10 @@ class P2PBatchManager:
                 worker.join(timeout=3)
 
         if reuse_existing:
+            self._ensure_alert_pump_running()
             return True
+
+        self._ensure_alert_pump_running()
             
         # Ensure torrent is initialized with .torrent data from tracker
         if not session_ctx.is_valid:
@@ -392,6 +482,8 @@ class P2PBatchManager:
                     local_dir=local_dir,
                 )
             session_ctx = self.sessions[repo_key]
+
+        self._ensure_alert_pump_running()
         
         # Register the file with the session context and wait for it
         return session_ctx.download_file(filename, temp_file_path, tqdm_class=tqdm_class)
@@ -434,6 +526,11 @@ class P2PBatchManager:
                 ctx,
                 purge_resumable_state=completed,
             )
+
+        with self._lock:
+            has_sessions = bool(self.sessions)
+        if not has_sessions:
+            self._stop_alert_pump(join=True)
 
         if worker is not None and worker is not threading.current_thread():
             worker.join(timeout=3)
@@ -479,10 +576,7 @@ class P2PBatchManager:
 
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            try:
-                self.dispatch_alerts()
-            except Exception:
-                pass
+            self._request_alert_pump_wakeup()
 
             try:
                 from .monitor import _process_alerts
@@ -558,6 +652,11 @@ class P2PBatchManager:
             ctx = self.sessions.pop(repo_key)
             worker = self._teardown_session(ctx)
 
+        with self._lock:
+            has_sessions = bool(self.sessions)
+        if not has_sessions:
+            self._stop_alert_pump(join=True)
+
         if worker is not None:
             worker.join(timeout=3)
         return True
@@ -585,8 +684,10 @@ class P2PBatchManager:
                     threads_to_join.append(worker)
             self.sessions.clear()
 
-        # Wait for monitor threads outside the lock to avoid deadlock
-        # (monitor threads may try to acquire manager._lock via dispatch_alerts).
+        self._stop_alert_pump(join=True)
+
+        # Wait for monitor threads outside the lock to avoid lock inversion with
+        # session teardown paths.
         for t in threads_to_join:
             t.join(timeout=3)
 
