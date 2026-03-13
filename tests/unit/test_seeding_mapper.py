@@ -138,10 +138,17 @@ class TestHardlinkFilesForSeeding:
         temp_dir = str(tmp_path / "p2p_root")
         os.makedirs(temp_dir, exist_ok=True)
 
-        hardlinks, count = hardlink_files_for_seeding(mock_ti, temp_dir, "t/r", "main")
+        def fake_link(src, dst):
+            with open(src, "rb") as src_f, open(dst, "wb") as dst_f:
+                dst_f.write(src_f.read())
+
+        with patch("os.link", side_effect=fake_link) as mock_link:
+            hardlinks, count = hardlink_files_for_seeding(mock_ti, temp_dir, "t/r", "main")
+
         assert count == 1
         assert len(hardlinks) == 1
         assert os.path.exists(hardlinks[0])
+        mock_link.assert_called_once()
 
     @patch('llmpt.seeding_mapper.resolve_hf_blob', return_value=None)
     def test_cache_miss_skips(self, mock_resolve, tmp_path):

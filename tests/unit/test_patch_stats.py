@@ -9,7 +9,9 @@ P2P-success / P2P-failure / no-context branches.
 import time
 import threading
 import pytest
+import httpx
 from unittest.mock import patch, MagicMock
+from huggingface_hub.errors import LocalEntryNotFoundError
 
 import llmpt.patch as patch_module
 from llmpt.patch import (
@@ -395,6 +397,35 @@ class TestPatchedHfHubDownload:
         mock_notify.assert_not_called()
         mock_manager.release_on_demand_session.assert_not_called()
 
+    def test_retries_transient_metadata_error(self):
+        transient = httpx.ConnectError("[Errno 101] Network is unreachable")
+        attempts = {"count": 0}
+
+        def flaky_download(*args, **kwargs):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise ValueError("Force download failed due to the above error.") from transient
+            return "/path/to/file"
+
+        patch_module._original_hf_hub_download = MagicMock(side_effect=flaky_download)
+        patch_module._config = {
+            'tracker_url': 'http://tracker.example.com',
+            'metadata_error_retries': 2,
+            'metadata_error_retry_delay': 1.0,
+        }
+        mock_manager = MagicMock()
+
+        with patch('llmpt.tracker_client.TrackerClient'), \
+             patch('llmpt.utils.resolve_commit_hash', side_effect=lambda r, rev, **kw: rev), \
+             patch('llmpt.patch.time.sleep') as mock_sleep, \
+             patch('llmpt.patch._notify_seed_daemon'), \
+             patch('llmpt.p2p_batch.P2PBatchManager._instance', mock_manager):
+            result = _patched_hf_hub_download("test/repo", "model.bin", revision="main")
+
+        assert result == "/path/to/file"
+        assert patch_module._original_hf_hub_download.call_count == 2
+        mock_sleep.assert_called_once_with(1.0)
+
 
 # ─── apply_patch / remove_patch integration ───────────────────────────────────
 
@@ -636,6 +667,38 @@ class TestPatchedSnapshotDownload:
             cache_dir=None,
             local_dir=None,
         )
+
+    def test_retries_transient_snapshot_metadata_error(self):
+        transient = httpx.ConnectError("[Errno 101] Network is unreachable")
+        attempts = {"count": 0}
+
+        def flaky_snapshot_download(*args, **kwargs):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise LocalEntryNotFoundError(
+                    "An error happened while trying to locate the files on the Hub."
+                ) from transient
+            return "/tmp/model"
+
+        patch_module._config = {
+            'verbose': False,
+            'metadata_error_retries': 2,
+            'metadata_error_retry_delay': 1.0,
+        }
+        patch_module._original_snapshot_download = MagicMock(side_effect=flaky_snapshot_download)
+        mock_manager = MagicMock()
+
+        with patch('llmpt.utils.resolve_commit_hash', return_value='a' * 40), \
+             patch('llmpt.patch.time.sleep') as mock_sleep, \
+             patch('llmpt.p2p_batch.P2PBatchManager._instance', mock_manager):
+            result = _patched_snapshot_download(
+                repo_id="test/repo",
+                revision="main",
+            )
+
+        assert result == "/tmp/model"
+        assert patch_module._original_snapshot_download.call_count == 2
+        mock_sleep.assert_called_once_with(1.0)
 
 
 class TestDeferredNotification:

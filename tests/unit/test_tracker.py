@@ -188,6 +188,37 @@ def test_register_torrent_success(tracker_client):
     assert request_body["torrent_data"] == base64.b64encode(b'fake_torrent').decode('ascii')
     assert request_body["files"] == [{"path": "model.bin", "size": 100}]
     assert "magnet_link" not in request_body
+    assert "announce_key" not in request_body
+
+
+@responses.activate
+def test_register_torrent_includes_announce_key_when_supplied(tracker_client):
+    responses.add(
+        responses.POST,
+        "http://tracker.example.com/api/v1/publish",
+        json={"success": True},
+        status=200
+    )
+
+    success = tracker_client.register_torrent(
+        repo_id="test",
+        revision="main",
+        repo_type="model",
+        name="test model",
+        info_hash="f" * 64,
+        announce_key="a" * 40,
+        total_size=100,
+        file_count=1,
+        piece_length=1024,
+        torrent_data=b'fake_torrent',
+        files=[{"path": "model.bin", "size": 100}],
+    )
+
+    assert success is True
+    import json
+    request_body = json.loads(responses.calls[0].request.body)
+    assert request_body["info_hash"] == "f" * 64
+    assert request_body["announce_key"] == "a" * 40
 
 
 @responses.activate

@@ -12,6 +12,8 @@ import logging
 import os
 from typing import Optional, Any
 
+import httpx
+
 logger = logging.getLogger('llmpt.patch')
 
 # Store original functions
@@ -42,6 +44,8 @@ _active_wrapper_counts: dict[str, int] = {}  # repo_id -> active wrapper depth
 _active_download_counts: dict[str, int] = {}  # repo_id -> in-flight hf_hub_download calls
 _SNAPSHOT_PROGRESS_BAR_NAME = "huggingface_hub.snapshot_download"
 _SNAPSHOT_PROGRESS_UPDATE_INTERVAL = 0.25
+_DEFAULT_METADATA_ERROR_RETRIES = 2
+_DEFAULT_METADATA_RETRY_DELAY = 1.0
 
 
 def _normalize_storage_root(path: Optional[str]) -> Optional[str]:
@@ -130,6 +134,86 @@ def _exit_wrapper(repo_id: str) -> None:
             _active_wrapper_counts.pop(repo_id, None)
         else:
             _active_wrapper_counts[repo_id] = depth - 1
+
+
+def _iter_exception_chain(exc: BaseException):
+    """Yield *exc* and its causal chain without looping forever."""
+    seen: set[int] = set()
+    stack = [exc]
+    while stack:
+        current = stack.pop()
+        if current is None:
+            continue
+        current_id = id(current)
+        if current_id in seen:
+            continue
+        seen.add(current_id)
+        yield current
+        cause = getattr(current, "__cause__", None)
+        context = getattr(current, "__context__", None)
+        if context is not None and context is not cause:
+            stack.append(context)
+        if cause is not None:
+            stack.append(cause)
+
+
+def _is_retryable_hf_metadata_error(exc: BaseException) -> bool:
+    """Return True when the failure came from transient HF metadata I/O."""
+    try:
+        from huggingface_hub.errors import LocalEntryNotFoundError
+    except ImportError:
+        LocalEntryNotFoundError = tuple()  # type: ignore[assignment]
+
+    retryable_roots = (
+        httpx.ConnectError,
+        httpx.TimeoutException,
+    )
+    wrapper_types = (
+        ValueError,
+        LocalEntryNotFoundError,
+    )
+
+    saw_wrapper = False
+    for candidate in _iter_exception_chain(exc):
+        if isinstance(candidate, retryable_roots):
+            return True
+        if isinstance(candidate, wrapper_types):
+            saw_wrapper = True
+    return False if saw_wrapper else isinstance(exc, retryable_roots)
+
+
+def _call_with_hf_metadata_retries(
+    operation,
+    *,
+    description: str,
+    repo_id: Optional[str],
+    revision: Optional[str],
+):
+    """Retry transient HF metadata failures a small number of times."""
+    retries = max(0, int(_config.get("metadata_error_retries", _DEFAULT_METADATA_ERROR_RETRIES)))
+    delay = max(0.0, float(_config.get("metadata_error_retry_delay", _DEFAULT_METADATA_RETRY_DELAY)))
+    attempt = 0
+
+    while True:
+        try:
+            return operation()
+        except Exception as exc:
+            if attempt >= retries or not _is_retryable_hf_metadata_error(exc):
+                raise
+            attempt += 1
+            revision_display = (revision or "main")[:8]
+            logger.warning(
+                "[P2P] Retrying %s for %s@%s after transient HF metadata error "
+                "(retry %d/%d): %s",
+                description,
+                repo_id or "?",
+                revision_display,
+                attempt,
+                retries,
+                exc,
+            )
+            if delay:
+                time.sleep(delay)
 
 def _flush_deferred_notifications():
     """Flush pending deferred notifications on process exit.
@@ -842,7 +926,12 @@ def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
     download_succeeded = False
     try:
         # Call original function (will trigger patched http_get)
-        result = _original_hf_hub_download(repo_id, filename, **kwargs)
+        result = _call_with_hf_metadata_retries(
+            lambda: _original_hf_hub_download(repo_id, filename, **kwargs),
+            description=f"hf_hub_download {actual_filename}",
+            repo_id=repo_id,
+            revision=revision,
+        )
         download_succeeded = True
         return result
     finally:
@@ -1167,7 +1256,12 @@ def _patched_snapshot_download(*args, **kwargs):
     download_completed = False
 
     try:
-        result = _original_snapshot_download(*args, **kwargs)
+        result = _call_with_hf_metadata_retries(
+            lambda: _original_snapshot_download(*args, **kwargs),
+            description="snapshot_download",
+            repo_id=repo_id,
+            revision=resolved,
+        )
         download_completed = True
     finally:
         if repo_id:

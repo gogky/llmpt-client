@@ -14,6 +14,67 @@ logger = logging.getLogger('llmpt.torrent_creator')
 _COMMIT_HASH_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
+def _is_padding_relative_path(relative_path: str) -> bool:
+    """Return True when a libtorrent relative path refers to a padding file."""
+    normalized = relative_path.replace("\\", "/")
+    return normalized.startswith(".pad/") or "/.pad/" in normalized
+
+
+def _extract_info_hash_metadata(info) -> dict[str, str]:
+    """Extract the canonical application hash and announce key from torrent_info."""
+    announce_key = str(info.info_hash())
+    metadata = {"info_hash": announce_key, "announce_key": announce_key}
+
+    try:
+        hashes = info.info_hashes()
+    except Exception:
+        hashes = None
+
+    if hashes is None:
+        return metadata
+
+    try:
+        has_v2 = hashes.has_v2() if hasattr(hashes, "has_v2") else False
+        if isinstance(has_v2, bool) and has_v2:
+            full_v2 = str(hashes.v2)
+            metadata["info_hash"] = full_v2
+            metadata["info_hash_v2"] = full_v2
+            return metadata
+    except Exception:
+        pass
+
+    try:
+        has_v1 = hashes.has_v1() if hasattr(hashes, "has_v1") else False
+        if isinstance(has_v1, bool) and has_v1:
+            metadata["info_hash_v1"] = str(hashes.v1)
+    except Exception:
+        pass
+
+    return metadata
+
+
+def _collect_payload_files(info) -> tuple[list[dict], int]:
+    """Return only the real payload files from torrent_info, excluding .pad/ entries."""
+    files = info.files()
+    file_list: list[dict] = []
+    total_size = 0
+
+    for i in range(files.num_files()):
+        lt_file_path = files.file_path(i)
+        relative_path = strip_torrent_root(lt_file_path)
+        if _is_padding_relative_path(relative_path):
+            continue
+
+        size = files.file_size(i)
+        file_list.append({
+            'path': relative_path,
+            'size': size,
+        })
+        total_size += size
+
+    return file_list, total_size
+
+
 def _build_local_dir_file_storage(
     repo_id: str,
     revision: str,
@@ -198,32 +259,25 @@ def _torrent_data_to_result(torrent_data: bytes, repo_id: str) -> Optional[dict]
     """
     try:
         info = lt.torrent_info(lt.bdecode(torrent_data))
-        info_hash = str(info.info_hash())
         files = info.files()
-
-        file_list = []
-        total_size = 0
-        for i in range(files.num_files()):
-            lt_file_path = files.file_path(i)
-            relative_path = strip_torrent_root(lt_file_path)
-            size = files.file_size(i)
-            file_list.append({'path': relative_path, 'size': size})
-            total_size += size
+        hash_metadata = _extract_info_hash_metadata(info)
+        file_list, total_size = _collect_payload_files(info)
 
         # Extract the root folder name (= commit hash) from the first file path
         first_path = files.file_path(0).replace('\\', '/')
         commit_hash = first_path.split('/')[0] if '/' in first_path else ''
 
-        return {
-            'info_hash': info_hash,
+        result = {
             'file_size': total_size,
             'piece_length': info.piece_length(),
             'num_pieces': info.num_pieces(),
-            'num_files': info.num_files(),
+            'num_files': len(file_list),
             'torrent_data': torrent_data,
             'commit_hash': commit_hash,
             'files': file_list,
         }
+        result.update(hash_metadata)
+        return result
     except Exception as e:
         logger.warning(f"[{repo_id}] Failed to parse cached torrent: {e}")
         return None
@@ -371,25 +425,13 @@ def create_torrent(
             f"for total_size={format_bytes(total_size)}"
         )
 
-        # Create torrent with v1_only flag to eliminate .pad/ padding files.
+        # Create a pure BitTorrent v2 torrent.
         #
-        # Background on the padding problem:
-        #   By default (and in v2/hybrid modes), libtorrent inserts virtual .pad/ files to
-        #   align each file's start to a piece boundary (BEP 47 / BEP 52 canonical layout).
-        #   In our use case these padding files are never in the HF cache, so the seeder's
-        #   piece hash check always fails → seeder can't serve any data to peers.
-        #
-        # Why NOT v2 or hybrid?
-        #   Despite BT v2's per-file Merkle hash trees, libtorrent's Python bindings still
-        #   insert .pad/ files in v2_only (=32) and canonical_files (=128) modes.
-        #   Tested with libtorrent 2.0.10: all modes except v1_only produce padding files.
-        #
-        # Why v1_only (=64)?
-        #   - Zero .pad/ virtual files produced (verified experimentally)
-        #   - Piece hash verification completes in <1s (vs 300s+ timeout with padding)
-        #   - Fully compatible with libtorrent 2.x (which is our minimum requirement)
-        #   - Each file's data runs contiguous across piece boundaries (standard BT v1 behavior)
-        t = lt.create_torrent(fs, piece_length, flags=lt.create_torrent.v1_only)
+        # libtorrent will insert .pad/ entries into the logical file table so that each
+        # payload file starts on a piece boundary. These padding files are internal to the
+        # torrent layout and must not leak into the business-layer file manifest we publish
+        # to the tracker or compare against completed HF snapshots.
+        t = lt.create_torrent(fs, piece_length, flags=lt.create_torrent.v2_only)
 
 
         # Add tracker
@@ -419,33 +461,32 @@ def create_torrent(
         # Cache the generated torrent for future use
         save_torrent_to_cache(repo_id, revision, torrent_data, repo_type=repo_type)
 
-        # Get info hash
+        # Extract hash metadata and payload files for the application-layer manifest.
         info = lt.torrent_info(torrent)
-        info_hash = str(info.info_hash())
+        hash_metadata = _extract_info_hash_metadata(info)
+        file_list, payload_total_size = _collect_payload_files(info)
 
-        # Extract per-file metadata
-        files = info.files()
-        file_list = []
-        for i in range(files.num_files()):
-            lt_file_path = files.file_path(i)
-            relative_path = strip_torrent_root(lt_file_path)
-            file_list.append({
-                'path': relative_path,
-                'size': files.file_size(i),
-            })
+        logger.info(
+            f"Torrent created: info_hash={hash_metadata['info_hash']} "
+            f"announce_key={hash_metadata['announce_key']}"
+        )
 
-        logger.info(f"Torrent created: {info_hash}")
-
-        return {
-            'info_hash': info_hash,
+        result = {
             'file_size': total_size,
             'piece_length': piece_length,
             'num_pieces': info.num_pieces(),
-            'num_files': info.num_files(),
+            'num_files': len(file_list),
             'torrent_data': torrent_data,
             'commit_hash': commit_hash,
             'files': file_list,
         }
+        if payload_total_size != total_size:
+            logger.warning(
+                f"[{repo_id}] Payload file total ({payload_total_size}) does not match "
+                f"file_storage total ({total_size}); using file_storage total"
+            )
+        result.update(hash_metadata)
+        return result
 
     except Exception as e:
         logger.error(f"Failed to create torrent: {e}")
@@ -502,17 +543,23 @@ def ensure_registered(
 
     resolved_revision = _normalized_result_commit_hash(result, revision)
 
+    register_kwargs = {
+        "repo_id": repo_id,
+        "revision": resolved_revision,
+        "repo_type": repo_type,
+        "name": repo_id,
+        "info_hash": result['info_hash'],
+        "total_size": result['file_size'],
+        "file_count": result.get('num_files', 1),
+        "piece_length": result['piece_length'],
+        "torrent_data": torrent_data,
+        "files": result['files'],
+    }
+    if result.get("announce_key"):
+        register_kwargs["announce_key"] = result["announce_key"]
+
     success = tracker_client.register_torrent(
-        repo_id=repo_id,
-        revision=resolved_revision,
-        repo_type=repo_type,
-        name=repo_id,
-        info_hash=result['info_hash'],
-        total_size=result['file_size'],
-        file_count=result.get('num_files', 1),
-        piece_length=result['piece_length'],
-        torrent_data=torrent_data,
-        files=result['files'],
+        **register_kwargs,
     )
 
     if success:
@@ -597,18 +644,22 @@ def create_and_register_torrent(
         )
 
     # Register with tracker using the resolved commit hash
-    success = tracker_client.register_torrent(
-        repo_id=repo_id,
-        revision=resolved_revision,
-        repo_type=repo_type,
-        name=name,
-        info_hash=torrent_info['info_hash'],
-        total_size=torrent_info['file_size'],
-        file_count=torrent_info.get('num_files', 1),
-        piece_length=torrent_info['piece_length'],
-        torrent_data=torrent_info['torrent_data'],
-        files=torrent_info['files'],
-    )
+    register_kwargs = {
+        "repo_id": repo_id,
+        "revision": resolved_revision,
+        "repo_type": repo_type,
+        "name": name,
+        "info_hash": torrent_info['info_hash'],
+        "total_size": torrent_info['file_size'],
+        "file_count": torrent_info.get('num_files', 1),
+        "piece_length": torrent_info['piece_length'],
+        "torrent_data": torrent_info['torrent_data'],
+        "files": torrent_info['files'],
+    }
+    if torrent_info.get("announce_key"):
+        register_kwargs["announce_key"] = torrent_info["announce_key"]
+
+    success = tracker_client.register_torrent(**register_kwargs)
 
     if success:
         try:
