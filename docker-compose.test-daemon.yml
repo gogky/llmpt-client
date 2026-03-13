@@ -40,6 +40,7 @@ services:
       tests/e2e/test_daemon_bootstrap.py::test_daemon_dataset_bootstrap
       tests/e2e/test_daemon_bootstrap.py::test_daemon_cache_dir_bootstrap
       tests/e2e/test_daemon_bootstrap.py::test_daemon_local_dir_bootstrap
+      tests/e2e/test_daemon_bootstrap.py::test_daemon_local_dir_single_file_bootstrap
       tests/e2e/test_daemon_bootstrap.py::test_daemon_local_dir_cold_restart_bootstrap
       --run-integration -v -s --log-cli-level=INFO
 
@@ -68,5 +69,6 @@ services:
       tests/e2e/test_daemon_bootstrap.py::test_daemon_p2p_dataset_download_after_bootstrap
       tests/e2e/test_daemon_bootstrap.py::test_daemon_p2p_download_after_cache_dir_bootstrap
       tests/e2e/test_daemon_bootstrap.py::test_daemon_p2p_download_after_local_dir_bootstrap
+      tests/e2e/test_daemon_bootstrap.py::test_daemon_concurrent_single_file_p2p_download_after_local_dir_bootstrap
       tests/e2e/test_daemon_bootstrap.py::test_daemon_p2p_download_after_local_dir_cold_restart_bootstrap
       --run-integration -v -s --log-cli-level=INFO

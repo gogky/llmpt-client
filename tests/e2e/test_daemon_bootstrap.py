@@ -16,6 +16,8 @@ Run via Docker Compose:
 import os
 import shutil
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import huggingface_hub
 import pytest
 from huggingface_hub import snapshot_download
 import requests
@@ -39,6 +41,8 @@ CUSTOM_CACHE_FIRST = "/tmp/llmpt_cache_dir_first"
 CUSTOM_CACHE_SECOND = "/tmp/llmpt_cache_dir_second"
 LOCAL_DIR_FIRST = "/tmp/llmpt_local_dir_first"
 LOCAL_DIR_SECOND = "/tmp/llmpt_local_dir_second"
+LOCAL_DIR_SINGLE_FIRST = "/tmp/llmpt_local_dir_single_first"
+LOCAL_DIR_SINGLE_SECOND = "/tmp/llmpt_local_dir_single_second"
 LOCAL_DIR_RESTART_FIRST = "/tmp/llmpt_local_dir_restart_first"
 LOCAL_DIR_RESTART_SECOND = "/tmp/llmpt_local_dir_restart_second"
 
@@ -46,8 +50,23 @@ READY_CACHE_DIR = "/app/.daemon_ready_cache_dir"
 DONE_CACHE_DIR = "/app/.second_user_done_cache_dir"
 READY_LOCAL_DIR = "/app/.daemon_ready_local_dir"
 DONE_LOCAL_DIR = "/app/.second_user_done_local_dir"
+READY_LOCAL_DIR_SINGLE = "/app/.daemon_ready_local_dir_single"
+DONE_LOCAL_DIR_SINGLE = "/app/.second_user_done_local_dir_single"
 READY_LOCAL_DIR_RESTART = "/app/.daemon_ready_local_dir_restart"
 DONE_LOCAL_DIR_RESTART = "/app/.second_user_done_local_dir_restart"
+
+SINGLE_FILE_REQUESTS = (
+    {"filename": "special_tokens_map.json"},
+    {"filename": "config.json"},
+    {"filename": "pytorch_model.bin"},
+    {"filename": "model.onnx", "subfolder": "onnx"},
+)
+EXPECTED_SINGLE_FILE_OUTPUTS = {
+    "special_tokens_map.json",
+    "config.json",
+    "pytorch_model.bin",
+    "onnx/model.onnx",
+}
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -149,25 +168,55 @@ def _keep_seeding_until(done_signal, timeout=180):
     raise AssertionError(f"Timed out waiting for second-user signal: {done_signal}")
 
 
-def _wait_for_daemon_session(repo_id, timeout=60, storage_hint=None):
+def _matching_daemon_session(sessions, repo_id, storage_hint=None):
+    for key, info in sessions.items():
+        if repo_id not in key:
+            continue
+        if storage_hint and storage_hint not in key:
+            continue
+        return key, info
+    return None, None
+
+
+def _daemon_session_ready(info):
+    total_files = int(info.get("total_files") or 0)
+    mapped_files = int(info.get("mapped_files") or 0)
+    return (
+        bool(info.get("full_mapping"))
+        and bool(info.get("tracker_registered"))
+        and info.get("session_status") == "active"
+        and total_files > 0
+        and mapped_files >= total_files
+    )
+
+
+def _wait_for_daemon_session(repo_id, timeout=60, storage_hint=None, require_ready=False, stable_polls=1):
     from llmpt.ipc import query_daemon
 
     deadline = time.time() + timeout
     last_status = None
+    last_match = None
+    ready_polls = 0
     while time.time() < deadline:
         last_status = query_daemon("status")
         if last_status:
             sessions = last_status.get("sessions", {})
-            for key in sessions:
-                if repo_id not in key:
-                    continue
-                if storage_hint and storage_hint not in key:
-                    continue
-                return last_status
+            key, info = _matching_daemon_session(sessions, repo_id, storage_hint=storage_hint)
+            if key is not None:
+                last_match = {key: info}
+                if not require_ready:
+                    return last_status
+                if _daemon_session_ready(info):
+                    ready_polls += 1
+                    if ready_polls >= stable_polls:
+                        return last_status
+                else:
+                    ready_polls = 0
         time.sleep(1)
     sessions = last_status.get("sessions", {}) if last_status else {}
     raise AssertionError(
-        f"Daemon did not start seeding {repo_id} within {timeout}s. Sessions: {list(sessions.keys())}"
+        f"Daemon did not reach the expected state for {repo_id} within {timeout}s. "
+        f"Matched session: {last_match}. Sessions: {list(sessions.keys())}"
     )
 
 
@@ -300,7 +349,13 @@ def _bootstrap_with_running_daemon(
         print("[Test] Restarting daemon to verify cold-start recovery...", flush=True)
         assert stop_daemon(), "Expected daemon to stop cleanly before restart"
         _start_daemon(tracker_url)
-        _wait_for_daemon_session(repo_id, timeout=60, storage_hint=storage_hint)
+        _wait_for_daemon_session(
+            repo_id,
+            timeout=120,
+            storage_hint=storage_hint,
+            require_ready=True,
+            stable_polls=3,
+        )
 
     with open(ready_signal, "w") as f:
         f.write("ready")
@@ -352,6 +407,101 @@ def _download_via_p2p_with_custom_storage(
     stats = get_download_stats()
     _print_download_report(stats, files_in_repo, label=label)
     _assert_all_p2p(stats, files_in_repo)
+
+    with open(done_signal, "w") as f:
+        f.write("done")
+
+
+def _download_single_files_via_p2p(
+    *,
+    tracker_url,
+    repo_id,
+    ready_signal,
+    done_signal,
+    local_dir,
+    file_requests,
+    expected_payload_files,
+    label,
+):
+    time.sleep(15)
+    _clear_path(local_dir)
+
+    llmpt.enable_p2p(tracker_url=tracker_url, timeout=60, webseed=False)
+    reset_download_stats()
+
+    print("[Test] Polling tracker until torrent is registered...", flush=True)
+    assert _wait_for_torrent_on_tracker(tracker_url, repo_id, timeout=180), (
+        f"No torrent for {repo_id} on tracker within 180s"
+    )
+    print("[Test] Waiting for first-user to signal readiness...", flush=True)
+    _wait_for_signal(ready_signal, timeout=180, label="ready signal")
+
+    print(
+        f"[Test] Concurrently downloading {len(file_requests)} files via hf_hub_download "
+        f"into local_dir={local_dir}...",
+        flush=True,
+    )
+
+    def _download_one(request):
+        kwargs = {
+            "repo_id": repo_id,
+            "filename": request["filename"],
+            "local_files_only": False,
+            "force_download": True,
+            "local_dir": local_dir,
+        }
+        if request.get("subfolder"):
+            kwargs["subfolder"] = request["subfolder"]
+        # Resolve through the module after enable_p2p() so we hit the patched wrapper
+        # instead of a stale direct import captured before monkey patching.
+        return huggingface_hub.hf_hub_download(**kwargs)
+
+    downloaded_paths = []
+    with ThreadPoolExecutor(max_workers=len(file_requests)) as executor:
+        future_to_request = {
+            executor.submit(_download_one, request): request
+            for request in file_requests
+        }
+        for future in as_completed(future_to_request):
+            request = future_to_request[future]
+            try:
+                downloaded_paths.append(future.result())
+            except Exception as exc:
+                raise AssertionError(
+                    f"Concurrent hf_hub_download failed for request={request}: {exc}"
+                ) from exc
+
+    expected_paths = {
+        os.path.realpath(
+            os.path.join(
+                local_dir,
+                *( [request["subfolder"]] if request.get("subfolder") else [] ),
+                request["filename"],
+            )
+        )
+        for request in file_requests
+    }
+    actual_paths = {os.path.realpath(path) for path in downloaded_paths}
+    assert actual_paths == expected_paths, (
+        f"Unexpected local file paths.\nExpected: {sorted(expected_paths)}\n"
+        f"Actual: {sorted(actual_paths)}"
+    )
+
+    files_in_repo = _collect_files(local_dir)
+    assert files_in_repo == expected_payload_files, (
+        f"Unexpected payload files materialized in local_dir.\n"
+        f"Expected: {sorted(expected_payload_files)}\n"
+        f"Actual: {sorted(files_in_repo)}"
+    )
+
+    stats = get_download_stats()
+    _print_download_report(stats, files_in_repo, label=label)
+    assert stats["p2p"] == expected_payload_files, (
+        f"Expected only requested files via P2P.\n"
+        f"Expected: {sorted(expected_payload_files)}\n"
+        f"Actual: {sorted(stats['p2p'])}"
+    )
+    assert stats["http"] == set(), f"Unexpected HTTP fallbacks: {sorted(stats['http'])}"
 
     with open(done_signal, "w") as f:
         f.write("done")
@@ -763,6 +913,35 @@ def test_daemon_p2p_download_after_local_dir_bootstrap():
         done_signal=DONE_LOCAL_DIR,
         snapshot_kwargs={"local_dir": LOCAL_DIR_SECOND},
         label="Second User local_dir (P2P)",
+    )
+
+
+def test_daemon_local_dir_single_file_bootstrap():
+    """First user seeds a repo for second-user hf_hub_download concurrency tests."""
+    tracker_url = os.environ.get("TRACKER_URL", "http://118.195.159.242")
+    _bootstrap_with_running_daemon(
+        tracker_url=tracker_url,
+        repo_id=REPO_ID,
+        expected_files=EXPECTED_FILES,
+        ready_signal=READY_LOCAL_DIR_SINGLE,
+        done_signal=DONE_LOCAL_DIR_SINGLE,
+        storage_hint=LOCAL_DIR_SINGLE_FIRST,
+        snapshot_kwargs={"local_dir": LOCAL_DIR_SINGLE_FIRST},
+    )
+
+
+def test_daemon_concurrent_single_file_p2p_download_after_local_dir_bootstrap():
+    """Second user concurrently downloads selected files via hf_hub_download."""
+    tracker_url = os.environ.get("TRACKER_URL", "http://118.195.159.242")
+    _download_single_files_via_p2p(
+        tracker_url=tracker_url,
+        repo_id=REPO_ID,
+        ready_signal=READY_LOCAL_DIR_SINGLE,
+        done_signal=DONE_LOCAL_DIR_SINGLE,
+        local_dir=LOCAL_DIR_SINGLE_SECOND,
+        file_requests=SINGLE_FILE_REQUESTS,
+        expected_payload_files=EXPECTED_SINGLE_FILE_OUTPUTS,
+        label="Second User concurrent hf_hub_download (P2P)",
     )
 
 

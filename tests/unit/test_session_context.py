@@ -65,19 +65,11 @@ def _setup_successful_init(ctx, mock_lt):
 
 
 def _build_chain_overlap_torrent_info():
-    """Build the piece layout from the failing tiny-random-GPTJ torrent.
+    """Build the old v1-style chain layout used to test priority expansion.
 
-    piece_length = 256 KiB
-
-    Relevant chain:
-      special_tokens_map.json -> piece 0
-      tf_model.h5             -> pieces 0-2
-      pytorch_model.bin       -> pieces 2-9
-
-    A one-hop overlap expansion from ``special_tokens_map.json`` reaches only
-    ``tf_model.h5``. In the real failure, libtorrent then touches piece 2 while
-    fetching ``tf_model.h5`` and still hits ``pytorch_model.bin`` as priority 0,
-    producing ``partfile_write ... End of file``.
+    Under the current pure-v2 design, on-demand priorities should target only
+    the explicitly requested payload file, even if a synthetic torrent layout
+    would have chained through neighboring files.
     """
     entries = [
         ("7362d24ca596daa0c15c0caad7407413599c78d4/config.json", 804, 0),
@@ -500,16 +492,7 @@ class TestInitTorrent:
         mock_dns.assert_called_once_with('::1')
         assert ctx.test_peer_addr == ('::1', 7000)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Current priority expansion is only one hop. In the real local_dir "
-            "failure, requesting special_tokens_map.json reaches tf_model.h5 "
-            "first, then still hits pytorch_model.bin as priority 0 and triggers "
-            "partfile_write EOF."
-        ),
-    )
-    def test_initial_priorities_do_not_cover_transitive_piece_chain(self, make_ctx):
+    def test_initial_priorities_only_target_requested_file(self, make_ctx):
         ctx = make_ctx()
         mock_params = MagicMock()
         mock_params.flags = 0
@@ -528,8 +511,7 @@ class TestInitTorrent:
         assert result is True
         priorities = mock_params.file_priorities
         assert priorities[1] == 1
-        assert priorities[3] == 1
-        assert priorities[4] == 1
+        assert sum(priorities) == 1
 
 
 
@@ -588,6 +570,40 @@ class TestDownloadFile:
             result = ctx.download_file("model.bin", "/dest/model.bin")
 
         assert result is False
+
+    def test_timeout_reconciles_completed_file_before_http_fallback(self, make_ctx, mock_lt, tmp_path):
+        """A file completed at the timeout boundary should still be delivered as P2P."""
+        ctx = make_ctx(timeout=0.01)
+        ctx.handle = MagicMock()
+        ctx.is_valid = True
+        piece_flag = object()
+        mock_lt.torrent_handle.piece_granularity = piece_flag
+
+        mock_files = MagicMock()
+        mock_files.num_files.return_value = 1
+        mock_files.file_path.return_value = "root/model.bin"
+        mock_files.file_size.return_value = 100
+
+        mock_ti = MagicMock()
+        mock_ti.files.return_value = mock_files
+        ctx.torrent_info_obj = mock_ti
+        ctx.temp_dir = str(tmp_path)
+
+        ctx.handle.status.return_value.state = 3  # downloading, so no immediate delivery branch
+        ctx.handle.file_progress.side_effect = lambda flags=0: [100] if flags is piece_flag else [100]
+
+        src_dir = tmp_path / "root"
+        src_dir.mkdir()
+        src_file = src_dir / "model.bin"
+        src_file.write_bytes(b"x" * 100)
+
+        dst = tmp_path / "dest" / "model.bin"
+
+        with patch.object(ctx, '_init_torrent', return_value=True):
+            result = ctx.download_file("model.bin", str(dst))
+
+        assert result is True
+        assert dst.exists()
 
     def test_immediate_delivery_when_torrent_finished(self, make_ctx, mock_lt, tmp_path):
         """If torrent is already finished, file should be delivered immediately."""

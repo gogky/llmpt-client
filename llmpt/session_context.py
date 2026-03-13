@@ -24,6 +24,8 @@ from .utils import lt, LIBTORRENT_AVAILABLE, strip_torrent_root, get_hf_hub_cach
 
 logger = logging.getLogger(__name__)
 
+_TIMEOUT_DELIVERY_GRACE_SECONDS = 1.0
+
 
 def _format_live_transfer_postfix(stats: Optional[dict]) -> str:
     """Format a lightweight, user-facing transfer status for single-file bars."""
@@ -211,11 +213,6 @@ class SessionContext:
                         if strip_torrent_root(files.file_path(i).replace('\\', '/')) == initial_filename:
                             priorities[i] = 1
                             break
-                # Also prioritize overlapping files to avoid partfile EOF bug
-                if initial_filename and 1 in priorities:
-                    s_idx = priorities.index(1)
-                    for idx in self._get_overlapping_file_indices(s_idx, torrent_info=info):
-                        priorities[idx] = 1
                 params.file_priorities = priorities
 
             self.handle = self.lt_session.add_torrent(params)
@@ -355,27 +352,14 @@ class SessionContext:
                     logger.info(f"[{self.repo_id}] Requesting file {filename} (Index {file_index}). Priority -> 1. Destination: {destination}")
                     self.handle.file_priority(file_index, 1)
 
-                    # Fix libtorrent partfile EOF bug: also prioritize files
-                    # sharing piece boundaries with this file.
-                    for idx in self._get_overlapping_file_indices(file_index):
-                        logger.debug(f"[{self.repo_id}] Also prioritizing overlapping file index {idx} to avoid partfile EOF")
-                        self.handle.file_priority(idx, 1)
-                    
                     # If the torrent is already finished, data is already at the default path.
                     # Try to deliver it immediately.
                     status = self.handle.status()
                     if status.state in (4, 5):  # 4=finished, 5=seeding
-                        files = self.torrent_info_obj.files()
-                        file_progress = self.get_file_progress(verified_only=True)
-                        file_size = files.file_size(file_index)
-                        if file_progress[file_index] == file_size and file_size > 0:
-                            src = self._get_lt_disk_path(file_index)
-                            if os.path.exists(src):
-                                self._deliver_file(src, destination)
-                                logger.info(f"[{self.repo_id}] Torrent already complete, file {filename} delivered immediately.")
-                                event.set()
-                            else:
-                                logger.info(f"[{self.repo_id}] Torrent complete but file not on disk at {src}. Monitor will handle.")
+                        if self._try_deliver_completed_file(file_index, destination, event):
+                            logger.info(f"[{self.repo_id}] Torrent already complete, file {filename} delivered immediately.")
+                        else:
+                            logger.info(f"[{self.repo_id}] Torrent complete but file {filename} is not yet ready on disk. Monitor will handle.")
                 else:
                     if not self.torrent_info_obj:
                         logger.info(f"[{self.repo_id}] Meta still loading. Queueing file {filename} for background BT tracking.")
@@ -485,9 +469,24 @@ class SessionContext:
         if event.is_set():
             logger.info(f"[{self.repo_id}] P2P download of {filename} SUCCESS.")
             return True
-        else:
-            logger.warning(f"[{self.repo_id}] P2P download of {filename} TIMEOUT after {self.timeout}s.")
-            return False
+
+        # Boundary race: the monitor may finish delivery just as the caller's
+        # timeout expires. Confirm once locally before falling back to HTTP.
+        if file_index is not None and self._try_deliver_completed_file(file_index, destination, event):
+            logger.info(f"[{self.repo_id}] P2P download of {filename} SUCCESS after timeout boundary reconciliation.")
+            return True
+
+        grace = _TIMEOUT_DELIVERY_GRACE_SECONDS if self.timeout >= 30 else 0.0
+        if grace > 0 and event.wait(timeout=grace):
+            logger.info(f"[{self.repo_id}] P2P download of {filename} SUCCESS during timeout grace window.")
+            return True
+
+        if file_index is not None and self._try_deliver_completed_file(file_index, destination, event):
+            logger.info(f"[{self.repo_id}] P2P download of {filename} SUCCESS after timeout grace reconciliation.")
+            return True
+
+        logger.warning(f"[{self.repo_id}] P2P download of {filename} TIMEOUT after {self.timeout}s.")
+        return False
 
     def _snapshot_peer_stats(self) -> None:
         """Sample current peer stats and update the accumulated high-water marks.
@@ -646,45 +645,6 @@ class SessionContext:
                 
         return None
 
-    def _get_overlapping_file_indices(self, file_index: int, *, torrent_info=None) -> list:
-        """Find file indices that share piece boundaries with the given file.
-
-        Works around a libtorrent partfile bug where WebSeed downloads fail
-        with "End of file" when a piece spans a priority-0 file boundary.
-        See docs/libtorrent_partfile_eof_bug_fix.md for details.
-
-        Args:
-            file_index: The index of the target file.
-            torrent_info: Optional torrent_info object. Falls back to
-                self.torrent_info_obj when not provided (needed during
-                _init_torrent before the handle exists).
-
-        Returns:
-            List of file indices whose byte range overlaps with the
-            target file's piece range.
-        """
-        ti = torrent_info or self.torrent_info_obj
-        if not ti:
-            return []
-
-        piece_len = ti.piece_length()
-        files = ti.files()
-        s_off = files.file_offset(file_index)
-        e_off = s_off + files.file_size(file_index) - 1
-        s_piece = s_off // piece_len
-        e_piece = e_off // piece_len
-
-        overlapping = []
-        for i in range(files.num_files()):
-            if i == file_index or files.file_size(i) == 0:
-                continue
-            fs = files.file_offset(i)
-            fe = fs + files.file_size(i) - 1
-            if fs // piece_len <= e_piece and fe // piece_len >= s_piece:
-                overlapping.append(i)
-
-        return overlapping
-
     def _get_webseed_url(self) -> Optional[str]:
         """Build the WebSeed URL for this session's repo, if the proxy is running.
 
@@ -773,6 +733,37 @@ class SessionContext:
                 return False
             self.full_mapping = True
             return True
+
+    def _try_deliver_completed_file(
+        self,
+        file_index: int,
+        destination: str,
+        event: Optional[threading.Event] = None,
+    ) -> bool:
+        """Deliver a file immediately if libtorrent has already hash-verified it."""
+        if file_index is None or not self.handle or not self.torrent_info_obj:
+            return False
+
+        try:
+            files = self.torrent_info_obj.files()
+            file_size = files.file_size(file_index)
+            if file_size <= 0:
+                return False
+
+            file_progress = self.get_file_progress(verified_only=True)
+            if file_index >= len(file_progress) or file_progress[file_index] != file_size:
+                return False
+
+            src = self._get_lt_disk_path(file_index)
+            if not os.path.exists(src):
+                return False
+
+            self._deliver_file(src, destination)
+            if event is not None:
+                event.set()
+            return True
+        except Exception:
+            return False
 
     def _cleanup_seeding_hardlinks(self):
         """Remove hardlinks created for seeding in p2p_root."""
