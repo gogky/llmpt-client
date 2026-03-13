@@ -23,6 +23,7 @@ half-written .torrent files from corrupting the cache.
 
 import logging
 import os
+import hashlib
 from typing import TYPE_CHECKING, Iterable, Optional
 
 if TYPE_CHECKING:
@@ -35,17 +36,24 @@ TORRENT_CACHE_DIR = os.path.expanduser("~/.cache/llmpt/torrents")
 
 def _cache_path(repo_id: str, revision: str, repo_type: str = "model") -> str:
     """Return the filesystem path for a cached .torrent file."""
-    safe_repo = f"{repo_type}_{repo_id.replace('/', '_')}"
-    return os.path.join(TORRENT_CACHE_DIR, f"{safe_repo}_{revision}.torrent")
+    repo_digest = hashlib.sha1(repo_id.encode("utf-8")).hexdigest()[:16]
+    return os.path.join(
+        TORRENT_CACHE_DIR,
+        f"{repo_type}_{repo_digest}_{revision}.torrent",
+    )
 
 
 def _safe_identity(repo_id: str, revision: str, repo_type: str = "model") -> tuple[str, str, str]:
     """Return a filesystem-safe torrent cache identity."""
-    return (repo_type, repo_id.replace("/", "_"), revision)
+    return (
+        repo_type,
+        hashlib.sha1(repo_id.encode("utf-8")).hexdigest()[:16],
+        revision,
+    )
 
 
 def _parse_cached_torrent_name(filename: str) -> Optional[tuple[str, str, str]]:
-    """Parse a cached torrent filename into ``(repo_type, safe_repo, revision)``."""
+    """Parse a cached torrent filename into ``(repo_type, repo_digest, revision)``."""
     if not filename.endswith(".torrent"):
         return None
 
@@ -63,12 +71,12 @@ def _parse_cached_torrent_name(filename: str) -> Optional[tuple[str, str, str]]:
     if last_sep <= 0:
         return None
 
-    safe_repo = remainder[:last_sep]
+    repo_digest = remainder[:last_sep]
     revision = remainder[last_sep + 1 :]
-    if not safe_repo or not revision:
+    if not repo_digest or not revision:
         return None
 
-    return repo_type, safe_repo, revision
+    return repo_type, repo_digest, revision
 
 
 # ---------------------------------------------------------------------------

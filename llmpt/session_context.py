@@ -11,6 +11,7 @@ import shutil
 import threading
 import time
 import logging
+import hashlib
 from collections import deque
 from typing import TYPE_CHECKING, Dict, Optional
 
@@ -19,7 +20,7 @@ if TYPE_CHECKING:
 
 from .monitor import run_monitor_loop
 
-from .utils import lt, LIBTORRENT_AVAILABLE, strip_torrent_root
+from .utils import lt, LIBTORRENT_AVAILABLE, strip_torrent_root, get_hf_hub_cache
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,47 @@ def _format_live_transfer_postfix(stats: Optional[dict]) -> str:
     if webseed_bytes > 0:
         return "webseed"
     return ""
+
+
+def _normalize_storage_root(path: Optional[str]) -> Optional[str]:
+    if not path:
+        return None
+    return os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+
+
+def _build_fastresume_filename(
+    repo_id: str,
+    revision: str,
+    *,
+    repo_type: str = "model",
+    session_mode: str = "on_demand",
+    cache_dir: Optional[str] = None,
+    local_dir: Optional[str] = None,
+) -> str:
+    if local_dir:
+        storage_kind = "local_dir"
+        storage_root = _normalize_storage_root(local_dir)
+    elif cache_dir:
+        storage_kind = "hub_cache"
+        storage_root = _normalize_storage_root(cache_dir)
+    else:
+        storage_kind = "hub_cache"
+        storage_root = get_hf_hub_cache()
+    identity = "|".join(
+        [
+            repo_type or "model",
+            repo_id,
+            revision,
+            session_mode,
+            storage_kind,
+            storage_root,
+        ]
+    )
+    repo_slug = hashlib.sha1(repo_id.encode("utf-8")).hexdigest()[:8]
+    identity_digest = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:16]
+    return (
+        f"{repo_type}_{repo_slug}_{revision}_{session_mode}_{identity_digest}.fastresume"
+    )
 
 
 class SessionContext:
@@ -87,9 +129,17 @@ class SessionContext:
         # Determine paths for fastresume data
         self.fastresume_dir = os.path.expanduser("~/.cache/llmpt/p2p_resume")
         os.makedirs(self.fastresume_dir, exist_ok=True)
-        # Safe filename for the resume data
-        safe_repo = self.repo_id.replace('/', '_')
-        self.fastresume_path = os.path.join(self.fastresume_dir, f"{safe_repo}_{self.revision}.fastresume")
+        self.fastresume_path = os.path.join(
+            self.fastresume_dir,
+            _build_fastresume_filename(
+                self.repo_id,
+                self.revision,
+                repo_type=self.repo_type,
+                session_mode=self.session_mode,
+                cache_dir=self.cache_dir,
+                local_dir=self.local_dir,
+            ),
+        )
         
         self.worker_thread = None
         self.test_peer_addr = None  # (ip, port) tuple for direct peer connection in test environments

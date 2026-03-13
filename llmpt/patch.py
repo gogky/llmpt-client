@@ -9,6 +9,7 @@ import atexit
 import time
 import threading
 import logging
+import os
 from typing import Optional, Any
 
 logger = logging.getLogger('llmpt.patch')
@@ -27,10 +28,7 @@ _context = threading.local()
 
 # Download statistics: tracks which files went through P2P vs HTTP fallback
 _stats_lock = threading.Lock()
-_download_stats = {
-    'p2p': set(),      # filenames successfully delivered via P2P
-    'http': set(),     # filenames that fell back to HTTP
-}
+_download_stats: dict[tuple[str, str, str, str, str], dict[str, set[str]]] = {}
 
 # Fallback daemon notification via debounce.
 # When _patched_snapshot_download runs, it increments _active_wrapper_counts[repo_id]
@@ -44,6 +42,48 @@ _active_wrapper_counts: dict[str, int] = {}  # repo_id -> active wrapper depth
 _active_download_counts: dict[str, int] = {}  # repo_id -> in-flight hf_hub_download calls
 _SNAPSHOT_PROGRESS_BAR_NAME = "huggingface_hub.snapshot_download"
 _SNAPSHOT_PROGRESS_UPDATE_INTERVAL = 0.25
+
+
+def _normalize_storage_root(path: Optional[str]) -> Optional[str]:
+    if not path:
+        return None
+    return os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+
+
+def _snapshot_stats_key(
+    repo_id: str,
+    revision: str,
+    repo_type: str,
+    cache_dir: Optional[str] = None,
+    local_dir: Optional[str] = None,
+) -> tuple[str, str, str, str, str]:
+    """Build the canonical key for one snapshot-level download stats bucket."""
+    from .utils import get_hf_hub_cache
+
+    if local_dir:
+        storage_kind = "local_dir"
+        storage_root = _normalize_storage_root(local_dir)
+    else:
+        storage_kind = "hub_cache"
+        storage_root = _normalize_storage_root(cache_dir) or get_hf_hub_cache()
+    return (repo_type or "model", repo_id, revision or "main", storage_kind, storage_root)
+
+
+def _empty_download_stats() -> dict[str, set[str]]:
+    return {
+        'p2p': set(),
+        'http': set(),
+    }
+
+
+def _record_download_stat(
+    stats_key: tuple[str, str, str, str, str],
+    stat_kind: str,
+    filename: str,
+) -> None:
+    with _stats_lock:
+        bucket = _download_stats.setdefault(stats_key, _empty_download_stats())
+        bucket[stat_kind].add(filename)
 
 
 def _deferred_key(
@@ -62,7 +102,11 @@ def _deferred_key(
     from .utils import get_hf_hub_cache
 
     storage_kind = "local_dir" if local_dir else "hub_cache"
-    storage_root = local_dir or cache_dir or get_hf_hub_cache()
+    storage_root = (
+        _normalize_storage_root(local_dir)
+        if local_dir
+        else (_normalize_storage_root(cache_dir) or get_hf_hub_cache())
+    )
     return (repo_type or "model", repo_id, revision or "main", storage_kind, storage_root)
 
 
@@ -107,7 +151,13 @@ def _flush_deferred_notifications():
         if _config.get('verbose'):
             elapsed = time.time() - ctx.get('start_time', time.time())
             _print_p2p_summary(
-                stats=get_download_stats(),
+                stats=get_download_stats(
+                    repo_id=ctx['repo_id'],
+                    revision=ctx['revision'],
+                    repo_type=ctx['repo_type'],
+                    cache_dir=ctx.get('cache_dir'),
+                    local_dir=ctx.get('local_dir'),
+                ),
                 elapsed=elapsed,
                 repo_id=ctx['repo_id'],
                 resolved_revision=ctx['revision'],
@@ -124,28 +174,78 @@ def _flush_deferred_notifications():
             )
         except Exception:
             pass
+        finally:
+            reset_download_stats(
+                repo_id=ctx['repo_id'],
+                revision=ctx['revision'],
+                repo_type=ctx['repo_type'],
+                cache_dir=ctx.get('cache_dir'),
+                local_dir=ctx.get('local_dir'),
+            )
 
 atexit.register(_flush_deferred_notifications)
 
 
-def get_download_stats() -> dict:
+def get_download_stats(
+    *,
+    stats_key: Optional[tuple[str, str, str, str, str]] = None,
+    repo_id: Optional[str] = None,
+    revision: Optional[str] = None,
+    repo_type: str = "model",
+    cache_dir: Optional[str] = None,
+    local_dir: Optional[str] = None,
+) -> dict:
     """Return a snapshot of download statistics.
 
     Returns:
         Dictionary with 'p2p' and 'http' sets of filenames.
     """
+    if stats_key is None and repo_id is not None and revision is not None:
+        stats_key = _snapshot_stats_key(
+            repo_id,
+            revision,
+            repo_type,
+            cache_dir=cache_dir,
+            local_dir=local_dir,
+        )
     with _stats_lock:
-        return {
-            'p2p': set(_download_stats['p2p']),
-            'http': set(_download_stats['http']),
-        }
+        if stats_key is not None:
+            bucket = _download_stats.get(stats_key, _empty_download_stats())
+            return {
+                'p2p': set(bucket['p2p']),
+                'http': set(bucket['http']),
+            }
+
+        merged = _empty_download_stats()
+        for bucket in _download_stats.values():
+            merged['p2p'].update(bucket['p2p'])
+            merged['http'].update(bucket['http'])
+        return merged
 
 
-def reset_download_stats() -> None:
+def reset_download_stats(
+    *,
+    stats_key: Optional[tuple[str, str, str, str, str]] = None,
+    repo_id: Optional[str] = None,
+    revision: Optional[str] = None,
+    repo_type: str = "model",
+    cache_dir: Optional[str] = None,
+    local_dir: Optional[str] = None,
+) -> None:
     """Clear all download statistics."""
+    if stats_key is None and repo_id is not None and revision is not None:
+        stats_key = _snapshot_stats_key(
+            repo_id,
+            revision,
+            repo_type,
+            cache_dir=cache_dir,
+            local_dir=local_dir,
+        )
     with _stats_lock:
-        _download_stats['p2p'].clear()
-        _download_stats['http'].clear()
+        if stats_key is None:
+            _download_stats.clear()
+        else:
+            _download_stats.pop(stats_key, None)
 
 
 def _truncate_temp_file(temp_file, filename: str) -> None:
@@ -187,11 +287,22 @@ def _format_snapshot_p2p_postfix(
 class _SnapshotProgressReporter:
     """Periodically updates snapshot_download's shared progress bar postfix."""
 
-    def __init__(self, progress_bar: Any, repo_id: str, revision: str, repo_type: str) -> None:
+    def __init__(
+        self,
+        progress_bar: Any,
+        repo_id: str,
+        revision: str,
+        repo_type: str,
+        *,
+        cache_dir: Optional[str] = None,
+        local_dir: Optional[str] = None,
+    ) -> None:
         self.progress_bar = progress_bar
         self.repo_id = repo_id
         self.revision = revision
         self.repo_type = repo_type
+        self.cache_dir = cache_dir
+        self.local_dir = local_dir
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -229,7 +340,13 @@ class _SnapshotProgressReporter:
             )
             postfix = _format_snapshot_p2p_postfix(
                 stats,
-                download_stats=get_download_stats(),
+                download_stats=get_download_stats(
+                    repo_id=self.repo_id,
+                    revision=self.revision,
+                    repo_type=self.repo_type,
+                    cache_dir=self.cache_dir,
+                    local_dir=self.local_dir,
+                ),
             )
             if hasattr(self.progress_bar, 'set_postfix_str'):
                 self.progress_bar.set_postfix_str(postfix, refresh=False)
@@ -242,6 +359,8 @@ def _wrap_snapshot_tqdm_class(
     repo_id: str,
     revision: str,
     repo_type: str,
+    cache_dir: Optional[str] = None,
+    local_dir: Optional[str] = None,
 ):
     """Wrap a tqdm class so snapshot_download's shared bar shows live P2P stats."""
 
@@ -269,6 +388,8 @@ def _wrap_snapshot_tqdm_class(
                     repo_id=repo_id,
                     revision=revision,
                     repo_type=repo_type,
+                    cache_dir=cache_dir,
+                    local_dir=local_dir,
                 )
                 object.__setattr__(self, '_llmpt_reporter', reporter)
                 reporter.start()
@@ -334,6 +455,8 @@ def _wrap_snapshot_tqdm_class_auto(base_tqdm_class: Any):
                         repo_id=ctx['repo_id'],
                         revision=ctx['revision'],
                         repo_type=ctx['repo_type'],
+                        cache_dir=ctx.get('cache_dir'),
+                        local_dir=ctx.get('local_dir'),
                     )
                     object.__setattr__(self, '_llmpt_reporter', reporter)
                     reporter.start()
@@ -520,7 +643,13 @@ def _fire_deferred_notification(key: tuple[str, str, str, str, str]) -> None:
     if _config.get('verbose'):
         elapsed = time.time() - ctx.get('start_time', time.time())
         _print_p2p_summary(
-            stats=get_download_stats(),
+            stats=get_download_stats(
+                repo_id=ctx['repo_id'],
+                revision=ctx['revision'],
+                repo_type=ctx['repo_type'],
+                cache_dir=ctx.get('cache_dir'),
+                local_dir=ctx.get('local_dir'),
+            ),
             elapsed=elapsed,
             repo_id=ctx['repo_id'],
             resolved_revision=ctx['revision'],
@@ -543,6 +672,13 @@ def _fire_deferred_notification(key: tuple[str, str, str, str, str]) -> None:
         logger.debug(f"[P2P] Deferred daemon notification failed: {e}")
     finally:
         _release_on_demand_session(
+            repo_id=ctx['repo_id'],
+            revision=ctx['revision'],
+            repo_type=ctx['repo_type'],
+            cache_dir=ctx.get('cache_dir'),
+            local_dir=ctx.get('local_dir'),
+        )
+        reset_download_stats(
             repo_id=ctx['repo_id'],
             revision=ctx['revision'],
             repo_type=ctx['repo_type'],
@@ -767,6 +903,7 @@ def _patched_http_get(url: str, temp_file, **kwargs):
     local_dir = getattr(_context, 'local_dir', None)
     schedule_deferred = False
     truncated = False
+    stats_key = None
 
     # Fallback: if _patched_hf_hub_download was bypassed (import-order issue),
     # try to recover context by inspecting the call stack.  The original
@@ -792,6 +929,15 @@ def _patched_http_get(url: str, temp_file, **kwargs):
             # deferred daemon notification here so the daemon knows to seed it.
             # Do this only after the file transfer succeeds.
             schedule_deferred = not _is_wrapper_active(repo_id)
+
+    if repo_id and revision:
+        stats_key = _snapshot_stats_key(
+            repo_id,
+            revision,
+            repo_type,
+            cache_dir=cache_dir,
+            local_dir=local_dir,
+        )
 
     if repo_id and filename and tracker and revision:
         try:
@@ -827,8 +973,8 @@ def _patched_http_get(url: str, temp_file, **kwargs):
 
             if success:
                 logger.info(f"[P2P] Successfully delivered {filename} via P2P.")
-                with _stats_lock:
-                    _download_stats['p2p'].add(filename)
+                if stats_key is not None:
+                    _record_download_stat(stats_key, 'p2p', filename)
                 if schedule_deferred:
                     _schedule_deferred_notification(
                         repo_id,
@@ -852,9 +998,8 @@ def _patched_http_get(url: str, temp_file, **kwargs):
     # Only force resume_size=0 if we actually truncated the file after a
     # failed P2P attempt.  Otherwise, preserve the original resume_size so
     # that HuggingFace's native resume mechanism works correctly.
-    if filename:
-        with _stats_lock:
-            _download_stats['http'].add(filename)
+    if filename and stats_key is not None:
+        _record_download_stat(stats_key, 'http', filename)
     fallback_kwargs = {**kwargs}
     if truncated:
         fallback_kwargs['resume_size'] = 0
@@ -976,7 +1121,10 @@ def _patched_snapshot_download(*args, **kwargs):
     repo_id = args[0] if args else kwargs.get('repo_id')
     repo_type = kwargs.get('repo_type') or 'model'
     revision = kwargs.get('revision', 'main')
+    cache_dir = kwargs.get('cache_dir')
+    local_dir = kwargs.get('local_dir')
     resolved = revision
+    stats_key = None
 
     if repo_id:
         try:
@@ -999,21 +1147,33 @@ def _patched_snapshot_download(*args, **kwargs):
                     repo_id=repo_id,
                     revision=resolved,
                     repo_type=repo_type,
+                    cache_dir=cache_dir,
+                    local_dir=local_dir,
                 ),
             }
 
     if repo_id:
         _enter_wrapper(repo_id)
-
-    # Reset stats to track which files went through HTTP vs P2P in this batch
-    reset_download_stats()
+        stats_key = _snapshot_stats_key(
+            repo_id,
+            resolved,
+            repo_type,
+            cache_dir=cache_dir,
+            local_dir=local_dir,
+        )
+        # Reset only this snapshot's stats bucket.
+        reset_download_stats(stats_key=stats_key)
     start_time = time.time()
+    download_completed = False
 
     try:
         result = _original_snapshot_download(*args, **kwargs)
+        download_completed = True
     finally:
         if repo_id:
             _exit_wrapper(repo_id)
+        if stats_key is not None and not download_completed:
+            reset_download_stats(stats_key=stats_key)
 
     elapsed = time.time() - start_time
 
@@ -1029,7 +1189,7 @@ def _patched_snapshot_download(*args, **kwargs):
         # Print P2P summary if verbose is enabled
         if _config.get('verbose'):
             _print_p2p_summary(
-                stats=get_download_stats(),
+                stats=get_download_stats(stats_key=stats_key),
                 elapsed=elapsed,
                 repo_id=repo_id,
                 resolved_revision=resolved,
@@ -1055,9 +1215,7 @@ def _patched_snapshot_download(*args, **kwargs):
                     timer.cancel()
                 _deferred_contexts.pop(key, None)
 
-        stats = get_download_stats()
-        cache_dir = kwargs.get('cache_dir')
-        local_dir = kwargs.get('local_dir')
+        stats = get_download_stats(stats_key=stats_key)
 
         # Only a download that transferred at least one file is strong enough
         # evidence to mark a snapshot as complete. Pure cache hits are handled
@@ -1094,6 +1252,8 @@ def _patched_snapshot_download(*args, **kwargs):
                 cache_dir=cache_dir,
                 local_dir=local_dir,
             )
+            if stats_key is not None:
+                reset_download_stats(stats_key=stats_key)
 
     except Exception as e:
         # Never let notification failures break the download flow
@@ -1184,6 +1344,7 @@ def remove_patch() -> None:
             _deferred_contexts.clear()
             _active_wrapper_counts.clear()
             _active_download_counts.clear()
+        reset_download_stats()
 
         logger.debug("Monkey patch removed successfully")
     except ImportError:

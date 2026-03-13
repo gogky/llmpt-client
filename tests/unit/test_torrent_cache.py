@@ -24,10 +24,10 @@ class TestLoadCachedTorrent:
 
     def test_returns_bytes_on_cache_hit(self, tmp_path):
         """Cached file exists → returns its bytes."""
-        from llmpt.torrent_cache import load_cached_torrent
+        from llmpt.torrent_cache import _cache_path, load_cached_torrent
 
         # Create a fake cached torrent file
-        cache_file = tmp_path / "model_test_repo_abc123.torrent"
+        cache_file = tmp_path / os.path.basename(_cache_path("test/repo", "abc123"))
         cache_file.write_bytes(b"torrent_data_bytes")
 
         with patch('llmpt.torrent_cache.TORRENT_CACHE_DIR', str(tmp_path)):
@@ -37,9 +37,9 @@ class TestLoadCachedTorrent:
 
     def test_empty_file_treated_as_miss(self, tmp_path):
         """An empty cached file is treated as a cache miss and cleaned up."""
-        from llmpt.torrent_cache import load_cached_torrent
+        from llmpt.torrent_cache import _cache_path, load_cached_torrent
 
-        cache_file = tmp_path / "model_test_repo_abc123.torrent"
+        cache_file = tmp_path / os.path.basename(_cache_path("test/repo", "abc123"))
         cache_file.write_bytes(b"")
 
         with patch('llmpt.torrent_cache.TORRENT_CACHE_DIR', str(tmp_path)):
@@ -50,9 +50,9 @@ class TestLoadCachedTorrent:
 
     def test_read_error_returns_none(self, tmp_path):
         """If reading the file fails, returns None gracefully."""
-        from llmpt.torrent_cache import load_cached_torrent
+        from llmpt.torrent_cache import _cache_path, load_cached_torrent
 
-        cache_file = tmp_path / "model_test_repo_abc123.torrent"
+        cache_file = tmp_path / os.path.basename(_cache_path("test/repo", "abc123"))
         cache_file.write_bytes(b"some_data")
 
         with patch('llmpt.torrent_cache.TORRENT_CACHE_DIR', str(tmp_path)), \
@@ -68,7 +68,7 @@ class TestSaveTorrentToCache:
 
     def test_creates_cache_file(self, tmp_path):
         """Should write torrent data to the correct path."""
-        from llmpt.torrent_cache import save_torrent_to_cache
+        from llmpt.torrent_cache import _cache_path, save_torrent_to_cache
         from llmpt.torrent_state import get_torrent_state
 
         state_file = tmp_path / "torrent_state.json"
@@ -76,39 +76,39 @@ class TestSaveTorrentToCache:
              patch('llmpt.torrent_state.TORRENT_STATE_FILE', str(state_file)):
             save_torrent_to_cache("test/repo", "abc123", b"torrent_bytes")
 
-        cache_file = tmp_path / "model_test_repo_abc123.torrent"
+        cache_file = tmp_path / os.path.basename(_cache_path("test/repo", "abc123"))
         assert cache_file.exists()
         assert cache_file.read_bytes() == b"torrent_bytes"
         assert get_torrent_state("test/repo", "abc123")["local_torrent_present"] is True
 
     def test_creates_directory_if_missing(self, tmp_path):
         """Should create the cache directory if it doesn't exist."""
-        from llmpt.torrent_cache import save_torrent_to_cache
+        from llmpt.torrent_cache import _cache_path, save_torrent_to_cache
 
         cache_dir = tmp_path / "nonexistent" / "dir"
 
         with patch('llmpt.torrent_cache.TORRENT_CACHE_DIR', str(cache_dir)):
             save_torrent_to_cache("test/repo", "abc123", b"data")
 
-        assert (cache_dir / "model_test_repo_abc123.torrent").exists()
+        assert (cache_dir / os.path.basename(_cache_path("test/repo", "abc123"))).exists()
 
     def test_atomic_write_no_tmp_file_remains(self, tmp_path):
         """After save, only the final file should exist (no .tmp remnant)."""
-        from llmpt.torrent_cache import save_torrent_to_cache
+        from llmpt.torrent_cache import _cache_path, save_torrent_to_cache
 
         with patch('llmpt.torrent_cache.TORRENT_CACHE_DIR', str(tmp_path)):
             save_torrent_to_cache("test/repo", "abc123", b"data")
 
         files = list(tmp_path.iterdir())
         assert len(files) == 1
-        assert files[0].name == "model_test_repo_abc123.torrent"
+        assert files[0].name == os.path.basename(_cache_path("test/repo", "abc123"))
         assert not any(f.name.endswith('.tmp') for f in files)
 
     def test_overwrites_existing_cache(self, tmp_path):
         """Should overwrite an existing cached file with new data."""
-        from llmpt.torrent_cache import save_torrent_to_cache
+        from llmpt.torrent_cache import _cache_path, save_torrent_to_cache
 
-        cache_file = tmp_path / "model_test_repo_abc123.torrent"
+        cache_file = tmp_path / os.path.basename(_cache_path("test/repo", "abc123"))
         cache_file.write_bytes(b"old_data")
 
         with patch('llmpt.torrent_cache.TORRENT_CACHE_DIR', str(tmp_path)):
@@ -129,10 +129,10 @@ class TestSaveTorrentToCache:
 class TestDeleteCachedTorrent:
 
     def test_delete_cached_torrent_removes_file_and_updates_state(self, tmp_path):
-        from llmpt.torrent_cache import delete_cached_torrent
+        from llmpt.torrent_cache import _cache_path, delete_cached_torrent
         from llmpt.torrent_state import get_torrent_state, mark_local_torrent
 
-        cache_file = tmp_path / "model_test_repo_abc123.torrent"
+        cache_file = tmp_path / os.path.basename(_cache_path("test/repo", "abc123"))
         cache_file.write_bytes(b"torrent_data")
         state_file = tmp_path / "torrent_state.json"
 
@@ -153,9 +153,9 @@ class TestResolveTorrentData:
 
     def test_layer1_cache_hit(self, tmp_path):
         """Layer 1: local cache hit → returns without contacting tracker."""
-        from llmpt.torrent_cache import resolve_torrent_data
+        from llmpt.torrent_cache import _cache_path, resolve_torrent_data
 
-        cache_file = tmp_path / "model_test_repo_abc123.torrent"
+        cache_file = tmp_path / os.path.basename(_cache_path("test/repo", "abc123"))
         cache_file.write_bytes(b"cached_torrent")
 
         tracker = MagicMock()
@@ -168,7 +168,7 @@ class TestResolveTorrentData:
 
     def test_layer2_tracker_hit(self, tmp_path):
         """Layer 2: cache miss → tracker returns data → data is cached locally."""
-        from llmpt.torrent_cache import resolve_torrent_data
+        from llmpt.torrent_cache import _cache_path, resolve_torrent_data
         from llmpt.torrent_state import get_torrent_state
 
         tracker = MagicMock()
@@ -183,7 +183,7 @@ class TestResolveTorrentData:
         assert result == b"tracker_torrent"
         tracker.download_torrent.assert_called_once_with("test/repo", "abc123", repo_type="model")
         # Verify it was cached locally
-        cache_file = tmp_path / "model_test_repo_abc123.torrent"
+        cache_file = tmp_path / os.path.basename(_cache_path("test/repo", "abc123"))
         assert cache_file.exists()
         assert cache_file.read_bytes() == b"tracker_torrent"
         with patch('llmpt.torrent_state.TORRENT_STATE_FILE', str(state_file)):
@@ -205,30 +205,37 @@ class TestResolveTorrentData:
         tracker.download_torrent.assert_called_once_with("test/repo", "abc123", repo_type="model")
 
     def test_repo_id_with_slashes_in_filename(self, tmp_path):
-        """Repo IDs with slashes should be sanitized in filenames."""
-        from llmpt.torrent_cache import save_torrent_to_cache, load_cached_torrent
+        """Repo IDs with slashes should not collide in cache filenames."""
+        from llmpt.torrent_cache import _cache_path, load_cached_torrent, save_torrent_to_cache
 
         with patch('llmpt.torrent_cache.TORRENT_CACHE_DIR', str(tmp_path)):
             save_torrent_to_cache("org/model-name", "abc123", b"data")
             result = load_cached_torrent("org/model-name", "abc123")
 
         assert result == b"data"
-        # Filename should use underscore instead of slash
-        cache_file = tmp_path / "model_org_model-name_abc123.torrent"
+        cache_file = tmp_path / os.path.basename(_cache_path("org/model-name", "abc123"))
         assert cache_file.exists()
+
+    def test_repo_id_filename_collision_is_avoided(self, tmp_path):
+        from llmpt.torrent_cache import _cache_path
+
+        left = _cache_path("a/b_c", "abc123")
+        right = _cache_path("a_b/c", "abc123")
+
+        assert left != right
 
 
 class TestCleanupTorrentCache:
 
     def test_cleanup_removes_unprotected_torrents_and_tmp_files(self, tmp_path):
-        from llmpt.torrent_cache import cleanup_torrent_cache
+        from llmpt.torrent_cache import _cache_path, cleanup_torrent_cache
         from llmpt.torrent_state import get_torrent_state, mark_local_torrent
 
         keep_rev = "a" * 40
         remove_rev = "b" * 40
-        keep_file = tmp_path / f"model_keep_repo_{keep_rev}.torrent"
-        remove_file = tmp_path / f"model_remove_repo_{remove_rev}.torrent"
-        tmp_file = tmp_path / "model_remove_repo_main.torrent.tmp"
+        keep_file = tmp_path / os.path.basename(_cache_path("keep/repo", keep_rev))
+        remove_file = tmp_path / os.path.basename(_cache_path("remove/repo", remove_rev))
+        tmp_file = tmp_path / (os.path.basename(_cache_path("remove/repo", "main")) + ".tmp")
 
         keep_file.write_bytes(b"keep")
         remove_file.write_bytes(b"remove")

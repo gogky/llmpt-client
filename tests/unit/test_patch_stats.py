@@ -17,7 +17,9 @@ from llmpt.patch import (
     remove_patch,
     get_download_stats,
     reset_download_stats,
+    _record_download_stat,
     _format_snapshot_p2p_postfix,
+    _snapshot_stats_key,
     _truncate_temp_file,
     _patched_http_get,
     _patched_hf_hub_download,
@@ -42,7 +44,7 @@ def clean_patch_state():
     patch_module._config = {}
     reset_download_stats()
     # Clear thread-local context
-    for attr in ('repo_id', 'filename', 'revision', 'tracker', 'config'):
+    for attr in ('repo_id', 'repo_type', 'filename', 'revision', 'tracker', 'config', 'cache_dir', 'local_dir'):
         if hasattr(patch_module._context, attr):
             delattr(patch_module._context, attr)
     yield
@@ -79,9 +81,9 @@ class TestGetDownloadStats:
 
     def test_after_manual_insertion(self):
         """Verify stats reflect manual insertions (simulates real usage)."""
-        with patch_module._stats_lock:
-            patch_module._download_stats['p2p'].add("model.bin")
-            patch_module._download_stats['http'].add("config.json")
+        stats_key = _snapshot_stats_key("test/repo", "main", "model")
+        _record_download_stat(stats_key, 'p2p', "model.bin")
+        _record_download_stat(stats_key, 'http', "config.json")
 
         stats = get_download_stats()
         assert "model.bin" in stats['p2p']
@@ -93,9 +95,9 @@ class TestGetDownloadStats:
 class TestResetDownloadStats:
 
     def test_clears_all(self):
-        with patch_module._stats_lock:
-            patch_module._download_stats['p2p'].add("a.bin")
-            patch_module._download_stats['http'].add("b.bin")
+        stats_key = _snapshot_stats_key("test/repo", "main", "model")
+        _record_download_stat(stats_key, 'p2p', "a.bin")
+        _record_download_stat(stats_key, 'http', "b.bin")
 
         reset_download_stats()
         stats = get_download_stats()
@@ -574,8 +576,12 @@ class TestPatchedSnapshotDownload:
         mock_manager = MagicMock()
 
         def fake_snapshot_download(*args, **kwargs):
-            with patch_module._stats_lock:
-                patch_module._download_stats['http'].add("config.json")
+            stats_key = _snapshot_stats_key(
+                "test/repo",
+                "a" * 40,
+                "model",
+            )
+            _record_download_stat(stats_key, 'http', "config.json")
             return "/tmp/model"
 
         patch_module._original_snapshot_download = MagicMock(side_effect=fake_snapshot_download)
@@ -597,6 +603,32 @@ class TestPatchedSnapshotDownload:
             local_dir=None,
             completed_snapshot=True,
         )
+        mock_manager.release_on_demand_session.assert_called_once_with(
+            repo_id="test/repo",
+            revision='a' * 40,
+            repo_type="model",
+            cache_dir=None,
+            local_dir=None,
+        )
+
+    def test_snapshot_completion_ignores_foreign_stats_bucket(self):
+        """One snapshot must not treat another snapshot's transfers as its own."""
+        patch_module._config = {'verbose': False}
+        patch_module._original_snapshot_download = MagicMock(return_value="/tmp/model-a")
+        mock_manager = MagicMock()
+        foreign_key = _snapshot_stats_key("other/repo", "b" * 40, "model")
+        _record_download_stat(foreign_key, 'http', "foreign.bin")
+
+        with patch('llmpt.utils.resolve_commit_hash', return_value='a' * 40), \
+             patch('llmpt.patch._notify_seed_daemon') as mock_notify, \
+             patch('llmpt.p2p_batch.P2PBatchManager._instance', mock_manager):
+            result = _patched_snapshot_download(
+                repo_id="test/repo",
+                revision="main",
+            )
+
+        assert result == "/tmp/model-a"
+        mock_notify.assert_not_called()
         mock_manager.release_on_demand_session.assert_called_once_with(
             repo_id="test/repo",
             revision='a' * 40,
