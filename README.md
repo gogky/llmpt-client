@@ -11,7 +11,7 @@ HuggingFace Hub 模型/数据集的 P2P 加速下载客户端。
 - **自动做种**：下载完成后自动创建 torrent 并持续做种，回馈社区
 - **后台守护进程**：做种运行在独立的后台进程中，不影响正常使用
 - **完整性验证导入**：守护进程会扫描 HF cache，但只会为验证完整的仓库自动做种
-- **自定义目录支持**：支持 `snapshot_download(..., cache_dir=...)` 和 `snapshot_download(..., local_dir=...)`
+- **自定义目录支持**：支持 `snapshot_download(..., cache_dir=...)`、`snapshot_download(..., local_dir=...)` 和单文件 `hf_hub_download(..., local_dir=...)`
 - **冷启动恢复**：守护进程重启后可恢复已登记的自定义目录做种任务
 
 ## 安装
@@ -108,6 +108,10 @@ snapshot_download(
 # ─── 下载 ───
 llmpt-cli download meta-llama/Llama-2-7b                     # 下载模型
 llmpt-cli download fka/prompts.chat --repo-type dataset       # 下载数据集
+llmpt-cli download gpt2 --file config.json                    # 只下载单个文件
+llmpt-cli download gpt2 --file onnx/model.onnx                # 下载子目录中的单个文件
+llmpt-cli download gpt2 --file config.json --local-dir ./out  # 单文件下载到 local_dir
+llmpt-cli download gpt2 --local-dir ./models/gpt2             # 整仓展开到 local_dir
 llmpt-cli --tracker http://your-tracker-server download gpt2  # 指定 tracker
 llmpt-cli download gpt2 --disable-utp                         # 禁用 uTP，强制 TCP-only
 

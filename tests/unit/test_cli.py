@@ -10,7 +10,14 @@ import logging
 import pytest
 from unittest.mock import patch, MagicMock
 
-from llmpt.cli import main, cmd_download, cmd_scan, cmd_status, cmd_unseed
+from llmpt.cli import (
+    main,
+    cmd_download,
+    cmd_scan,
+    cmd_status,
+    cmd_unseed,
+    _split_repo_file_path,
+)
 
 # ─── main() argument parsing & dispatch ───────────────────────────────────────
 
@@ -39,6 +46,7 @@ class TestMainDispatch:
         args = mock_cmd.call_args[0][0]
         assert args.repo_id == 'gpt2'
         assert args.command == 'download'
+        assert args.single_file is None
         assert args.timeout is None
         assert args.port is None
         assert args.hf_token is None
@@ -50,13 +58,15 @@ class TestMainDispatch:
     @patch('llmpt.cli.cmd_download')
     def test_download_with_options(self, mock_cmd):
         with patch('sys.argv', ['llmpt-cli', '--tracker', 'http://t.com',
-                                'download', 'gpt2', '--local-dir', '/tmp/out',
+                                'download', 'gpt2', '--file', 'onnx/model.onnx',
+                                '--local-dir', '/tmp/out',
                                 '--timeout', '123', '--port', '6881',
                                 '--hf-token', 'hf_test', '--no-webseed',
                                 '--disable-utp']):
             main()
         args = mock_cmd.call_args[0][0]
         assert args.tracker == 'http://t.com'
+        assert args.single_file == 'onnx/model.onnx'
         assert args.local_dir == '/tmp/out'
         assert args.timeout == 123
         assert args.port == 6881
@@ -174,6 +184,7 @@ class TestCmdDownload:
         args = MagicMock()
         args.tracker = "http://tracker.example.com"
         args.repo_id = "gpt2"
+        args.single_file = None
         args.local_dir = None
         args.repo_type = "model"
         args.timeout = 456
@@ -208,6 +219,7 @@ class TestCmdDownload:
         args = MagicMock()
         args.tracker = "http://tracker.example.com"
         args.repo_id = "gpt2"
+        args.single_file = None
         args.local_dir = None
         args.repo_type = "model"
         args.timeout = 456
@@ -231,6 +243,86 @@ class TestCmdDownload:
             disable_utp=None,
             verbose=True,
         )
+
+    @patch('llmpt.cli.enable_p2p', create=True)
+    def test_single_file_download_uses_hf_hub_download(self, mock_enable, mock_download):
+        """Single-file downloads should route through hf_hub_download."""
+        mock_download.return_value = "/path/to/download/config.json"
+
+        args = MagicMock()
+        args.tracker = "http://tracker.example.com"
+        args.repo_id = "gpt2"
+        args.single_file = "onnx/model.onnx"
+        args.local_dir = "/tmp/out"
+        args.repo_type = "model"
+        args.timeout = 456
+        args.port = 6888
+        args.hf_token = "hf_token_123"
+        args.webseed = False
+        args.disable_utp = True
+        args.verbose = True
+        args.debug = False
+
+        with patch('huggingface_hub.hf_hub_download', mock_download), \
+             patch('llmpt.enable_p2p', mock_enable):
+            cmd_download(args)
+
+        mock_enable.assert_called_once_with(
+            tracker_url="http://tracker.example.com",
+            timeout=456,
+            port=6888,
+            hf_token="hf_token_123",
+            webseed=False,
+            disable_utp=True,
+            verbose=True,
+        )
+        mock_download.assert_called_once_with(
+            repo_id="gpt2",
+            filename="model.onnx",
+            subfolder="onnx",
+            repo_type="model",
+            local_dir="/tmp/out",
+        )
+
+    @patch('llmpt.cli.enable_p2p', create=True)
+    def test_invalid_single_file_path_exits_cleanly(self, mock_enable, capsys):
+        args = MagicMock()
+        args.tracker = "http://tracker.example.com"
+        args.repo_id = "gpt2"
+        args.single_file = "../secrets.txt"
+        args.local_dir = "/tmp/out"
+        args.repo_type = "model"
+        args.timeout = 456
+        args.port = 6888
+        args.hf_token = "hf_token_123"
+        args.webseed = False
+        args.disable_utp = True
+        args.verbose = True
+        args.debug = False
+
+        with patch('llmpt.enable_p2p', mock_enable):
+            with pytest.raises(SystemExit) as exc_info:
+                cmd_download(args)
+
+        assert exc_info.value.code == 2
+        assert "normalized repository-relative file path" in capsys.readouterr().err
+
+
+class TestSplitRepoFilePath:
+
+    def test_nested_path_splits_subfolder(self):
+        filename, subfolder = _split_repo_file_path("onnx/model.onnx")
+        assert filename == "model.onnx"
+        assert subfolder == "onnx"
+
+    def test_windows_separators_are_normalized(self):
+        filename, subfolder = _split_repo_file_path(r"unet\\diffusion_pytorch_model.bin")
+        assert filename == "diffusion_pytorch_model.bin"
+        assert subfolder == "unet"
+
+    def test_rejects_parent_traversal(self):
+        with pytest.raises(ValueError, match="normalized repository-relative"):
+            _split_repo_file_path("../secrets.txt")
 
 
 class TestCmdStart:

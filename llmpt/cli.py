@@ -8,6 +8,7 @@ import re
 import argparse
 import logging
 import signal
+from pathlib import PurePosixPath
 from collections import defaultdict
 
 
@@ -65,6 +66,11 @@ Examples:
     download_parser.add_argument(
         'repo_id',
         help='Repository ID (e.g., meta-llama/Llama-2-7b)'
+    )
+    download_parser.add_argument(
+        '--file',
+        dest='single_file',
+        help='Download a single file from the repository (supports nested paths like onnx/model.onnx)'
     )
     download_parser.add_argument(
         '--local-dir',
@@ -277,19 +283,49 @@ def cmd_download(args):
         verbose=args.verbose or args.debug,
     )
 
-    # NOW import the patched function
-    from huggingface_hub import snapshot_download
+    # NOW import the patched functions
+    from huggingface_hub import hf_hub_download, snapshot_download
 
     print(f"Downloading {args.repo_id}...")
 
-    # Download
-    path = snapshot_download(
-        args.repo_id,
-        repo_type=args.repo_type,
-        local_dir=args.local_dir
-    )
+    if args.single_file:
+        try:
+            filename, subfolder = _split_repo_file_path(args.single_file)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(2)
+        download_kwargs = {
+            "repo_id": args.repo_id,
+            "filename": filename,
+            "repo_type": args.repo_type,
+            "local_dir": args.local_dir,
+        }
+        if subfolder is not None:
+            download_kwargs["subfolder"] = subfolder
+        path = hf_hub_download(**download_kwargs)
+    else:
+        path = snapshot_download(
+            args.repo_id,
+            repo_type=args.repo_type,
+            local_dir=args.local_dir
+        )
 
     print(f"✓ Downloaded to: {path}")
+
+
+def _split_repo_file_path(path: str) -> tuple[str, str | None]:
+    """Split a repo-relative file path into ``filename`` and optional ``subfolder``."""
+    normalized = path.replace("\\", "/").strip("/")
+    if not normalized:
+        raise ValueError("--file must point to a file inside the repository")
+
+    parts = [part for part in PurePosixPath(normalized).parts if part not in ("", ".")]
+    if not parts or any(part == ".." for part in parts):
+        raise ValueError("--file must be a normalized repository-relative file path")
+
+    filename = parts[-1]
+    subfolder = "/".join(parts[:-1]) or None
+    return filename, subfolder
 
 
 
