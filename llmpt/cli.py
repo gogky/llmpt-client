@@ -107,6 +107,13 @@ Examples:
         action='store_false',
         help='Disable WebSeed fallback'
     )
+    download_parser.add_argument(
+        '--disable-utp',
+        dest='disable_utp',
+        action='store_true',
+        default=None,
+        help='Disable uTP and force TCP-only BitTorrent transport'
+    )
 
     # Start command
     start_parser = subparsers.add_parser(
@@ -123,6 +130,13 @@ Examples:
         type=int,
         default=None,
         help='libtorrent listen port (default: HF_P2P_PORT or auto-select)'
+    )
+    start_parser.add_argument(
+        '--disable-utp',
+        dest='disable_utp',
+        action='store_true',
+        default=None,
+        help='Disable uTP and force TCP-only BitTorrent transport'
     )
 
     # Status command
@@ -180,6 +194,13 @@ Examples:
         default=None,
         help='libtorrent listen port (default: HF_P2P_PORT or auto-select)'
     )
+    restart_parser.add_argument(
+        '--disable-utp',
+        dest='disable_utp',
+        action='store_true',
+        default=None,
+        help='Disable uTP and force TCP-only BitTorrent transport'
+    )
 
     # Internal hidden command for daemon subprocess
     internal_daemon_parser = subparsers.add_parser(
@@ -188,6 +209,7 @@ Examples:
     )
     internal_daemon_parser.add_argument('--tracker', required=True)
     internal_daemon_parser.add_argument('--port', type=int, default=None)
+    internal_daemon_parser.add_argument('--disable-utp', action='store_true', default=False)
     subparsers._choices_actions = [
         action
         for action in subparsers._choices_actions
@@ -251,6 +273,7 @@ def cmd_download(args):
         port=args.port,
         hf_token=args.hf_token,
         webseed=args.webseed,
+        disable_utp=args.disable_utp,
         verbose=args.verbose or args.debug,
     )
 
@@ -287,6 +310,7 @@ def cmd_start(args):
         tracker_url=tracker_url,
         port=port,
         foreground=args.foreground,
+        disable_utp=args.disable_utp,
     )
     if pid:
         print(f"✓ Daemon started (PID: {pid})")
@@ -317,7 +341,11 @@ def cmd_restart(args):
 
     stop_daemon()
     time.sleep(0.5)
-    pid = start_daemon(tracker_url=tracker_url, port=port)
+    pid = start_daemon(
+        tracker_url=tracker_url,
+        port=port,
+        disable_utp=args.disable_utp,
+    )
     if pid:
         print(f"✓ Daemon restarted (PID: {pid})")
     else:
@@ -723,7 +751,7 @@ def _cmd_internal_daemon_start(args):
     root_log.setLevel(logging.INFO)
 
     try:
-        _daemon_main(args.tracker, port=args.port)
+        _daemon_main(args.tracker, port=args.port, disable_utp=args.disable_utp)
     except Exception as e:
         logger = logging.getLogger("llmpt.daemon")
         logger.error(f"Daemon crashed: {e}", exc_info=True)

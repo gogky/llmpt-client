@@ -481,6 +481,7 @@ def start_daemon(
     tracker_url: str = "http://localhost:8080",
     port: Optional[int] = None,
     foreground: bool = False,
+    disable_utp: Optional[bool] = None,
 ) -> Optional[int]:
     """Start the seeding daemon.
 
@@ -488,6 +489,7 @@ def start_daemon(
         tracker_url: URL of the tracker server.
         port: libtorrent listen port (None = auto-select).
         foreground: If True, run in the foreground (for debugging).
+        disable_utp: Whether to disable uTP and force TCP-only transport.
 
     Returns:
         PID of the started daemon, or None if it was already running.
@@ -500,11 +502,11 @@ def start_daemon(
     if foreground:
         # Run directly in the current process (useful for debugging)
         _write_pid(os.getpid())
-        _daemon_main(tracker_url, port=port)
+        _daemon_main(tracker_url, port=port, disable_utp=disable_utp)
         return os.getpid()
 
     # Fork to background
-    pid = _daemonize(tracker_url, port=port)
+    pid = _daemonize(tracker_url, port=port, disable_utp=disable_utp)
     return pid
 
 
@@ -540,7 +542,11 @@ def stop_daemon() -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _daemonize(tracker_url: str, port: Optional[int] = None) -> int:
+def _daemonize(
+    tracker_url: str,
+    port: Optional[int] = None,
+    disable_utp: Optional[bool] = None,
+) -> int:
     """Start the daemon as a subprocess.
 
     Uses subprocess.Popen to launch a clean, detached Python process via
@@ -559,6 +565,8 @@ def _daemonize(tracker_url: str, port: Optional[int] = None) -> int:
     ]
     if port is not None:
         cmd.extend(["--port", str(port)])
+    if disable_utp:
+        cmd.append("--disable-utp")
 
     # Start a detached subprocess
     proc = subprocess.Popen(
@@ -587,7 +595,11 @@ def _daemonize(tracker_url: str, port: Optional[int] = None) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
+def _daemon_main(
+    tracker_url: str,
+    port: Optional[int] = None,
+    disable_utp: Optional[bool] = None,
+) -> None:
     """Main loop of the seeding daemon."""
     if not LIBTORRENT_AVAILABLE:
         logger.error("libtorrent not available, daemon cannot start")
@@ -600,15 +612,23 @@ def _daemon_main(tracker_url: str, port: Optional[int] = None) -> None:
 
     # Set the global config so P2PBatchManager can read port and other settings.
     # In a forked daemon process, the parent's _config is not inherited.
-    from . import _config as parent_config
+    from . import _get_bool_env
     import llmpt
     llmpt._config['tracker_url'] = tracker_url
     if port is not None:
         llmpt._config['port'] = port
     elif os.getenv('HF_P2P_PORT'):
         llmpt._config['port'] = int(os.getenv('HF_P2P_PORT'))
+    llmpt._config['disable_utp'] = (
+        disable_utp if disable_utp is not None
+        else _get_bool_env('HF_P2P_DISABLE_UTP', False)
+    )
 
-    logger.info(f"Daemon starting (PID: {os.getpid()}, tracker: {tracker_url}, port: {llmpt._config.get('port', 'auto')})")
+    logger.info(
+        f"Daemon starting (PID: {os.getpid()}, tracker: {tracker_url}, "
+        f"port: {llmpt._config.get('port', 'auto')}, "
+        f"disable_utp: {llmpt._config.get('disable_utp', False)})"
+    )
 
     # Mark this process as the seeding daemon so P2PBatchManager binds
     # to the daemon port (N) rather than the client port (N+1).

@@ -53,6 +53,7 @@ def test_config_from_env_defaults():
         'HF_P2P_TIMEOUT': '42',
         'HF_P2P_PORT': '6999',
         'HF_P2P_WEBSEED': '0',
+        'HF_P2P_DISABLE_UTP': '1',
         'HF_P2P_VERBOSE': '1',
     }, clear=False), \
          patch('llmpt._disable_xet_storage'), \
@@ -60,13 +61,20 @@ def test_config_from_env_defaults():
          patch('llmpt.patch.remove_patch'), \
          patch('llmpt.daemon.is_daemon_running', return_value=True):
         llmpt.disable_p2p()
-        llmpt.enable_p2p(timeout=None, port=None, webseed=None, verbose=False)
+        llmpt.enable_p2p(
+            timeout=None,
+            port=None,
+            webseed=None,
+            disable_utp=None,
+            verbose=False,
+        )
 
         config = llmpt.get_config()
         assert config['tracker_url'] == 'http://env-tracker.com'
         assert config['timeout'] == 42
         assert config['port'] == 6999
         assert config['webseed'] is False
+        assert config['disable_utp'] is True
         assert config['verbose'] is True
 
         llmpt.disable_p2p()

@@ -166,6 +166,12 @@ class P2PBatchManager:
                 self.lt_session = lt.session()
                 settings = self.lt_session.get_settings()
                 settings['listen_interfaces'] = listen_ifaces
+                if config.get('disable_utp'):
+                    # Some cross-network links behave much worse on uTP than
+                    # plain TCP. Allow callers to force TCP-only transport.
+                    settings['enable_incoming_utp'] = False
+                    settings['enable_outgoing_utp'] = False
+                    logger.info("uTP disabled; forcing TCP-only BitTorrent transport")
                 self.lt_session.apply_settings(settings)
                 self.listen_port = self.lt_session.listen_port()
                 logger.info(f"libtorrent listening on port {self.listen_port}")

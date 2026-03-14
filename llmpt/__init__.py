@@ -40,6 +40,7 @@ _config = {
     'hf_token': None,  # HuggingFace token for WebSeed proxy (private/gated repos)
     'webseed': True,  # Whether the WebSeed proxy is enabled
     'verbose': False,  # Print P2P summary after snapshot_download
+    'disable_utp': False,  # Force TCP-only BitTorrent transport when needed
 }
 _webseed_proxy = None  # WebSeedProxy instance (created in enable_p2p)
 
@@ -109,6 +110,7 @@ def enable_p2p(
     port: Optional[int] = None,
     hf_token: Optional[str] = None,
     webseed: Optional[bool] = None,
+    disable_utp: Optional[bool] = None,
     verbose: bool = False,
 ) -> None:
     """
@@ -125,6 +127,9 @@ def enable_p2p(
         webseed: Whether to enable the WebSeed proxy. If None, uses
                  HF_P2P_WEBSEED or defaults to True. Set to False to disable
                  WebSeed (useful for debugging).
+        disable_utp: Whether to disable uTP and force TCP-only BitTorrent
+                 transport. If None, uses HF_P2P_DISABLE_UTP or defaults to
+                 False. Helpful on networks where uTP performs poorly.
         verbose: Whether to print P2P acceleration summary after snapshot_download.
                  Defaults to False. Can also be enabled via HF_P2P_VERBOSE=1 env var.
 
@@ -164,6 +169,10 @@ def enable_p2p(
     _config['webseed'] = (
         webseed if webseed is not None
         else _get_bool_env('HF_P2P_WEBSEED', True)
+    )
+    _config['disable_utp'] = (
+        disable_utp if disable_utp is not None
+        else _get_bool_env('HF_P2P_DISABLE_UTP', False)
     )
     _config['verbose'] = verbose or _get_bool_env('HF_P2P_VERBOSE', False)
     port_env = os.getenv('HF_P2P_PORT')
@@ -207,6 +216,7 @@ def enable_p2p(
             daemon_pid = start_daemon(
                 tracker_url=_config['tracker_url'],
                 port=_config.get('port'),
+                disable_utp=_config.get('disable_utp'),
             )
             if daemon_pid:
                 logger.info(f"Seeding daemon auto-started (PID: {daemon_pid})")

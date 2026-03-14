@@ -866,6 +866,7 @@ class TestP2PStats:
     def test_pure_webseed_uses_total_payload_as_authoritative_total(self, make_ctx, mock_lt):
         """When no P2P peers were ever seen, all payload should count as WebSeed."""
         ctx = make_ctx()
+        ctx._has_webseed = True
         handle = MagicMock()
         handle.is_valid.return_value = True
         handle.get_peer_info.return_value = []
@@ -888,6 +889,7 @@ class TestP2PStats:
     def test_mixed_transfer_reconciles_missing_bytes_into_webseed(self, make_ctx, mock_lt):
         """Remaining payload bytes should be attributed to WebSeed after peer reconciliation."""
         ctx = make_ctx()
+        ctx._has_webseed = True
         mock_lt.peer_info.web_seed = 1
         handle = MagicMock()
         handle.is_valid.return_value = True
@@ -912,3 +914,24 @@ class TestP2PStats:
         assert stats['peer_download'] == 600
         assert stats['webseed_download'] == 400
         assert stats['total_payload_download'] == 1000
+
+    def test_payload_only_does_not_imply_webseed_when_proxy_is_disabled(self, make_ctx, mock_lt):
+        """With webseed disabled, unattributed payload bytes should stay unattributed."""
+        ctx = make_ctx()
+        handle = MagicMock()
+        handle.is_valid.return_value = True
+        handle.get_peer_info.return_value = []
+        handle.status.return_value = MagicMock(
+            total_payload_download=3_460_000,
+            num_peers=0,
+            num_seeds=0,
+        )
+        ctx.handle = handle
+        ctx._acc_total_payload_download = 3_460_000
+        ctx._acc_peak_p2p_peers = 0
+
+        stats = ctx.get_p2p_stats()
+
+        assert stats['peer_download'] == 0
+        assert stats['webseed_download'] == 0
+        assert stats['total_payload_download'] == 3_460_000

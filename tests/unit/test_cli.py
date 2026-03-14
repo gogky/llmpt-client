@@ -43,6 +43,7 @@ class TestMainDispatch:
         assert args.port is None
         assert args.hf_token is None
         assert args.webseed is None
+        assert args.disable_utp is None
         assert args.verbose is False
         assert args.debug is False
 
@@ -51,7 +52,8 @@ class TestMainDispatch:
         with patch('sys.argv', ['llmpt-cli', '--tracker', 'http://t.com',
                                 'download', 'gpt2', '--local-dir', '/tmp/out',
                                 '--timeout', '123', '--port', '6881',
-                                '--hf-token', 'hf_test', '--no-webseed']):
+                                '--hf-token', 'hf_test', '--no-webseed',
+                                '--disable-utp']):
             main()
         args = mock_cmd.call_args[0][0]
         assert args.tracker == 'http://t.com'
@@ -60,6 +62,7 @@ class TestMainDispatch:
         assert args.port == 6881
         assert args.hf_token == 'hf_test'
         assert args.webseed is False
+        assert args.disable_utp is True
 
     def test_seed_command_is_rejected(self):
         with patch('sys.argv', ['llmpt-cli', 'seed', '--repo-id', 'gpt2', '--revision', 'main']):
@@ -177,6 +180,7 @@ class TestCmdDownload:
         args.port = 6888
         args.hf_token = "hf_token_123"
         args.webseed = False
+        args.disable_utp = True
         args.verbose = True
         args.debug = False
 
@@ -190,6 +194,7 @@ class TestCmdDownload:
             port=6888,
             hf_token="hf_token_123",
             webseed=False,
+            disable_utp=True,
             verbose=True,
         )
         mock_download.assert_called_once_with("gpt2", repo_type=args.repo_type, local_dir=None)
@@ -209,6 +214,7 @@ class TestCmdDownload:
         args.port = 6888
         args.hf_token = "hf_token_123"
         args.webseed = False
+        args.disable_utp = None
         args.verbose = False
         args.debug = True
 
@@ -222,6 +228,7 @@ class TestCmdDownload:
             port=6888,
             hf_token="hf_token_123",
             webseed=False,
+            disable_utp=None,
             verbose=True,
         )
 
@@ -238,6 +245,7 @@ class TestCmdStart:
         args.tracker = None
         args.port = None
         args.foreground = False
+        args.disable_utp = None
 
         cmd_start(args)
 
@@ -245,6 +253,7 @@ class TestCmdStart:
             tracker_url='http://env-tracker',
             port=7010,
             foreground=False,
+            disable_utp=None,
         )
 
 

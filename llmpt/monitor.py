@@ -30,6 +30,8 @@ _STATE_NAMES = [
 # Transient errors (e.g. partfile_write on cross-piece boundaries) are common
 # and self-resolving; this threshold avoids aborting on them.
 _ERROR_THRESHOLD = 3
+_LOW_UTP_RATE_THRESHOLD = 128 * 1024  # 128 KB/s
+_LOW_UTP_WARNING_TICKS = 3  # ~15s because diagnostics run every 5s
 
 
 def run_monitor_loop(ctx: "SessionContext") -> None:
@@ -114,8 +116,41 @@ def _log_diagnostics(ctx: "SessionContext") -> None:
                 f"dl={s.download_rate / 1024:.1f}KB/s ul={s.upload_rate / 1024:.1f}KB/s "
                 f"pieces={s.num_pieces}/{total_pieces}"
             )
+            _maybe_warn_about_utp(ctx, s)
     except Exception as diag_err:
         logger.debug(f"[{ctx.repo_id}] Diagnostic log error: {diag_err}")
+
+
+def _maybe_warn_about_utp(ctx: "SessionContext", status) -> None:
+    """Warn once when a connected peer is crawling and uTP is still enabled."""
+    try:
+        from . import get_config
+
+        if get_config().get("disable_utp"):
+            return
+    except Exception:
+        return
+
+    if status.state != 3 or status.progress >= 0.95 or status.num_peers <= 0:
+        ctx._low_utp_warning_ticks = 0
+        return
+
+    if status.download_rate >= _LOW_UTP_RATE_THRESHOLD:
+        ctx._low_utp_warning_ticks = 0
+        return
+
+    ticks = int(getattr(ctx, "_low_utp_warning_ticks", 0) or 0) + 1
+    ctx._low_utp_warning_ticks = ticks
+    if ticks < _LOW_UTP_WARNING_TICKS or getattr(ctx, "_low_utp_warning_emitted", False):
+        return
+
+    ctx._low_utp_warning_emitted = True
+    logger.warning(
+        f"[{ctx.repo_id}] Peer is connected but transfer is still very slow "
+        f"({status.download_rate / 1024:.1f}KB/s). This network path may "
+        f"perform poorly with uTP; try setting HF_P2P_DISABLE_UTP=1 or "
+        f"using --disable-utp."
+    )
 
 
 def _retry_test_peer_connection(ctx: "SessionContext") -> None:

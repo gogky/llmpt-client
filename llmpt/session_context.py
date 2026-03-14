@@ -596,9 +596,9 @@ class SessionContext:
         # reconcile the source breakdown against the authoritative total.
         if total_payload_download > 0:
             peer_download = min(peer_download, total_payload_download)
-            if peak_p2p_peers == 0:
+            if self._has_webseed and peak_p2p_peers == 0:
                 webseed_download = max(webseed_download, total_payload_download)
-            else:
+            elif self._has_webseed:
                 webseed_download = max(
                     webseed_download,
                     total_payload_download - peer_download,

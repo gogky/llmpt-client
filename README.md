@@ -34,6 +34,10 @@ pip install -e ".[dev]"
 ```bash
 # 设置 tracker 地址（enable_p2p() 会自动读取）
 export HF_P2P_TRACKER=http://your-tracker-server
+
+# 如果当前网络对 uTP 不友好，可禁用 uTP 强制走 TCP
+# 这在某些跨公网、WSL、NAT、UDP 丢包较多的环境里会明显更稳定
+export HF_P2P_DISABLE_UTP=1
 ```
 
 ```python
@@ -48,7 +52,10 @@ snapshot_download("meta-llama/Llama-2-7b")  # 使用 P2P
 
 ```python
 from llmpt import enable_p2p
-enable_p2p(tracker_url="http://your-tracker-server")
+enable_p2p(
+    tracker_url="http://your-tracker-server",
+    disable_utp=True,  # 可选：网络对 uTP 不友好时建议打开
+)
 
 from huggingface_hub import snapshot_download
 
@@ -73,7 +80,10 @@ snapshot_download("meta-llama/Llama-2-7b")
 
 ```python
 from llmpt import enable_p2p
-enable_p2p(tracker_url="http://your-tracker-server")
+enable_p2p(
+    tracker_url="http://your-tracker-server",
+    disable_utp=True,  # 可选
+)
 
 from huggingface_hub import snapshot_download
 
@@ -98,22 +108,31 @@ snapshot_download(
 # ─── 下载 ───
 llmpt-cli download meta-llama/Llama-2-7b                     # 下载模型
 llmpt-cli download fka/prompts.chat --repo-type dataset       # 下载数据集
-llmpt-cli download gpt2 --tracker http://your-tracker-server  # 指定 tracker
+llmpt-cli --tracker http://your-tracker-server download gpt2  # 指定 tracker
+llmpt-cli download gpt2 --disable-utp                         # 禁用 uTP，强制 TCP-only
 
 # ─── 守护进程管理 ───
 llmpt-cli start                                               # 启动后台做种守护进程
-llmpt-cli start --tracker http://your-tracker-server          # 指定 tracker
+llmpt-cli --tracker http://your-tracker-server start          # 指定 tracker
+llmpt-cli start --disable-utp                                 # 守护进程禁用 uTP
 llmpt-cli scan                                                # 立即重扫 cache 并重试导入验证
 llmpt-cli status                                              # 查看做种状态
 llmpt-cli unseed model/gpt2@71034c5                           # 停止该做种条目（推荐，直接复制 status 中的目标名）
 llmpt-cli unseed gpt2                                         # 兼容旧写法
 llmpt-cli stop                                                # 停止守护进程
 llmpt-cli restart                                             # 重启
+llmpt-cli restart --disable-utp                               # 重启并禁用 uTP
 
 ```
 
 当对应 CLI 参数未显式传入时，`llmpt-cli` 会继续读取环境变量作为默认值：
-`HF_P2P_TRACKER`、`HF_P2P_TIMEOUT`、`HF_P2P_PORT`、`HF_P2P_WEBSEED`、`HF_P2P_VERBOSE`、`HF_TOKEN`。
+`HF_P2P_TRACKER`、`HF_P2P_TIMEOUT`、`HF_P2P_PORT`、`HF_P2P_WEBSEED`、`HF_P2P_DISABLE_UTP`、`HF_P2P_VERBOSE`、`HF_TOKEN`。
+
+注意：`--tracker`、`--debug`、`--verbose` 这类全局参数需要写在子命令前面，例如：
+
+```bash
+llmpt-cli --tracker http://your-tracker-server --debug download gpt2
+```
 
 访问私有或受限仓库时，也可以先执行 `hf auth login`。`llmpt` 会自动复用
 `huggingface_hub` 已保存的登录 token。
@@ -246,6 +265,10 @@ HF_P2P_TIMEOUT=300
 # 启用/禁用 WebSeed（默认：1）
 HF_P2P_WEBSEED=1
 
+# 禁用 uTP，强制 BitTorrent 只走 TCP（默认：0）
+# 某些网络环境中，uTP 会明显慢于 TCP
+HF_P2P_DISABLE_UTP=0
+
 # HuggingFace 认证 Token（可选：覆盖 `hf auth login` 的本机登录态；用于 WebSeed 访问私有/受限仓库）
 # 当前暂不支持对访问受限的仓库做种
 HF_TOKEN=hf_xxxxx
@@ -268,6 +291,7 @@ enable_p2p(
     port=6881,            # 指定端口
     hf_token="hf_xxxxx",  # 可选：覆盖本机 `hf auth login` 登录态
     webseed=True,         # 启用 WebSeed（默认）
+    disable_utp=False,    # 可选：禁用 uTP，强制 TCP-only
 )
 
 # 检查 P2P 是否启用
@@ -286,6 +310,34 @@ stop_seeding()
 # 进程退出时会自动调用
 shutdown()
 ```
+
+## 网络排障
+
+如果出现下面这种情况：
+
+- 已经连上 peer，但速度长期只有几十 KB/s 到几百 KB/s
+- `iperf3` 的 TCP 结果明显好于 llmpt 的实际下载速度
+- 环境在 WSL、跨公网、NAT 后、或者 UDP 丢包比较明显
+
+优先尝试：
+
+```bash
+HF_P2P_DISABLE_UTP=1 llmpt-cli download gpt2
+```
+
+或：
+
+```bash
+llmpt-cli download gpt2 --disable-utp
+```
+
+Python API：
+
+```python
+enable_p2p(tracker_url="http://your-tracker-server", disable_utp=True)
+```
+
+原因是：BitTorrent 默认可能使用 uTP（基于 UDP）。在一些网络路径上，uTP 会比普通 TCP 保守很多，表现为“能连上 peer，但吞吐明显偏低”。这时禁用 uTP、强制走 TCP，通常会更稳定。
 
 ## 兼容性
 
