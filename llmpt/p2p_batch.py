@@ -16,7 +16,12 @@ if TYPE_CHECKING:
     from .tracker_client import TrackerClient
 
 from .alert_events import snapshot_alert
-from .utils import lt, LIBTORRENT_AVAILABLE, get_hf_hub_cache
+from .session_identity import (
+    build_logical_torrent_ref,
+    build_source_session_key,
+)
+from .transfer_types import SourceSessionKey
+from .utils import lt, LIBTORRENT_AVAILABLE
 
 # Re-export SessionContext for backward compatibility.
 # All existing imports like ``from llmpt.p2p_batch import SessionContext`` continue to work.
@@ -31,28 +36,6 @@ logger = logging.getLogger(__name__)
 _DEFAULT_DAEMON_PORT = 6881
 _DEFAULT_CLIENT_PORT = 6882
 _MAX_PORT = 6999
-
-
-def _storage_identity(
-    cache_dir: Optional[str] = None,
-    local_dir: Optional[str] = None,
-) -> tuple[str, str]:
-    """Return a normalized storage identity for session-level deduping."""
-    if local_dir:
-        return ("local_dir", os.path.realpath(os.path.abspath(os.path.expanduser(local_dir))))
-    if cache_dir:
-        return ("hub_cache", os.path.realpath(os.path.abspath(os.path.expanduser(cache_dir))))
-    return ("hub_cache", get_hf_hub_cache())
-
-
-def _logical_identity(
-    repo_type: str,
-    repo_id: str,
-    revision: str,
-) -> tuple[str, str, str]:
-    """Return the identity shared by all storage-backed copies of one torrent."""
-    return (repo_type, repo_id, revision)
-
 
 def _is_port_available(port: int) -> bool:
     """Check whether *port* is free on **both** IPv4 and IPv6.
@@ -150,8 +133,8 @@ class P2PBatchManager:
                 return
             
             self._initialized = True
-            # Mapping from (repo_id, revision) -> SessionContext
-            self.sessions: Dict[tuple, SessionContext] = {}
+            # Mapping from one storage-backed source session key to SessionContext.
+            self.sessions: Dict[SourceSessionKey, SessionContext] = {}
             self._alert_pump_thread: Optional[threading.Thread] = None
             self._alert_pump_stop: Optional[threading.Event] = None
             self._alert_pump_wakeup = threading.Event()
@@ -311,10 +294,10 @@ class P2PBatchManager:
         repo_type: str = 'model',
     ) -> bool:
         """Return True when any storage source has a live session for this torrent."""
-        logical_key = _logical_identity(repo_type, repo_id, revision)
+        logical_ref = build_logical_torrent_ref(repo_type, repo_id, revision)
         with self._lock:
             for session_key, ctx in self.sessions.items():
-                if session_key[:3] != logical_key:
+                if session_key.logical != logical_ref:
                     continue
                 handle = getattr(ctx, "handle", None)
                 try:
@@ -332,24 +315,29 @@ class P2PBatchManager:
         if not LIBTORRENT_AVAILABLE:
             return False
 
-        storage_kind, storage_root = _storage_identity(cache_dir=cache_dir, local_dir=local_dir)
-        repo_key = (repo_type, repo_id, revision, storage_kind, storage_root)
-        logical_key = _logical_identity(repo_type, repo_id, revision)
+        session_key = build_source_session_key(
+            repo_type,
+            repo_id,
+            revision,
+            cache_dir=cache_dir,
+            local_dir=local_dir,
+        )
+        logical_ref = build_logical_torrent_ref(repo_type, repo_id, revision)
         workers_to_join = []
         reuse_existing = False
         with self._lock:
-            session_ctx = self.sessions.get(repo_key)
+            session_ctx = self.sessions.get(session_key)
             if session_ctx is not None:
                 handle = getattr(session_ctx, "handle", None)
                 try:
                     if handle is not None and not handle.is_valid():
-                        ctx = self.sessions.pop(repo_key)
+                        ctx = self.sessions.pop(session_key)
                         worker = self._teardown_session(ctx)
                         if worker is not None:
                             workers_to_join.append(worker)
                         session_ctx = None
                 except Exception:
-                    ctx = self.sessions.pop(repo_key)
+                    ctx = self.sessions.pop(session_key)
                     worker = self._teardown_session(ctx)
                     if worker is not None:
                         workers_to_join.append(worker)
@@ -357,7 +345,7 @@ class P2PBatchManager:
 
             if session_ctx is None:
                 for existing_key, existing_ctx in list(self.sessions.items()):
-                    if existing_key[:3] != logical_key:
+                    if existing_key.logical != logical_ref:
                         continue
 
                     existing_handle = getattr(existing_ctx, "handle", None)
@@ -365,7 +353,7 @@ class P2PBatchManager:
                         if existing_handle and existing_handle.is_valid():
                             logger.info(
                                 f"[{repo_id}] Reusing active seeding session from "
-                                f"{existing_key[3]}={existing_key[4]}"
+                                f"{existing_key.storage_kind}={existing_key.storage_root}"
                             )
                             reuse_existing = True
                             break
@@ -378,7 +366,7 @@ class P2PBatchManager:
                         workers_to_join.append(worker)
 
                 if not reuse_existing:
-                    self.sessions[repo_key] = SessionContext(
+                    self.sessions[session_key] = SessionContext(
                         repo_id=repo_id,
                         revision=revision,
                         repo_type=repo_type,
@@ -391,7 +379,7 @@ class P2PBatchManager:
                         local_dir=local_dir,
                     )
 
-            session_ctx = self.sessions.get(repo_key)
+            session_ctx = self.sessions.get(session_key)
 
         for worker in workers_to_join:
             if worker is not threading.current_thread():
@@ -456,14 +444,19 @@ class P2PBatchManager:
         if not LIBTORRENT_AVAILABLE:
             return False
 
-        storage_kind, storage_root = _storage_identity(cache_dir=cache_dir, local_dir=local_dir)
-        repo_key = (repo_type, repo_id, revision, storage_kind, storage_root)
+        session_key = build_source_session_key(
+            repo_type,
+            repo_id,
+            revision,
+            cache_dir=cache_dir,
+            local_dir=local_dir,
+        )
         
         with self._lock:
-            if repo_key not in self.sessions:
+            if session_key not in self.sessions:
                 from . import get_config
                 config = get_config()
-                self.sessions[repo_key] = SessionContext(
+                self.sessions[session_key] = SessionContext(
                     repo_id=repo_id,
                     revision=revision,
                     repo_type=repo_type,
@@ -474,7 +467,7 @@ class P2PBatchManager:
                     cache_dir=cache_dir,
                     local_dir=local_dir,
                 )
-            session_ctx = self.sessions[repo_key]
+            session_ctx = self.sessions[session_key]
 
         self._ensure_alert_pump_running()
         
@@ -498,12 +491,17 @@ class P2PBatchManager:
         once a user-facing download operation completes, the temporary
         on-demand session should go away promptly to avoid duplicate seeders.
         """
-        storage_kind, storage_root = _storage_identity(cache_dir=cache_dir, local_dir=local_dir)
-        repo_key = (repo_type, repo_id, revision, storage_kind, storage_root)
+        session_key = build_source_session_key(
+            repo_type,
+            repo_id,
+            revision,
+            cache_dir=cache_dir,
+            local_dir=local_dir,
+        )
         worker = None
 
         with self._lock:
-            ctx = self.sessions.get(repo_key)
+            ctx = self.sessions.get(session_key)
             if ctx is None or ctx.session_mode != 'on_demand':
                 return False
 
@@ -511,10 +509,10 @@ class P2PBatchManager:
             self._checkpoint_on_demand_session(ctx)
 
         with self._lock:
-            ctx = self.sessions.get(repo_key)
+            ctx = self.sessions.get(session_key)
             if ctx is None or ctx.session_mode != 'on_demand':
                 return False
-            ctx = self.sessions.pop(repo_key)
+            ctx = self.sessions.pop(session_key)
             worker = self._teardown_session(
                 ctx,
                 purge_resumable_state=completed,
@@ -635,14 +633,19 @@ class P2PBatchManager:
         Returns:
             True if the session was found and removed, False otherwise.
         """
-        storage_kind, storage_root = _storage_identity(cache_dir=cache_dir, local_dir=local_dir)
-        repo_key = (repo_type, repo_id, revision, storage_kind, storage_root)
+        session_key = build_source_session_key(
+            repo_type,
+            repo_id,
+            revision,
+            cache_dir=cache_dir,
+            local_dir=local_dir,
+        )
         worker = None
 
         with self._lock:
-            if repo_key not in self.sessions:
+            if session_key not in self.sessions:
                 return False
-            ctx = self.sessions.pop(repo_key)
+            ctx = self.sessions.pop(session_key)
             worker = self._teardown_session(ctx)
 
         with self._lock:
@@ -694,16 +697,19 @@ class P2PBatchManager:
         """
         status = {}
         with self._lock:
-            for (repo_type, repo_id, revision, storage_kind, storage_root), ctx in self.sessions.items():
+            for session_key, ctx in self.sessions.items():
                 if not ctx.handle or not ctx.handle.is_valid():
                     continue
                 s = ctx.handle.status()
                 # Represent the session uniquely
-                key_suffix = f" ({storage_kind}={storage_root})" if storage_root else ""
-                status[f"{repo_type}:{repo_id}@{revision}{key_suffix}"] = {
-                    'repo_type': repo_type,
-                    'repo_id': repo_id,
-                    'revision': revision,
+                key_suffix = (
+                    f" ({session_key.storage_kind}={session_key.storage_root})"
+                    if session_key.storage_root else ""
+                )
+                status[f"{session_key.repo_type}:{session_key.repo_id}@{session_key.revision}{key_suffix}"] = {
+                    'repo_type': session_key.repo_type,
+                    'repo_id': session_key.repo_id,
+                    'revision': session_key.revision,
                     'cache_dir': ctx.cache_dir,
                     'local_dir': ctx.local_dir,
                     'uploaded': s.total_upload,
@@ -740,15 +746,11 @@ class P2PBatchManager:
         total_payload_download = 0
         active_p2p_peers = 0
         max_p2p_peers = 0
+        logical_ref = build_logical_torrent_ref(repo_type, repo_id, revision)
 
         with self._lock:
-            for key, ctx in self.sessions.items():
-                key_repo_type, key_repo_id, key_revision = key[:3]
-                if (
-                    key_repo_type == repo_type
-                    and key_repo_id == repo_id
-                    and key_revision == revision
-                ):
+            for session_key, ctx in self.sessions.items():
+                if session_key.logical == logical_ref:
                     stats = ctx.get_p2p_stats()
                     if stats:
                         total_peer_download += stats.get('peer_download', 0)
