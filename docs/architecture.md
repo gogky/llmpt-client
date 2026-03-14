@@ -97,4 +97,7 @@ docker compose -f docker-compose.test-hybrid.yml up --build
 
 # 场景 4：守护进程自动做种（冷启动 → 自动创建 torrent → P2P 下载）
 docker compose -f docker-compose.test-daemon.yml up --build
+
+# 场景 5： 断点续传
+docker compose -f docker-compose.test-resume.yml up --build
 ```

@@ -463,7 +463,7 @@ class TestCollectReadyFiles:
 
         ctx._find_file_index.return_value = 0
         ctx.get_file_progress.return_value = [1000]
-        ctx.handle.file_priorities.return_value = [1]
+        ctx.handle.file_priority.return_value = 1
         ctx._get_lt_disk_path.return_value = "/tmp/p2p/model.bin"
 
         result = _collect_ready_files(ctx)
@@ -471,6 +471,8 @@ class TestCollectReadyFiles:
         assert len(result) == 1
         assert result[0] == ("/tmp/p2p/model.bin", "/dest/model.bin", "model.bin")
         ctx.get_file_progress.assert_called_once_with(verified_only=True)
+        ctx.handle.file_priority.assert_called_once_with(0)
+        ctx.handle.file_priorities.assert_not_called()
 
     def test_skips_incomplete_files(self):
         ctx = make_mock_ctx()
@@ -488,11 +490,45 @@ class TestCollectReadyFiles:
 
         ctx._find_file_index.return_value = 0
         ctx.get_file_progress.return_value = [500]  # 50%
-        ctx.handle.file_priorities.return_value = [1]
+        ctx.handle.file_priority.return_value = 1
 
         result = _collect_ready_files(ctx)
         assert result == []
         ctx.get_file_progress.assert_called_once_with(verified_only=True)
+        ctx.handle.file_priority.assert_called_once_with(0)
+        ctx.handle.file_priorities.assert_not_called()
+
+    def test_belatedly_prioritizes_file_with_new_getter(self):
+        ctx = make_mock_ctx()
+
+        event = threading.Event()
+        ctx.file_events = {"model.bin": event}
+        ctx.file_destinations = {"model.bin": "/dest/model.bin"}
+
+        mock_files = MagicMock()
+        mock_files.file_size.return_value = 1000
+
+        mock_ti = MagicMock()
+        mock_ti.files.return_value = mock_files
+        ctx.torrent_info_obj = mock_ti
+
+        ctx._find_file_index.return_value = 0
+        ctx.get_file_progress.return_value = [1000]
+        ctx._get_lt_disk_path.return_value = "/tmp/p2p/model.bin"
+
+        def file_priority_side_effect(*args):
+            if args == (0,):
+                return 0
+            return None
+
+        ctx.handle.file_priority.side_effect = file_priority_side_effect
+
+        result = _collect_ready_files(ctx)
+
+        assert result == [("/tmp/p2p/model.bin", "/dest/model.bin", "model.bin")]
+        assert ctx.handle.file_priority.call_args_list[0].args == (0,)
+        assert ctx.handle.file_priority.call_args_list[1].args == (0, 1)
+        ctx.handle.file_priorities.assert_not_called()
 
 
 # ─── Integration: deliver outside lock ───────────────────────────────────────

@@ -307,8 +307,8 @@ def _collect_ready_files(ctx: "SessionContext") -> list:
         if file_index is None:
             continue
 
-        # Belatedly set priority for files queued before metadata arrived
-        if ctx.handle.file_priorities()[file_index] == 0:
+        # Query the specific file priority to avoid the deprecated list getter.
+        if ctx.handle.file_priority(file_index) == 0:
             ctx.handle.file_priority(file_index, 1)
             logger.info(f"[{ctx.repo_id}] Belatedly prioritized {filename} (Index {file_index})")
 
