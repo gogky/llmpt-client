@@ -34,6 +34,49 @@ logger = logging.getLogger("llmpt.torrent_cache")
 TORRENT_CACHE_DIR = os.path.expanduser("~/.cache/llmpt/torrents")
 
 
+def _mark_local_torrent_safe(
+    repo_id: str,
+    revision: str,
+    *,
+    repo_type: str = "model",
+    present: bool,
+) -> None:
+    try:
+        from .torrent_state import mark_local_torrent
+
+        mark_local_torrent(repo_id, revision, repo_type=repo_type, present=present)
+    except Exception as exc:
+        logger.warning(
+            f"[{repo_id}] Failed to persist local torrent state "
+            f"(present={present}) for revision {revision[:8]}...: {exc}"
+        )
+
+
+def _mark_tracker_registration_safe(
+    repo_id: str,
+    revision: str,
+    tracker_url: str,
+    *,
+    repo_type: str = "model",
+    registered: bool,
+) -> None:
+    try:
+        from .torrent_state import mark_tracker_registration
+
+        mark_tracker_registration(
+            repo_id,
+            revision,
+            repo_type=repo_type,
+            tracker_url=tracker_url,
+            registered=registered,
+        )
+    except Exception as exc:
+        logger.warning(
+            f"[{repo_id}] Failed to persist tracker registration state "
+            f"(registered={registered}) for revision {revision[:8]}...: {exc}"
+        )
+
+
 def _cache_path(repo_id: str, revision: str, repo_type: str = "model") -> str:
     """Return the filesystem path for a cached .torrent file."""
     repo_digest = hashlib.sha1(repo_id.encode("utf-8")).hexdigest()[:16]
@@ -97,12 +140,12 @@ def load_cached_torrent(repo_id: str, revision: str, *, repo_type: str = "model"
         with open(path, "rb") as f:
             data = f.read()
         if data:
-            try:
-                from .torrent_state import mark_local_torrent
-
-                mark_local_torrent(repo_id, revision, repo_type=repo_type, present=True)
-            except Exception:
-                pass
+            _mark_local_torrent_safe(
+                repo_id,
+                revision,
+                repo_type=repo_type,
+                present=True,
+            )
             logger.info(
                 f"[{repo_id}] Torrent loaded from local cache "
                 f"({len(data)} bytes)"
@@ -131,12 +174,12 @@ def save_torrent_to_cache(
         with open(tmp_path, "wb") as f:
             f.write(torrent_data)
         os.replace(tmp_path, path)  # atomic on POSIX
-        try:
-            from .torrent_state import mark_local_torrent
-
-            mark_local_torrent(repo_id, revision, repo_type=repo_type, present=True)
-        except Exception:
-            pass
+        _mark_local_torrent_safe(
+            repo_id,
+            revision,
+            repo_type=repo_type,
+            present=True,
+        )
         logger.debug(
             f"[{repo_id}] Torrent cached locally ({len(torrent_data)} bytes)"
         )
@@ -163,12 +206,12 @@ def delete_cached_torrent(
         logger.warning(f"[{repo_id}] Failed to delete cached torrent: {exc}")
         return False
 
-    try:
-        from .torrent_state import mark_local_torrent
-
-        mark_local_torrent(repo_id, revision, repo_type=repo_type, present=False)
-    except Exception:
-        pass
+    _mark_local_torrent_safe(
+        repo_id,
+        revision,
+        repo_type=repo_type,
+        present=False,
+    )
     return removed
 
 
@@ -199,18 +242,13 @@ def resolve_torrent_data(
             f"[{repo_id}] Torrent downloaded from tracker, caching locally"
         )
         save_torrent_to_cache(repo_id, revision, torrent_data, repo_type=repo_type)
-        try:
-            from .torrent_state import mark_tracker_registration
-
-            mark_tracker_registration(
-                repo_id,
-                revision,
-                repo_type=repo_type,
-                tracker_url=tracker_client.tracker_url,
-                registered=True,
-            )
-        except Exception:
-            pass
+        _mark_tracker_registration_safe(
+            repo_id,
+            revision,
+            tracker_client.tracker_url,
+            repo_type=repo_type,
+            registered=True,
+        )
         return torrent_data
 
     # Layer 3: not found
@@ -297,17 +335,12 @@ def cleanup_torrent_cache(
 
         matched_entries = state_map.get(parsed, [])
         if len(matched_entries) == 1:
-            try:
-                from .torrent_state import mark_local_torrent
-
-                entry = matched_entries[0]
-                mark_local_torrent(
-                    entry["repo_id"],
-                    entry["revision"],
-                    repo_type=entry.get("repo_type", "model"),
-                    present=False,
-                )
-            except Exception:
-                pass
+            entry = matched_entries[0]
+            _mark_local_torrent_safe(
+                entry["repo_id"],
+                entry["revision"],
+                repo_type=entry.get("repo_type", "model"),
+                present=False,
+            )
 
     return summary

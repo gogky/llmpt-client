@@ -11,6 +11,7 @@ import pytest
 
 from llmpt.daemon import (
     _read_pid,
+    _refresh_tracker_registration_state,
     _seeding_key,
     _write_pid,
     _remove_pid,
@@ -123,6 +124,59 @@ class TestProcessSeedable:
             cache_dir=None,
             local_dir=None,
         )
+
+
+class TestTrackerStateRefresh:
+
+    def test_refresh_tracker_registration_repairs_missing_state(self, monkeypatch, tmp_path):
+        from llmpt.torrent_state import get_torrent_state
+
+        state_file = tmp_path / "torrent_state.json"
+        monkeypatch.setattr("llmpt.torrent_state.TORRENT_STATE_FILE", str(state_file))
+
+        tracker = MagicMock()
+        tracker.tracker_url = "http://tracker.example.com"
+        tracker.get_torrent_info.return_value = {"info_hash": "abc123"}
+
+        state = _refresh_tracker_registration_state(
+            "test/repo",
+            "a" * 40,
+            "model",
+            tracker,
+        )
+
+        assert state["tracker_registered"] is True
+        persisted = get_torrent_state(
+            "test/repo",
+            "a" * 40,
+            tracker_url="http://tracker.example.com",
+        )
+        assert persisted["tracker_registered"] is True
+
+    def test_refresh_tracker_registration_keeps_false_on_tracker_miss(self, monkeypatch, tmp_path):
+        from llmpt.torrent_state import get_torrent_state
+
+        state_file = tmp_path / "torrent_state.json"
+        monkeypatch.setattr("llmpt.torrent_state.TORRENT_STATE_FILE", str(state_file))
+
+        tracker = MagicMock()
+        tracker.tracker_url = "http://tracker.example.com"
+        tracker.get_torrent_info.return_value = None
+
+        state = _refresh_tracker_registration_state(
+            "test/repo",
+            "b" * 40,
+            "model",
+            tracker,
+        )
+
+        assert state["tracker_registered"] is False
+        persisted = get_torrent_state(
+            "test/repo",
+            "b" * 40,
+            tracker_url="http://tracker.example.com",
+        )
+        assert persisted["tracker_registered"] is False
 
 
 def test_seeding_key_normalizes_default_hub_cache():

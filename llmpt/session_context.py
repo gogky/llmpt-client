@@ -27,6 +27,23 @@ logger = logging.getLogger(__name__)
 _TIMEOUT_DELIVERY_GRACE_SECONDS = 1.0
 
 
+def _is_webseed_peer(peer, *, webseed_enabled: bool) -> bool:
+    """Return True when libtorrent reports an HTTP/WebSeed connection.
+
+    ``lt.peer_info.web_seed`` and ``lt.peer_info.http_seed`` describe
+    ``connection_type`` enum values, not bits inside ``peer.flags``. Using
+    them as bitmasks can misclassify ordinary peers whose flags happen to
+    share the same numeric value (for example ``choked == 2``).
+    """
+    if not webseed_enabled:
+        return False
+
+    connection_type = getattr(peer, "connection_type", None)
+    web_seed_type = getattr(lt.peer_info, "web_seed", None)
+    http_seed_type = getattr(lt.peer_info, "http_seed", None)
+    return connection_type in {web_seed_type, http_seed_type}
+
+
 def _format_live_transfer_postfix(stats: Optional[dict]) -> str:
     """Format a lightweight, user-facing transfer status for single-file bars."""
     stats = stats or {}
@@ -504,7 +521,6 @@ class SessionContext:
                 return
 
             peers = handle.get_peer_info()
-            web_seed_flag = getattr(lt.peer_info, 'web_seed', None)
             total_payload_download = 0
             try:
                 total_payload_download = handle.status().total_payload_download
@@ -517,7 +533,7 @@ class SessionContext:
 
             for peer in peers:
                 dl = getattr(peer, 'total_download', 0)
-                if web_seed_flag is not None and (peer.flags & web_seed_flag):
+                if _is_webseed_peer(peer, webseed_enabled=self._has_webseed):
                     webseed_dl += dl
                 else:
                     peer_dl += dl
@@ -567,11 +583,9 @@ class SessionContext:
                 num_seeds = s.num_seeds
                 peers = handle.get_peer_info()
 
-                web_seed_flag = getattr(lt.peer_info, 'web_seed', None)
-
                 for peer in peers:
                     dl = getattr(peer, 'total_download', 0)
-                    if web_seed_flag is not None and (peer.flags & web_seed_flag):
+                    if _is_webseed_peer(peer, webseed_enabled=self._has_webseed):
                         webseed_download += dl
                         num_webseeds += 1
                     else:

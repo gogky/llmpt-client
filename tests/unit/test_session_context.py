@@ -126,6 +126,29 @@ class TestLiveTransferPostfix:
         assert _format_live_transfer_postfix({}) == ""
 
 
+class TestWebseedClassification:
+
+    def test_flags_overlap_does_not_imply_webseed(self, mock_lt):
+        from llmpt.session_context import _is_webseed_peer
+
+        peer = MagicMock()
+        peer.flags = getattr(mock_lt.peer_info, "web_seed", 2)
+        peer.connection_type = 0
+
+        assert _is_webseed_peer(peer, webseed_enabled=True) is False
+
+    def test_connection_type_marks_webseed(self, mock_lt):
+        from llmpt.session_context import _is_webseed_peer
+
+        mock_lt.peer_info.web_seed = 2
+        mock_lt.peer_info.http_seed = 4
+        peer = MagicMock()
+        peer.flags = 0
+        peer.connection_type = 2
+
+        assert _is_webseed_peer(peer, webseed_enabled=True) is True
+
+
 # ─── get_file_progress ───────────────────────────────────────────────────────
 
 class TestGetFileProgress:
@@ -890,12 +913,14 @@ class TestP2PStats:
         """Remaining payload bytes should be attributed to WebSeed after peer reconciliation."""
         ctx = make_ctx()
         ctx._has_webseed = True
-        mock_lt.peer_info.web_seed = 1
+        mock_lt.peer_info.web_seed = 2
+        mock_lt.peer_info.http_seed = 4
         handle = MagicMock()
         handle.is_valid.return_value = True
 
         peer = MagicMock()
         peer.flags = 0
+        peer.connection_type = 0
         peer.total_download = 600
         handle.get_peer_info.return_value = [peer]
         handle.status.return_value = MagicMock(
@@ -914,6 +939,32 @@ class TestP2PStats:
         assert stats['peer_download'] == 600
         assert stats['webseed_download'] == 400
         assert stats['total_payload_download'] == 1000
+
+    def test_flags_overlap_is_not_counted_as_webseed(self, make_ctx, mock_lt):
+        """Numeric overlap with peer.flags must not reclassify a BT peer as WebSeed."""
+        ctx = make_ctx()
+        ctx._has_webseed = True
+        mock_lt.peer_info.web_seed = 2
+        mock_lt.peer_info.http_seed = 4
+        handle = MagicMock()
+        handle.is_valid.return_value = True
+
+        peer = MagicMock()
+        peer.flags = 2  # May overlap with unrelated flags like "choked"
+        peer.connection_type = 0
+        peer.total_download = 4096
+        handle.get_peer_info.return_value = [peer]
+        handle.status.return_value = MagicMock(
+            total_payload_download=4096,
+            num_peers=1,
+            num_seeds=1,
+        )
+        ctx.handle = handle
+
+        stats = ctx.get_p2p_stats()
+
+        assert stats['peer_download'] == 4096
+        assert stats['webseed_download'] == 0
 
     def test_payload_only_does_not_imply_webseed_when_proxy_is_disabled(self, make_ctx, mock_lt):
         """With webseed disabled, unattributed payload bytes should stay unattributed."""

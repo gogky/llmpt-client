@@ -7,12 +7,15 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
+import threading
 import time
 from typing import Optional
 
 logger = logging.getLogger("llmpt.torrent_state")
 
 TORRENT_STATE_FILE = os.path.expanduser("~/.cache/llmpt/torrent_state.json")
+_STATE_LOCK = threading.RLock()
 
 
 def _state_key(repo_id: str, revision: str, repo_type: str = "model") -> str:
@@ -37,10 +40,22 @@ def _load_state() -> dict[str, dict]:
 
 def _save_state(state: dict[str, dict]) -> None:
     os.makedirs(os.path.dirname(TORRENT_STATE_FILE), exist_ok=True)
-    tmp_path = TORRENT_STATE_FILE + ".tmp"
-    with open(tmp_path, "w") as f:
-        json.dump(state, f, indent=2, sort_keys=True)
-    os.replace(tmp_path, TORRENT_STATE_FILE)
+    dir_name = os.path.dirname(TORRENT_STATE_FILE)
+    fd, tmp_path = tempfile.mkstemp(
+        prefix="torrent_state.",
+        suffix=".tmp",
+        dir=dir_name,
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(state, f, indent=2, sort_keys=True)
+        os.replace(tmp_path, TORRENT_STATE_FILE)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _upsert(
@@ -50,29 +65,30 @@ def _upsert(
     *,
     update: dict,
 ) -> None:
-    state = _load_state()
-    key = _state_key(repo_id, revision, repo_type)
-    current = state.get(
-        key,
-        {
-            "repo_type": repo_type,
-            "repo_id": repo_id,
-            "revision": revision,
-            "local_torrent_present": False,
-            "tracker_registered": False,
-            "tracker_url": None,
-            "info_hash": None,
-            "last_registration_error": None,
-            "updated_at": 0.0,
-        },
-    )
-    current.update(update)
-    current["repo_type"] = repo_type
-    current["repo_id"] = repo_id
-    current["revision"] = revision
-    current["updated_at"] = time.time()
-    state[key] = current
-    _save_state(state)
+    with _STATE_LOCK:
+        state = _load_state()
+        key = _state_key(repo_id, revision, repo_type)
+        current = state.get(
+            key,
+            {
+                "repo_type": repo_type,
+                "repo_id": repo_id,
+                "revision": revision,
+                "local_torrent_present": False,
+                "tracker_registered": False,
+                "tracker_url": None,
+                "info_hash": None,
+                "last_registration_error": None,
+                "updated_at": 0.0,
+            },
+        )
+        current.update(update)
+        current["repo_type"] = repo_type
+        current["repo_id"] = repo_id
+        current["revision"] = revision
+        current["updated_at"] = time.time()
+        state[key] = current
+        _save_state(state)
 
 
 def mark_local_torrent(
@@ -117,7 +133,8 @@ def get_torrent_state(
     repo_type: str = "model",
     tracker_url: Optional[str] = None,
 ) -> dict:
-    entry = _load_state().get(_state_key(repo_id, revision, repo_type), {}).copy()
+    with _STATE_LOCK:
+        entry = _load_state().get(_state_key(repo_id, revision, repo_type), {}).copy()
     if not entry:
         entry = {
             "repo_type": repo_type,
@@ -139,4 +156,5 @@ def get_torrent_state(
 
 def load_all_torrent_states() -> list[dict]:
     """Return all persisted torrent state entries."""
-    return list(_load_state().values())
+    with _STATE_LOCK:
+        return list(_load_state().values())

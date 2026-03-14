@@ -14,6 +14,35 @@ logger = logging.getLogger('llmpt.torrent_creator')
 _COMMIT_HASH_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
+def _mark_tracker_registration_safe(
+    repo_id: str,
+    revision: str,
+    *,
+    repo_type: str = "model",
+    tracker_url: str,
+    registered: bool,
+    info_hash: Optional[str] = None,
+    error: Optional[str] = None,
+) -> None:
+    try:
+        from .torrent_state import mark_tracker_registration
+
+        mark_tracker_registration(
+            repo_id,
+            revision,
+            repo_type=repo_type,
+            tracker_url=tracker_url,
+            registered=registered,
+            info_hash=info_hash,
+            error=error,
+        )
+    except Exception as exc:
+        logger.warning(
+            f"[{repo_id}] Failed to persist tracker registration state "
+            f"(registered={registered}) for revision {revision[:8]}...: {exc}"
+        )
+
+
 def _is_padding_relative_path(relative_path: str) -> bool:
     """Return True when a libtorrent relative path refers to a padding file."""
     normalized = relative_path.replace("\\", "/")
@@ -519,19 +548,14 @@ def ensure_registered(
     # Check if tracker already has this torrent
     existing = tracker_client.get_torrent_info(repo_id, revision, repo_type=repo_type)
     if existing:
-        try:
-            from .torrent_state import mark_tracker_registration
-
-            mark_tracker_registration(
-                repo_id,
-                revision,
-                repo_type=repo_type,
-                tracker_url=tracker_client.tracker_url,
-                registered=True,
-                info_hash=existing.get("info_hash"),
-            )
-        except Exception:
-            pass
+        _mark_tracker_registration_safe(
+            repo_id,
+            revision,
+            repo_type=repo_type,
+            tracker_url=tracker_client.tracker_url,
+            registered=True,
+            info_hash=existing.get("info_hash"),
+        )
         logger.debug(f"[{repo_id}] Torrent already registered on tracker")
         return True
 
@@ -563,35 +587,25 @@ def ensure_registered(
     )
 
     if success:
-        try:
-            from .torrent_state import mark_tracker_registration
-
-            mark_tracker_registration(
-                repo_id,
-                revision,
-                repo_type=repo_type,
-                tracker_url=tracker_client.tracker_url,
-                registered=True,
-                info_hash=result["info_hash"],
-            )
-        except Exception:
-            pass
+        _mark_tracker_registration_safe(
+            repo_id,
+            revision,
+            repo_type=repo_type,
+            tracker_url=tracker_client.tracker_url,
+            registered=True,
+            info_hash=result["info_hash"],
+        )
         logger.info(f"[{repo_id}] ✓ Torrent registered on tracker (was missing)")
     else:
-        try:
-            from .torrent_state import mark_tracker_registration
-
-            mark_tracker_registration(
-                repo_id,
-                revision,
-                repo_type=repo_type,
-                tracker_url=tracker_client.tracker_url,
-                registered=False,
-                info_hash=result["info_hash"],
-                error="register_failed",
-            )
-        except Exception:
-            pass
+        _mark_tracker_registration_safe(
+            repo_id,
+            revision,
+            repo_type=repo_type,
+            tracker_url=tracker_client.tracker_url,
+            registered=False,
+            info_hash=result["info_hash"],
+            error="register_failed",
+        )
         logger.warning(f"[{repo_id}] ✗ Failed to register torrent on tracker")
 
     return success
@@ -662,32 +676,22 @@ def create_and_register_torrent(
     success = tracker_client.register_torrent(**register_kwargs)
 
     if success:
-        try:
-            from .torrent_state import mark_tracker_registration
-
-            mark_tracker_registration(
-                repo_id,
-                revision,
-                repo_type=repo_type,
-                tracker_url=tracker_client.tracker_url,
-                registered=True,
-                info_hash=torrent_info["info_hash"],
-            )
-        except Exception:
-            pass
-        return torrent_info
-    try:
-        from .torrent_state import mark_tracker_registration
-
-        mark_tracker_registration(
+        _mark_tracker_registration_safe(
             repo_id,
             revision,
             repo_type=repo_type,
             tracker_url=tracker_client.tracker_url,
-            registered=False,
+            registered=True,
             info_hash=torrent_info["info_hash"],
-            error="register_failed",
         )
-    except Exception:
-        pass
+        return torrent_info
+    _mark_tracker_registration_safe(
+        repo_id,
+        revision,
+        repo_type=repo_type,
+        tracker_url=tracker_client.tracker_url,
+        registered=False,
+        info_hash=torrent_info["info_hash"],
+        error="register_failed",
+    )
     return None

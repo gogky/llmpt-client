@@ -304,6 +304,49 @@ def _ensure_seedable_session(
     )
 
 
+def _refresh_tracker_registration_state(
+    repo_id: str,
+    revision: str,
+    repo_type: str,
+    tracker_client,
+):
+    """Repair missing tracker registration metadata from live tracker state."""
+    from llmpt.torrent_state import get_torrent_state
+    from llmpt.torrent_creator import _mark_tracker_registration_safe
+
+    state = get_torrent_state(
+        repo_id,
+        revision,
+        repo_type=repo_type,
+        tracker_url=tracker_client.tracker_url,
+    )
+    if state.get("tracker_registered"):
+        return state
+
+    existing = tracker_client.get_torrent_info(
+        repo_id,
+        revision,
+        repo_type=repo_type,
+    )
+    if not existing:
+        return state
+
+    _mark_tracker_registration_safe(
+        repo_id,
+        revision,
+        repo_type=repo_type,
+        tracker_url=tracker_client.tracker_url,
+        registered=True,
+        info_hash=existing.get("info_hash"),
+    )
+    return get_torrent_state(
+        repo_id,
+        revision,
+        repo_type=repo_type,
+        tracker_url=tracker_client.tracker_url,
+    )
+
+
 def _matching_seeding_keys(
     seeding_set: Set[SeedSessionKey],
     *,
@@ -750,17 +793,16 @@ def _daemon_main(
                 source_counts = {}
                 source_details = {}
             status = manager.get_all_session_status()
-            from llmpt.torrent_state import get_torrent_state
             from llmpt.status_summary import summarize_status
 
             session_states = {}
             unified_states = {}
             for key, value in status.items():
-                session_states[key] = get_torrent_state(
+                session_states[key] = _refresh_tracker_registration_state(
                     value.get("repo_id"),
                     value.get("revision"),
-                    repo_type=value.get("repo_type", "model"),
-                    tracker_url=tracker_url,
+                    value.get("repo_type", "model"),
+                    tracker_client,
                 )
                 unified_states[key] = summarize_status(
                     value.get("repo_id"),
