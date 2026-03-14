@@ -5,6 +5,8 @@ Tests argument parsing and command dispatching via `main()`, plus
 individual command functions with all external dependencies mocked.
 """
 
+import logging
+
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -42,6 +44,7 @@ class TestMainDispatch:
         assert args.hf_token is None
         assert args.webseed is None
         assert args.verbose is False
+        assert args.debug is False
 
     @patch('llmpt.cli.cmd_download')
     def test_download_with_options(self, mock_cmd):
@@ -99,6 +102,45 @@ class TestMainDispatch:
             main()
         args = mock_cmd.call_args[0][0]
         assert args.verbose is True
+        assert args.debug is False
+
+    @patch('llmpt.cli.cmd_download')
+    def test_debug_flag(self, mock_cmd):
+        with patch('sys.argv', ['llmpt-cli', '--debug', 'download', 'gpt2']):
+            main()
+        args = mock_cmd.call_args[0][0]
+        assert args.verbose is False
+        assert args.debug is True
+
+    @patch('llmpt.cli.cmd_download')
+    @patch('llmpt.cli.logging.basicConfig')
+    def test_default_logging_is_warning(self, mock_basic_config, mock_cmd):
+        with patch('sys.argv', ['llmpt-cli', 'download', 'gpt2']):
+            main()
+        mock_basic_config.assert_called_once_with(
+            level=logging.WARNING,
+            format='[%(name)s] %(levelname)s: %(message)s',
+        )
+
+    @patch('llmpt.cli.cmd_download')
+    @patch('llmpt.cli.logging.basicConfig')
+    def test_verbose_logging_is_info(self, mock_basic_config, mock_cmd):
+        with patch('sys.argv', ['llmpt-cli', '-v', 'download', 'gpt2']):
+            main()
+        mock_basic_config.assert_called_once_with(
+            level=logging.INFO,
+            format='[%(name)s] %(levelname)s: %(message)s',
+        )
+
+    @patch('llmpt.cli.cmd_download')
+    @patch('llmpt.cli.logging.basicConfig')
+    def test_debug_logging_is_debug(self, mock_basic_config, mock_cmd):
+        with patch('sys.argv', ['llmpt-cli', '--debug', 'download', 'gpt2']):
+            main()
+        mock_basic_config.assert_called_once_with(
+            level=logging.DEBUG,
+            format='[%(name)s] %(levelname)s: %(message)s',
+        )
 
     @patch('llmpt.cli.cmd_start')
     def test_start_with_port(self, mock_cmd):
@@ -136,6 +178,7 @@ class TestCmdDownload:
         args.hf_token = "hf_token_123"
         args.webseed = False
         args.verbose = True
+        args.debug = False
 
         with patch('huggingface_hub.snapshot_download', mock_download), \
              patch('llmpt.enable_p2p', mock_enable):
@@ -150,6 +193,37 @@ class TestCmdDownload:
             verbose=True,
         )
         mock_download.assert_called_once_with("gpt2", repo_type=args.repo_type, local_dir=None)
+
+    @patch('llmpt.cli.snapshot_download', create=True)
+    @patch('llmpt.cli.enable_p2p', create=True)
+    def test_debug_download_enables_verbose_summary(self, mock_enable, mock_download):
+        """Debug mode should preserve detailed P2P summary output."""
+        mock_download.return_value = "/path/to/download"
+
+        args = MagicMock()
+        args.tracker = "http://tracker.example.com"
+        args.repo_id = "gpt2"
+        args.local_dir = None
+        args.repo_type = "model"
+        args.timeout = 456
+        args.port = 6888
+        args.hf_token = "hf_token_123"
+        args.webseed = False
+        args.verbose = False
+        args.debug = True
+
+        with patch('huggingface_hub.snapshot_download', mock_download), \
+             patch('llmpt.enable_p2p', mock_enable):
+            cmd_download(args)
+
+        mock_enable.assert_called_once_with(
+            tracker_url="http://tracker.example.com",
+            timeout=456,
+            port=6888,
+            hf_token="hf_token_123",
+            webseed=False,
+            verbose=True,
+        )
 
 
 class TestCmdStart:

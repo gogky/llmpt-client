@@ -42,7 +42,13 @@ Examples:
     parser.add_argument(
         '--verbose', '-v',
         action='store_true',
-        help='Enable verbose logging'
+        help='Show informational logs during downloads'
+    )
+
+    parser.add_argument(
+        '--debug',
+        action='store_true',
+        help='Show debug logs for troubleshooting'
     )
 
     subparsers = parser.add_subparsers(
@@ -191,8 +197,14 @@ Examples:
     args = parser.parse_args()
 
     # Setup logging
+    log_level = logging.WARNING
+    if args.verbose:
+        log_level = logging.INFO
+    if args.debug:
+        log_level = logging.DEBUG
+
     logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
+        level=log_level,
         format='[%(name)s] %(levelname)s: %(message)s'
     )
 
@@ -239,7 +251,7 @@ def cmd_download(args):
         port=args.port,
         hf_token=args.hf_token,
         webseed=args.webseed,
-        verbose=args.verbose,
+        verbose=args.verbose or args.debug,
     )
 
     # NOW import the patched function
