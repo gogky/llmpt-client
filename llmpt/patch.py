@@ -760,13 +760,17 @@ def _fire_deferred_notification(key: tuple[str, str, str, str, str]) -> None:
         )
 
     try:
+        notify_kwargs = {
+            'repo_id': ctx['repo_id'],
+            'revision': ctx['revision'],
+            'repo_type': ctx['repo_type'],
+            'cache_dir': ctx.get('cache_dir'),
+            'local_dir': ctx.get('local_dir'),
+        }
+        if ctx.get('completed_snapshot'):
+            notify_kwargs['completed_snapshot'] = True
         _notify_seed_daemon(
-            repo_id=ctx['repo_id'],
-            revision=ctx['revision'],
-            repo_type=ctx['repo_type'],
-            cache_dir=ctx.get('cache_dir'),
-            local_dir=ctx.get('local_dir'),
-            completed_snapshot=bool(ctx.get('completed_snapshot')),
+            **notify_kwargs,
         )
         logger.debug(
             f"[P2P] Deferred daemon notification sent for "
@@ -995,13 +999,17 @@ def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
                     local_dir=local_dir,
                 )
                 try:
+                    notify_kwargs = {
+                        'repo_id': repo_id,
+                        'revision': revision,
+                        'repo_type': repo_type,
+                        'cache_dir': cache_dir,
+                        'local_dir': local_dir,
+                    }
+                    if completed_snapshot:
+                        notify_kwargs['completed_snapshot'] = True
                     _notify_seed_daemon(
-                        repo_id=repo_id,
-                        revision=revision,
-                        repo_type=repo_type,
-                        cache_dir=cache_dir,
-                        local_dir=local_dir,
-                        completed_snapshot=completed_snapshot,
+                        **notify_kwargs,
                     )
                 except Exception as e:
                     logger.debug(f"[P2P] Immediate daemon notification failed: {e}")
@@ -1067,37 +1075,24 @@ def _patched_http_get(url: str, temp_file, **kwargs):
 
     if repo_id and filename and tracker and revision:
         try:
-            from .p2p_batch import P2PBatchManager
+            from .transfer_coordinator import TransferCoordinator
             logger.info(f"[P2P] Intercepted HTTP request for {repo_id}/{filename} (rev: {revision})")
 
-            manager = P2PBatchManager()
+            coordinator = TransferCoordinator()
+            transfer = coordinator.fulfill_request(
+                repo_id=repo_id,
+                revision=revision,
+                filename=filename,
+                destination=temp_file.name,
+                tracker_client=tracker,
+                repo_type=repo_type,
+                cache_dir=cache_dir,
+                local_dir=local_dir,
+                config=config,
+                tqdm_class=kwargs.get("tqdm_class"),
+            )
 
-            # With WebSeed enabled, download speed >= HTTP (WebSeed is a
-            # guaranteed fallback source inside libtorrent). A fixed timeout
-            # would only cause unnecessary HTTP fallbacks, so we disable it.
-            # Without WebSeed (pure P2P), the timeout acts as a safety net.
-            if config.get('webseed_proxy_port'):
-                effective_timeout = 0  # 0 = no timeout
-            else:
-                effective_timeout = config.get('timeout', 300)
-
-            register_kwargs = {
-                "repo_id": repo_id,
-                "revision": revision,
-                "filename": filename,
-                "temp_file_path": temp_file.name,
-                "tracker_client": tracker,
-                "timeout": effective_timeout,
-                "repo_type": repo_type,
-                "tqdm_class": kwargs.get("tqdm_class"),
-            }
-            if cache_dir is not None:
-                register_kwargs["cache_dir"] = cache_dir
-            if local_dir is not None:
-                register_kwargs["local_dir"] = local_dir
-            success = manager.register_request(**register_kwargs)
-
-            if success:
+            if transfer.success:
                 logger.info(f"[P2P] Successfully delivered {filename} via P2P.")
                 if stats_key is not None:
                     _record_download_stat(stats_key, 'p2p', filename)

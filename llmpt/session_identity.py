@@ -47,6 +47,15 @@ def build_storage_identity(
     )
 
 
+def storage_identity_to_kwargs(storage: StorageIdentity) -> dict[str, str]:
+    """Convert a storage identity back to SessionContext constructor kwargs."""
+    if storage.kind == "local_dir":
+        return {"local_dir": storage.root}
+    if storage.kind == "hub_cache":
+        return {"cache_dir": storage.root}
+    raise ValueError(f"unsupported storage kind: {storage.kind}")
+
+
 def build_logical_torrent_ref(
     repo_type: str,
     repo_id: str,

@@ -18,9 +18,12 @@ if TYPE_CHECKING:
 from .alert_events import snapshot_alert
 from .session_identity import (
     build_logical_torrent_ref,
+    build_storage_identity,
     build_source_session_key,
+    build_torrent_source_ref,
+    storage_identity_to_kwargs,
 )
-from .transfer_types import SourceSessionKey
+from .transfer_types import SourceSessionKey, TargetFileRequest, TransferPlan
 from .utils import lt, LIBTORRENT_AVAILABLE
 
 # Re-export SessionContext for backward compatibility.
@@ -444,35 +447,73 @@ class P2PBatchManager:
         if not LIBTORRENT_AVAILABLE:
             return False
 
-        session_key = build_source_session_key(
-            repo_type,
-            repo_id,
-            revision,
-            cache_dir=cache_dir,
-            local_dir=local_dir,
+        target = TargetFileRequest(
+            logical=build_logical_torrent_ref(repo_type, repo_id, revision),
+            filename=filename,
+            destination=temp_file_path,
+            storage=build_storage_identity(
+                cache_dir=cache_dir,
+                local_dir=local_dir,
+            ),
         )
-        
+        plan = TransferPlan(
+            target=target,
+            source=build_torrent_source_ref(
+                repo_type,
+                repo_id,
+                revision,
+                cache_dir=cache_dir,
+                local_dir=local_dir,
+            ),
+        )
+        return self.execute_transfer(
+            plan,
+            tracker_client=tracker_client,
+            timeout=timeout,
+            tqdm_class=tqdm_class,
+        )
+
+    def execute_transfer(
+        self,
+        plan: TransferPlan,
+        *,
+        tracker_client: 'TrackerClient',
+        timeout: int = 300,
+        tqdm_class: Optional[Any] = None,
+    ) -> bool:
+        """Execute one planned transfer through the matching source session."""
+        if not LIBTORRENT_AVAILABLE:
+            return False
+
+        storage = plan.source.storage or plan.target.storage
+        session_key = build_source_session_key(
+            plan.source.repo_type,
+            plan.source.repo_id,
+            plan.source.revision,
+            **storage_identity_to_kwargs(storage),
+        )
+
         with self._lock:
             if session_key not in self.sessions:
-                from . import get_config
-                config = get_config()
                 self.sessions[session_key] = SessionContext(
-                    repo_id=repo_id,
-                    revision=revision,
-                    repo_type=repo_type,
+                    repo_id=plan.source.repo_id,
+                    revision=plan.source.revision,
+                    repo_type=plan.source.repo_type,
                     tracker_client=tracker_client,
                     lt_session=self.lt_session,
                     session_mode='on_demand',
                     timeout=timeout,
-                    cache_dir=cache_dir,
-                    local_dir=local_dir,
+                    **storage_identity_to_kwargs(storage),
                 )
             session_ctx = self.sessions[session_key]
 
         self._ensure_alert_pump_running()
-        
-        # Register the file with the session context and wait for it
-        return session_ctx.download_file(filename, temp_file_path, tqdm_class=tqdm_class)
+
+        return session_ctx.download_file(
+            plan.target.filename,
+            plan.target.destination,
+            tqdm_class=tqdm_class,
+        )
 
     def release_on_demand_session(
         self,

@@ -47,6 +47,14 @@ def test_build_source_session_key_exposes_legacy_shape():
     )
 
 
+def test_storage_identity_to_kwargs_round_trips_local_dir():
+    from llmpt.session_identity import build_storage_identity, storage_identity_to_kwargs
+
+    storage = build_storage_identity(local_dir="/tmp/local")
+
+    assert storage_identity_to_kwargs(storage) == {"local_dir": "/tmp/local"}
+
+
 def test_build_fastresume_filename_matches_storage_scope():
     from llmpt.session_identity import build_fastresume_filename
     from llmpt.utils import get_hf_hub_cache
