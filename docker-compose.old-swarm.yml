@@ -1,0 +1,70 @@
+networks:
+  llmpt_old_swarm_test:
+    driver: bridge
+
+services:
+  old_swarm_seeder:
+    build:
+      context: .
+      dockerfile: tests/e2e/Dockerfile.test
+    container_name: llmpt-old-swarm-seeder
+    volumes:
+      - .:/app
+    environment:
+      - HF_HOME=/tmp/hf_old_swarm_seed
+      - TRACKER_URL=http://118.195.159.242
+      - REPO_ID=fka/prompts.chat
+      - REPO_TYPE=dataset
+      - OLD_REV=7b8336efefee6e5f8fa3accf3b142151ff8fee1e
+      - NEW_REV=e88423787cb39928434f2ef4ea678509dd7b4426
+      - TARGET_FILE=README.md
+      - HF_P2P_PORT=6881
+      - OLD_SWARM_SIGNAL_FILE=/app/.old_swarm_e2e_done
+    networks:
+      - llmpt_old_swarm_test
+    command: ["python", "tests/e2e/run_old_swarm_seeder.py"]
+
+  new_revision_publisher:
+    build:
+      context: .
+      dockerfile: tests/e2e/Dockerfile.test
+    container_name: llmpt-old-swarm-publisher
+    depends_on:
+      - old_swarm_seeder
+    volumes:
+      - .:/app
+    environment:
+      - HF_HOME=/tmp/hf_old_swarm_pub
+      - TRACKER_URL=http://118.195.159.242
+      - REPO_ID=fka/prompts.chat
+      - REPO_TYPE=dataset
+      - OLD_REV=7b8336efefee6e5f8fa3accf3b142151ff8fee1e
+      - NEW_REV=e88423787cb39928434f2ef4ea678509dd7b4426
+      - TARGET_FILE=README.md
+      - OLD_SWARM_SIGNAL_FILE=/app/.old_swarm_e2e_done
+    networks:
+      - llmpt_old_swarm_test
+    command: ["python", "tests/e2e/run_old_swarm_publisher.py"]
+
+  downloader:
+    build:
+      context: .
+      dockerfile: tests/e2e/Dockerfile.test
+    container_name: llmpt-old-swarm-downloader
+    depends_on:
+      - old_swarm_seeder
+      - new_revision_publisher
+    volumes:
+      - .:/app
+    environment:
+      - HF_HOME=/tmp/hf_old_swarm_down
+      - TRACKER_URL=http://118.195.159.242
+      - TEST_SEEDER_PEER=llmpt-old-swarm-seeder:6881
+      - HF_P2P_WEBSEED=0
+      - OLD_SWARM_SIGNAL_FILE=/app/.old_swarm_e2e_done
+    networks:
+      - llmpt_old_swarm_test
+    command: >
+      python -m pytest
+      tests/e2e/test_old_swarm.py::test_old_swarm_single_file_without_webseed
+      --run-integration -v -s --log-cli-level=INFO
