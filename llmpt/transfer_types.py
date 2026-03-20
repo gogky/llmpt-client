@@ -1,12 +1,12 @@
 """
 Transfer-related value objects.
 
-These lightweight dataclasses keep target identity, source identity, and
-session identity explicit so future routing changes do not have to lean on
-ad-hoc tuples and loosely-typed dictionaries.
+These lightweight dataclasses keep target identity, source identity, source
+file selection, and session identity explicit so future routing changes do not
+have to lean on ad-hoc tuples and loosely-typed dictionaries.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 
@@ -119,11 +119,44 @@ class TargetFileRequest:
 
 
 @dataclass(frozen=True)
+class SourceFileCandidate:
+    """One candidate source file that can fulfill a target file request."""
+
+    source: TorrentSourceRef
+    filename: str
+    file_root: Optional[str] = None
+    size: Optional[int] = None
+    seeders: Optional[int] = None
+    score: float = 0.0
+
+    @property
+    def repo_type(self) -> str:
+        return self.source.repo_type
+
+    @property
+    def repo_id(self) -> str:
+        return self.source.repo_id
+
+    @property
+    def revision(self) -> str:
+        return self.source.revision
+
+
+@dataclass(frozen=True)
 class TransferPlan:
     """Plan describing how one target file request should be fulfilled."""
 
     target: TargetFileRequest
-    source: TorrentSourceRef
+    source_file: SourceFileCandidate
+    candidates: tuple[SourceFileCandidate, ...] = field(default_factory=tuple)
+
+    @property
+    def source(self) -> TorrentSourceRef:
+        return self.source_file.source
+
+    @property
+    def source_filename(self) -> str:
+        return self.source_file.filename
 
 
 @dataclass(frozen=True)

@@ -23,7 +23,7 @@ from .session_identity import (
     build_torrent_source_ref,
     storage_identity_to_kwargs,
 )
-from .transfer_types import SourceSessionKey, TargetFileRequest, TransferPlan
+from .transfer_types import SourceFileCandidate, SourceSessionKey, TargetFileRequest, TransferPlan
 from .utils import lt, LIBTORRENT_AVAILABLE
 
 # Re-export SessionContext for backward compatibility.
@@ -458,12 +458,15 @@ class P2PBatchManager:
         )
         plan = TransferPlan(
             target=target,
-            source=build_torrent_source_ref(
-                repo_type,
-                repo_id,
-                revision,
-                cache_dir=cache_dir,
-                local_dir=local_dir,
+            source_file=SourceFileCandidate(
+                source=build_torrent_source_ref(
+                    repo_type,
+                    repo_id,
+                    revision,
+                    cache_dir=cache_dir,
+                    local_dir=local_dir,
+                ),
+                filename=filename,
             ),
         )
         return self.execute_transfer(
@@ -510,7 +513,7 @@ class P2PBatchManager:
         self._ensure_alert_pump_running()
 
         return session_ctx.download_file(
-            plan.target.filename,
+            plan.source_filename,
             plan.target.destination,
             tqdm_class=tqdm_class,
         )

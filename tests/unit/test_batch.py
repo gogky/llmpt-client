@@ -93,6 +93,51 @@ def test_register_request_success(mock_lt_all_modules):
         mock_pump.assert_called_once()
 
 
+def test_execute_transfer_uses_source_filename_when_it_differs_from_target(mock_lt_all_modules):
+    from llmpt.p2p_batch import P2PBatchManager
+    from llmpt.p2p_batch import SessionContext
+    from llmpt.transfer_types import (
+        LogicalTorrentRef,
+        SourceFileCandidate,
+        StorageIdentity,
+        TargetFileRequest,
+        TorrentSourceRef,
+        TransferPlan,
+    )
+
+    tracker = MagicMock()
+    manager = P2PBatchManager()
+
+    target = TargetFileRequest(
+        logical=LogicalTorrentRef(repo_type="model", repo_id="demo", revision="main"),
+        filename="new/model.bin",
+        destination="/tmp/fake",
+        storage=StorageIdentity(kind="hub_cache", root="/tmp/cache"),
+    )
+    plan = TransferPlan(
+        target=target,
+        source_file=SourceFileCandidate(
+            source=TorrentSourceRef(
+                logical=LogicalTorrentRef(repo_type="model", repo_id="demo", revision="oldrev"),
+                storage=target.storage,
+            ),
+            filename="old/model.bin",
+        ),
+    )
+
+    with patch.object(SessionContext, 'download_file', return_value=True) as mock_download, \
+         patch.object(manager, '_ensure_alert_pump_running') as mock_pump:
+        success = manager.execute_transfer(
+            plan,
+            tracker_client=tracker,
+        )
+
+    assert success is True
+    mock_download.assert_called_once_with("old/model.bin", "/tmp/fake", tqdm_class=None)
+    assert _session_key(revision="oldrev", cache_dir="/tmp/cache") in manager.sessions
+    mock_pump.assert_called_once()
+
+
 def test_session_context_init_torrent(mock_lt_all_modules):
     """Test internal initialization of libtorrent session inside SessionContext.
 

@@ -44,6 +44,7 @@ def test_source_session_key_legacy_tuple_shape():
 def test_transfer_plan_keeps_target_and_source_explicit():
     from llmpt.transfer_types import (
         LogicalTorrentRef,
+        SourceFileCandidate,
         StorageIdentity,
         TargetFileRequest,
         TorrentSourceRef,
@@ -62,9 +63,13 @@ def test_transfer_plan_keeps_target_and_source_explicit():
         destination="/tmp/model.bin",
         storage=storage,
     )
-    source = TorrentSourceRef(logical=logical, storage=storage)
+    source = SourceFileCandidate(
+        source=TorrentSourceRef(logical=logical, storage=storage),
+        filename="model.bin",
+    )
 
-    plan = TransferPlan(target=target, source=source)
+    plan = TransferPlan(target=target, source_file=source)
 
     assert plan.target.filename == "model.bin"
     assert plan.source.repo_id == "demo"
+    assert plan.source_filename == "model.bin"
