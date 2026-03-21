@@ -4,8 +4,10 @@ Tracker client for communicating with the llmpt tracker server.
 
 import logging
 import requests
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from urllib.parse import urljoin
+
+from .transfer_types import LogicalTorrentRef, SourceFileCandidate, TorrentSourceRef
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +81,122 @@ class TrackerClient:
         except requests.RequestException as e:
             logger.warning(f"Failed to query tracker: {e}")
             return None
+
+    def resolve_file_sources(
+        self,
+        repo_id: str,
+        revision: str,
+        filename: str,
+        *,
+        repo_type: str = 'model'
+    ) -> List[SourceFileCandidate]:
+        """Resolve candidate source files for one logical target file.
+
+        The server-side API is expected to return file-level source candidates
+        keyed by the target file's ``file_root``. Older trackers may not expose
+        this endpoint yet; in that case we simply return an empty list and let
+        the caller fall back to the target torrent itself.
+        """
+        try:
+            url = urljoin(self.tracker_url, '/api/v1/file-sources')
+            params = {
+                'repo_id': repo_id,
+                'revision': revision,
+                'path': filename,
+                'repo_type': repo_type,
+            }
+
+            logger.debug(f"Resolving file sources: {url} with params {params}")
+
+            response = self.session.get(
+                url,
+                params=params,
+                timeout=self.timeout,
+            )
+
+            if response.status_code == 404:
+                logger.debug(
+                    "Tracker does not expose file sources for "
+                    f"{repo_id}/{filename}@{revision}"
+                )
+                return []
+
+            response.raise_for_status()
+            payload = response.json()
+            items = self._extract_candidate_items(payload)
+            candidates = []
+            for item in items:
+                candidate = self._parse_source_file_candidate(item)
+                if candidate is not None:
+                    candidates.append(candidate)
+            return candidates
+        except requests.RequestException as e:
+            logger.warning(f"Failed to resolve file sources: {e}")
+            return []
+
+    def _extract_candidate_items(self, payload: Any) -> list[dict[str, Any]]:
+        """Extract candidate rows from either flat or wrapped tracker payloads."""
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+
+        if not isinstance(payload, dict):
+            return []
+
+        data = payload.get('data', payload)
+        if isinstance(data, dict):
+            candidates = data.get('candidates', [])
+        elif isinstance(data, list):
+            candidates = data
+        else:
+            candidates = []
+
+        return [item for item in candidates if isinstance(item, dict)]
+
+    def _parse_source_file_candidate(
+        self,
+        item: dict[str, Any],
+    ) -> Optional[SourceFileCandidate]:
+        """Best-effort parse of one file-source candidate returned by the tracker."""
+        repo_id = item.get('repo_id') or item.get('source_repo_id')
+        revision = item.get('revision') or item.get('source_revision')
+        repo_type = item.get('repo_type') or item.get('source_repo_type') or 'model'
+        filename = item.get('path') or item.get('filename') or item.get('source_path')
+        if not (repo_id and revision and filename):
+            return None
+
+        size = item.get('size')
+        seeders = item.get('seeders')
+        score = item.get('score', 0.0)
+
+        try:
+            size = int(size) if size is not None else None
+        except (TypeError, ValueError):
+            size = None
+
+        try:
+            seeders = int(seeders) if seeders is not None else None
+        except (TypeError, ValueError):
+            seeders = None
+
+        try:
+            score = float(score or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+
+        return SourceFileCandidate(
+            source=TorrentSourceRef(
+                logical=LogicalTorrentRef(
+                    repo_type=repo_type,
+                    repo_id=repo_id,
+                    revision=revision,
+                ),
+            ),
+            filename=filename,
+            file_root=item.get('file_root'),
+            size=size,
+            seeders=seeders,
+            score=score,
+        )
 
     def download_torrent(
         self,

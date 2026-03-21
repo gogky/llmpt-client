@@ -154,6 +154,79 @@ def test_download_torrent_not_found(tracker_client):
 
 
 @responses.activate
+def test_resolve_file_sources_success(tracker_client):
+    responses.add(
+        responses.GET,
+        "http://tracker.example.com/api/v1/file-sources",
+        json={
+            "data": {
+                "target": {
+                    "repo_id": "demo/repo",
+                    "revision": "main",
+                    "path": "model.bin",
+                },
+                "candidates": [
+                    {
+                        "repo_id": "demo/repo",
+                        "revision": "main",
+                        "repo_type": "model",
+                        "path": "model.bin",
+                        "file_root": "abc123",
+                        "size": 100,
+                        "seeders": 0,
+                        "score": 1.5,
+                    },
+                    {
+                        "source_repo_id": "demo/repo",
+                        "source_revision": "oldrev",
+                        "source_repo_type": "model",
+                        "source_path": "model.bin",
+                        "file_root": "abc123",
+                        "size": "100",
+                        "seeders": "4",
+                        "score": "2.5",
+                    },
+                ],
+            }
+        },
+        status=200,
+    )
+
+    result = tracker_client.resolve_file_sources(
+        "demo/repo",
+        "main",
+        "model.bin",
+    )
+
+    assert len(result) == 2
+    assert result[0].repo_id == "demo/repo"
+    assert result[0].revision == "main"
+    assert result[0].seeders == 0
+    assert result[1].revision == "oldrev"
+    assert result[1].filename == "model.bin"
+    assert result[1].size == 100
+    assert result[1].seeders == 4
+    assert result[1].score == 2.5
+
+
+@responses.activate
+def test_resolve_file_sources_missing_endpoint_returns_empty(tracker_client):
+    responses.add(
+        responses.GET,
+        "http://tracker.example.com/api/v1/file-sources",
+        status=404,
+    )
+
+    result = tracker_client.resolve_file_sources(
+        "demo/repo",
+        "main",
+        "model.bin",
+    )
+
+    assert result == []
+
+
+@responses.activate
 def test_register_torrent_success(tracker_client):
     """Test successful torrent registration."""
     responses.add(

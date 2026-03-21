@@ -4,15 +4,25 @@ Monkey Patch implementation for huggingface_hub.
 This module patches huggingface_hub's download functions to enable P2P acceleration.
 """
 
-import sys
 import atexit
 import time
 import threading
 import logging
-import os
 from typing import Optional, Any
 
 import httpx
+
+from .patch_context import (
+    apply_thread_local_context,
+    capture_thread_local_context,
+    extract_context_from_stack as _extract_context_from_stack,
+    extract_snapshot_context_from_stack as _extract_snapshot_context_from_stack,
+    matches_snapshot_download_context as _matches_snapshot_download_context,
+    read_thread_local_context,
+    restore_thread_local_context,
+)
+from . import patch_runtime as _patch_runtime
+from . import patch_ui as _patch_ui
 
 logger = logging.getLogger('llmpt.patch')
 
@@ -48,12 +58,6 @@ _DEFAULT_METADATA_ERROR_RETRIES = 2
 _DEFAULT_METADATA_RETRY_DELAY = 1.0
 
 
-def _normalize_storage_root(path: Optional[str]) -> Optional[str]:
-    if not path:
-        return None
-    return os.path.realpath(os.path.abspath(os.path.expanduser(path)))
-
-
 def _snapshot_stats_key(
     repo_id: str,
     revision: str,
@@ -62,22 +66,13 @@ def _snapshot_stats_key(
     local_dir: Optional[str] = None,
 ) -> tuple[str, str, str, str, str]:
     """Build the canonical key for one snapshot-level download stats bucket."""
-    from .utils import get_hf_hub_cache
-
-    if local_dir:
-        storage_kind = "local_dir"
-        storage_root = _normalize_storage_root(local_dir)
-    else:
-        storage_kind = "hub_cache"
-        storage_root = _normalize_storage_root(cache_dir) or get_hf_hub_cache()
-    return (repo_type or "model", repo_id, revision or "main", storage_kind, storage_root)
-
-
-def _empty_download_stats() -> dict[str, set[str]]:
-    return {
-        'p2p': set(),
-        'http': set(),
-    }
+    return _patch_runtime.snapshot_stats_key(
+        repo_id,
+        revision,
+        repo_type,
+        cache_dir=cache_dir,
+        local_dir=local_dir,
+    )
 
 
 def _record_download_stat(
@@ -85,9 +80,13 @@ def _record_download_stat(
     stat_kind: str,
     filename: str,
 ) -> None:
-    with _stats_lock:
-        bucket = _download_stats.setdefault(stats_key, _empty_download_stats())
-        bucket[stat_kind].add(filename)
+    _patch_runtime.record_download_stat(
+        stats_lock=_stats_lock,
+        download_stats=_download_stats,
+        stats_key=stats_key,
+        stat_kind=stat_kind,
+        filename=filename,
+    )
 
 
 def _deferred_key(
@@ -97,21 +96,14 @@ def _deferred_key(
     cache_dir: Optional[str] = None,
     local_dir: Optional[str] = None,
 ) -> tuple[str, str, str, str, str]:
-    """Build the dedupe key for deferred daemon notifications.
-
-    The content identity is ``(repo_type, repo_id, revision)``.  Storage
-    identity is tracked separately so simultaneous downloads of the same repo
-    into different roots do not stomp each other.
-    """
-    from .utils import get_hf_hub_cache
-
-    storage_kind = "local_dir" if local_dir else "hub_cache"
-    storage_root = (
-        _normalize_storage_root(local_dir)
-        if local_dir
-        else (_normalize_storage_root(cache_dir) or get_hf_hub_cache())
+    """Build the dedupe key for deferred daemon notifications."""
+    return _patch_runtime.deferred_key(
+        repo_id,
+        revision,
+        repo_type,
+        cache_dir=cache_dir,
+        local_dir=local_dir,
     )
-    return (repo_type or "model", repo_id, revision or "main", storage_kind, storage_root)
 
 
 def _is_wrapper_active(repo_id: str) -> bool:
@@ -223,49 +215,16 @@ def _flush_deferred_notifications():
     verbose summary and daemon notifications fire even if the process
     exits within the 2-second debounce window.
     """
-    with _deferred_lock:
-        contexts = list(_deferred_contexts.values())
-        for timer in _deferred_timers.values():
-            timer.cancel()
-        _deferred_timers.clear()
-        _deferred_contexts.clear()
-
-    for ctx in contexts:
-        # Print verbose summary if enabled
-        if _config.get('verbose'):
-            elapsed = time.time() - ctx.get('start_time', time.time())
-            _print_p2p_summary(
-                stats=get_download_stats(
-                    repo_id=ctx['repo_id'],
-                    revision=ctx['revision'],
-                    repo_type=ctx['repo_type'],
-                    cache_dir=ctx.get('cache_dir'),
-                    local_dir=ctx.get('local_dir'),
-                ),
-                elapsed=elapsed,
-                repo_id=ctx['repo_id'],
-                resolved_revision=ctx['revision'],
-                repo_type=ctx['repo_type'],
-            )
-
-        try:
-            _notify_seed_daemon(
-                repo_id=ctx['repo_id'],
-                revision=ctx['revision'],
-                repo_type=ctx['repo_type'],
-                cache_dir=ctx.get('cache_dir'),
-                local_dir=ctx.get('local_dir'),
-            )
-        except Exception:
-            pass
-        finally:
-            reset_download_stats(
-                repo_id=ctx['repo_id'],
-                revision=ctx['revision'],
-                repo_type=ctx['repo_type'],
-                cache_dir=ctx.get('cache_dir'),
-                local_dir=ctx.get('local_dir'),
-            )
+    _patch_runtime.flush_deferred_notifications(
+        deferred_lock=_deferred_lock,
+        deferred_contexts=_deferred_contexts,
+        deferred_timers=_deferred_timers,
+        config=_config,
+        get_download_stats_fn=get_download_stats,
+        reset_download_stats_fn=reset_download_stats,
+        print_p2p_summary_fn=_print_p2p_summary,
+        notify_seed_daemon_fn=_notify_seed_daemon,
+    )
 
 atexit.register(_flush_deferred_notifications)
 
@@ -284,27 +243,17 @@ def get_download_stats(
     Returns:
         Dictionary with 'p2p' and 'http' sets of filenames.
     """
-    if stats_key is None and repo_id is not None and revision is not None:
-        stats_key = _snapshot_stats_key(
-            repo_id,
-            revision,
-            repo_type,
-            cache_dir=cache_dir,
-            local_dir=local_dir,
-        )
-    with _stats_lock:
-        if stats_key is not None:
-            bucket = _download_stats.get(stats_key, _empty_download_stats())
-            return {
-                'p2p': set(bucket['p2p']),
-                'http': set(bucket['http']),
-            }
-
-        merged = _empty_download_stats()
-        for bucket in _download_stats.values():
-            merged['p2p'].update(bucket['p2p'])
-            merged['http'].update(bucket['http'])
-        return merged
+    return _patch_runtime.get_download_stats(
+        stats_lock=_stats_lock,
+        download_stats=_download_stats,
+        snapshot_key_builder=_snapshot_stats_key,
+        stats_key=stats_key,
+        repo_id=repo_id,
+        revision=revision,
+        repo_type=repo_type,
+        cache_dir=cache_dir,
+        local_dir=local_dir,
+    )
 
 
 def reset_download_stats(
@@ -317,19 +266,17 @@ def reset_download_stats(
     local_dir: Optional[str] = None,
 ) -> None:
     """Clear all download statistics."""
-    if stats_key is None and repo_id is not None and revision is not None:
-        stats_key = _snapshot_stats_key(
-            repo_id,
-            revision,
-            repo_type,
-            cache_dir=cache_dir,
-            local_dir=local_dir,
-        )
-    with _stats_lock:
-        if stats_key is None:
-            _download_stats.clear()
-        else:
-            _download_stats.pop(stats_key, None)
+    _patch_runtime.reset_download_stats(
+        stats_lock=_stats_lock,
+        download_stats=_download_stats,
+        snapshot_key_builder=_snapshot_stats_key,
+        stats_key=stats_key,
+        repo_id=repo_id,
+        revision=revision,
+        repo_type=repo_type,
+        cache_dir=cache_dir,
+        local_dir=local_dir,
+    )
 
 
 def _format_snapshot_p2p_postfix(
@@ -337,91 +284,10 @@ def _format_snapshot_p2p_postfix(
     download_stats: Optional[dict] = None,
 ) -> str:
     """Format a short, user-facing snapshot status for the shared progress bar."""
-    stats = stats or {}
-    download_stats = download_stats or {}
-
-    active_peers = int(stats.get('active_p2p_peers', 0) or 0)
-    peer_bytes = int(stats.get('peer_download', 0) or 0)
-    webseed_bytes = int(stats.get('webseed_download', 0) or 0)
-    http_seen = bool(download_stats.get('http'))
-
-    if active_peers > 0 or peer_bytes > 0:
-        return f"peers={active_peers}"
-    if http_seen:
-        return "http"
-    if webseed_bytes > 0:
-        return "webseed"
-    return ""
-
-
-class _SnapshotProgressReporter:
-    """Periodically updates snapshot_download's shared progress bar postfix."""
-
-    def __init__(
-        self,
-        progress_bar: Any,
-        repo_id: str,
-        revision: str,
-        repo_type: str,
-        *,
-        cache_dir: Optional[str] = None,
-        local_dir: Optional[str] = None,
-    ) -> None:
-        self.progress_bar = progress_bar
-        self.repo_id = repo_id
-        self.revision = revision
-        self.repo_type = repo_type
-        self.cache_dir = cache_dir
-        self.local_dir = local_dir
-        self._stop_event = threading.Event()
-        self._thread: Optional[threading.Thread] = None
-
-    def start(self) -> None:
-        if self._thread is not None or not self.repo_id:
-            return
-        self._thread = threading.Thread(
-            target=self._run,
-            name="llmpt-snapshot-progress",
-            daemon=True,
-        )
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stop_event.set()
-        thread = self._thread
-        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
-            thread.join(timeout=1.0)
-        self._thread = None
-
-    def _run(self) -> None:
-        while not self._stop_event.is_set():
-            self._update_once()
-            self._stop_event.wait(_SNAPSHOT_PROGRESS_UPDATE_INTERVAL)
-        self._update_once()
-
-    def _update_once(self) -> None:
-        try:
-            from .p2p_batch import P2PBatchManager
-
-            stats = P2PBatchManager().get_repo_p2p_stats(
-                self.repo_id,
-                self.revision,
-                self.repo_type,
-            )
-            postfix = _format_snapshot_p2p_postfix(
-                stats,
-                download_stats=get_download_stats(
-                    repo_id=self.repo_id,
-                    revision=self.revision,
-                    repo_type=self.repo_type,
-                    cache_dir=self.cache_dir,
-                    local_dir=self.local_dir,
-                ),
-            )
-            if hasattr(self.progress_bar, 'set_postfix_str'):
-                self.progress_bar.set_postfix_str(postfix, refresh=False)
-        except Exception as e:
-            logger.debug(f"[P2P] Live snapshot progress update failed: {e}")
+    return _patch_ui.format_snapshot_p2p_postfix(
+        stats,
+        download_stats=download_stats,
+    )
 
 
 def _wrap_snapshot_tqdm_class(
@@ -433,278 +299,30 @@ def _wrap_snapshot_tqdm_class(
     local_dir: Optional[str] = None,
 ):
     """Wrap a tqdm class so snapshot_download's shared bar shows live P2P stats."""
-
-    class SnapshotTqdmProxy:
-        _lock = getattr(base_tqdm_class, '_lock', None)
-
-        @classmethod
-        def get_lock(cls):
-            return getattr(cls, '_lock', None) or base_tqdm_class.get_lock()
-
-        @classmethod
-        def set_lock(cls, lock):
-            cls._lock = lock
-            return base_tqdm_class.set_lock(lock)
-
-        def __init__(self, *args, **kwargs):
-            object.__setattr__(self, '_llmpt_inner', base_tqdm_class(*args, **kwargs))
-            object.__setattr__(self, '_llmpt_reporter', None)
-
-            is_snapshot_bar = kwargs.get('name') == _SNAPSHOT_PROGRESS_BAR_NAME
-            is_disabled = getattr(self._llmpt_inner, 'disable', False)
-            if is_snapshot_bar and not is_disabled:
-                reporter = _SnapshotProgressReporter(
-                    progress_bar=self._llmpt_inner,
-                    repo_id=repo_id,
-                    revision=revision,
-                    repo_type=repo_type,
-                    cache_dir=cache_dir,
-                    local_dir=local_dir,
-                )
-                object.__setattr__(self, '_llmpt_reporter', reporter)
-                reporter.start()
-
-        def __getattr__(self, name):
-            return getattr(self._llmpt_inner, name)
-
-        def __setattr__(self, name, value):
-            if name.startswith('_llmpt_'):
-                object.__setattr__(self, name, value)
-            else:
-                setattr(self._llmpt_inner, name, value)
-
-        def __enter__(self):
-            entered = self._llmpt_inner.__enter__()
-            return self if entered is self._llmpt_inner else entered
-
-        def __exit__(self, exc_type, exc_value, traceback):
-            return self._llmpt_inner.__exit__(exc_type, exc_value, traceback)
-
-        def __iter__(self):
-            return iter(self._llmpt_inner)
-
-        def close(self):
-            reporter = self._llmpt_reporter
-            if reporter is not None:
-                reporter.stop()
-                object.__setattr__(self, '_llmpt_reporter', None)
-            close_fn = getattr(self._llmpt_inner, 'close', None)
-            if close_fn is not None:
-                return close_fn()
-
-    SnapshotTqdmProxy.__name__ = "SnapshotTqdmProxy"
-    return SnapshotTqdmProxy
+    return _patch_ui.wrap_snapshot_tqdm_class(
+        base_tqdm_class,
+        repo_id=repo_id,
+        revision=revision,
+        repo_type=repo_type,
+        cache_dir=cache_dir,
+        local_dir=local_dir,
+        progress_bar_name=_SNAPSHOT_PROGRESS_BAR_NAME,
+        get_download_stats_fn=get_download_stats,
+        logger=logger,
+        update_interval=_SNAPSHOT_PROGRESS_UPDATE_INTERVAL,
+    )
 
 
 def _wrap_snapshot_tqdm_class_auto(base_tqdm_class: Any):
     """Wrap hf_tqdm so old snapshot_download references still get live P2P stats."""
-
-    class SnapshotAutoTqdmProxy:
-        _lock = getattr(base_tqdm_class, '_lock', None)
-
-        @classmethod
-        def get_lock(cls):
-            return getattr(cls, '_lock', None) or base_tqdm_class.get_lock()
-
-        @classmethod
-        def set_lock(cls, lock):
-            cls._lock = lock
-            return base_tqdm_class.set_lock(lock)
-
-        def __init__(self, *args, **kwargs):
-            object.__setattr__(self, '_llmpt_inner', base_tqdm_class(*args, **kwargs))
-            object.__setattr__(self, '_llmpt_reporter', None)
-
-            is_snapshot_bar = kwargs.get('name') == _SNAPSHOT_PROGRESS_BAR_NAME
-            is_disabled = getattr(self._llmpt_inner, 'disable', False)
-            if is_snapshot_bar and not is_disabled:
-                ctx = _extract_snapshot_context_from_stack()
-                if ctx is not None:
-                    reporter = _SnapshotProgressReporter(
-                        progress_bar=self._llmpt_inner,
-                        repo_id=ctx['repo_id'],
-                        revision=ctx['revision'],
-                        repo_type=ctx['repo_type'],
-                        cache_dir=ctx.get('cache_dir'),
-                        local_dir=ctx.get('local_dir'),
-                    )
-                    object.__setattr__(self, '_llmpt_reporter', reporter)
-                    reporter.start()
-
-        def __getattr__(self, name):
-            return getattr(self._llmpt_inner, name)
-
-        def __setattr__(self, name, value):
-            if name.startswith('_llmpt_'):
-                object.__setattr__(self, name, value)
-            else:
-                setattr(self._llmpt_inner, name, value)
-
-        def __enter__(self):
-            entered = self._llmpt_inner.__enter__()
-            return self if entered is self._llmpt_inner else entered
-
-        def __exit__(self, exc_type, exc_value, traceback):
-            return self._llmpt_inner.__exit__(exc_type, exc_value, traceback)
-
-        def __iter__(self):
-            return iter(self._llmpt_inner)
-
-        def close(self):
-            reporter = self._llmpt_reporter
-            if reporter is not None:
-                reporter.stop()
-                object.__setattr__(self, '_llmpt_reporter', None)
-            close_fn = getattr(self._llmpt_inner, 'close', None)
-            if close_fn is not None:
-                return close_fn()
-
-    SnapshotAutoTqdmProxy.__name__ = "SnapshotAutoTqdmProxy"
-    return SnapshotAutoTqdmProxy
-
-
-def _extract_context_from_stack() -> Optional[dict]:
-    """Walk the call stack to extract download context from hf_hub_download.
-
-    This is a fallback for when the user imports hf_hub_download BEFORE
-    enable_p2p(), bypassing _patched_hf_hub_download's context injection.
-
-    By the time http_get is called, the original hf_hub_download is still
-    on the stack with all the context we need (repo_id, filename,
-    commit_hash, etc.) as local variables.
-
-    Returns:
-        dict with repo_id, filename, revision, repo_type if found,
-        or None if the frame cannot be located.
-    """
-    try:
-        frame = sys._getframe(1)  # start from caller
-        result = {"from_snapshot_download": False}
-        for _ in range(60):       # walk up far enough for HF helper stacks
-            frame = frame.f_back
-            if frame is None:
-                break
-            name = frame.f_code.co_name
-            if name in ('snapshot_download', '_inner_hf_hub_download'):
-                result['from_snapshot_download'] = True
-            if name in (
-                'hf_hub_download',
-                'snapshot_download',
-                '_inner_hf_hub_download',
-                '_hf_hub_download_to_cache_dir',
-                '_hf_hub_download_to_local_dir'
-            ):
-                loc = frame.f_locals
-                
-                # Extract whatever we can find from this frame
-                if 'repo_id' in loc and 'repo_id' not in result:
-                    result['repo_id'] = loc.get('repo_id')
-                if 'filename' in loc and 'filename' not in result:
-                    result['filename'] = loc.get('filename')
-                if 'repo_type' in loc and 'repo_type' not in result:
-                    result['repo_type'] = loc.get('repo_type') or 'model'
-                
-                # Revisions and commit hashes
-                rev = loc.get('commit_hash') or loc.get('revision')
-                if rev and 'revision' not in result:
-                    result['revision'] = rev
-
-                # Subfolder resolution
-                if 'subfolder' in loc and 'subfolder' not in result:
-                    sub_val = loc.get('subfolder')
-                    if sub_val and sub_val != '':
-                        result['subfolder'] = sub_val
-
-                # Directories
-                for dir_key in ('cache_dir', 'local_dir'):
-                    if dir_key in loc and dir_key not in result and loc[dir_key]:
-                        result[dir_key] = loc[dir_key]
-                    elif loc.get('kwargs') and dir_key in loc['kwargs'] and dir_key not in result and loc['kwargs'][dir_key]:
-                        result[dir_key] = loc['kwargs'][dir_key]
-
-        if result.get('repo_id') and result.get('filename'):
-            # Default fallbacks
-            result.setdefault('revision', 'main')
-            result.setdefault('repo_type', 'model')
-            
-            # Apply subfolder if found
-            if 'subfolder' in result:
-                result['filename'] = f"{result['subfolder']}/{result['filename']}"
-                
-            return result
-            
-    except (AttributeError, ValueError):
-        pass
-    return None
-
-
-def _extract_snapshot_context_from_stack() -> Optional[dict]:
-    """Walk the call stack to recover snapshot_download context."""
-    try:
-        frame = sys._getframe(1)
-        result = {}
-        for _ in range(60):
-            frame = frame.f_back
-            if frame is None:
-                break
-            if frame.f_code.co_name not in ('snapshot_download', '_inner_hf_hub_download'):
-                continue
-
-            loc = frame.f_locals
-            if 'repo_id' in loc and 'repo_id' not in result:
-                result['repo_id'] = loc.get('repo_id')
-
-            revision = loc.get('commit_hash') or loc.get('revision')
-            if revision and 'revision' not in result:
-                result['revision'] = revision
-
-            if 'repo_type' not in result:
-                result['repo_type'] = loc.get('repo_type') or 'model'
-
-            for dir_key in ('cache_dir', 'local_dir'):
-                if dir_key in loc and dir_key not in result and loc[dir_key]:
-                    result[dir_key] = loc[dir_key]
-                elif loc.get('kwargs') and dir_key in loc['kwargs'] and dir_key not in result and loc['kwargs'][dir_key]:
-                    result[dir_key] = loc['kwargs'][dir_key]
-
-            if result.get('repo_id') and result.get('revision'):
-                return result
-    except (AttributeError, ValueError):
-        pass
-    return None
-
-
-def _matches_snapshot_download_context(
-    *,
-    repo_id: str,
-    revision: str,
-    repo_type: str,
-    cache_dir: Optional[str] = None,
-    local_dir: Optional[str] = None,
-) -> bool:
-    """Return True when the current stack still belongs to this snapshot_download."""
-    snapshot_ctx = _extract_snapshot_context_from_stack()
-    if snapshot_ctx is None:
-        return False
-
-    if snapshot_ctx.get("repo_id") != repo_id:
-        return False
-    if (snapshot_ctx.get("repo_type") or "model") != (repo_type or "model"):
-        return False
-    if (snapshot_ctx.get("revision") or "main") != (revision or "main"):
-        return False
-
-    expected_local_dir = _normalize_storage_root(local_dir)
-    actual_local_dir = _normalize_storage_root(snapshot_ctx.get("local_dir"))
-    if expected_local_dir or actual_local_dir:
-        return expected_local_dir == actual_local_dir
-
-    expected_cache_dir = _normalize_storage_root(cache_dir)
-    actual_cache_dir = _normalize_storage_root(snapshot_ctx.get("cache_dir"))
-    if expected_cache_dir or actual_cache_dir:
-        return expected_cache_dir == actual_cache_dir
-
-    return True
+    return _patch_ui.wrap_snapshot_tqdm_class_auto(
+        base_tqdm_class,
+        progress_bar_name=_SNAPSHOT_PROGRESS_BAR_NAME,
+        extract_snapshot_context_from_stack_fn=_extract_snapshot_context_from_stack,
+        get_download_stats_fn=get_download_stats,
+        logger=logger,
+        update_interval=_SNAPSHOT_PROGRESS_UPDATE_INTERVAL,
+    )
 
 
 def _fire_deferred_notification(key: tuple[str, str, str, str, str]) -> None:
@@ -718,78 +336,20 @@ def _fire_deferred_notification(key: tuple[str, str, str, str, str]) -> None:
     If downloads are still in progress for this repo, the timer is
     rescheduled instead of firing immediately.
     """
-    with _deferred_lock:
-        ctx = _deferred_contexts.get(key)
-        if ctx is None:
-            _deferred_timers.pop(key, None)
-            return
-
-        # If downloads are still in-flight, reschedule and wait.
-        repo_id = ctx['repo_id']
-        if _active_download_counts.get(repo_id, 0) > 0:
-            old_timer = _deferred_timers.pop(key, None)
-            if old_timer is not None:
-                old_timer.cancel()
-            new_timer = threading.Timer(
-                2.0, _fire_deferred_notification, args=[key]
-            )
-            new_timer.daemon = True
-            new_timer.start()
-            _deferred_timers[key] = new_timer
-            return
-
-        # All downloads done — pop context and proceed.
-        _deferred_contexts.pop(key, None)
-        _deferred_timers.pop(key, None)
-
-    # Print verbose summary if enabled (import-order bypass fallback)
-    if _config.get('verbose'):
-        elapsed = time.time() - ctx.get('start_time', time.time())
-        _print_p2p_summary(
-            stats=get_download_stats(
-                repo_id=ctx['repo_id'],
-                revision=ctx['revision'],
-                repo_type=ctx['repo_type'],
-                cache_dir=ctx.get('cache_dir'),
-                local_dir=ctx.get('local_dir'),
-            ),
-            elapsed=elapsed,
-            repo_id=ctx['repo_id'],
-            resolved_revision=ctx['revision'],
-            repo_type=ctx['repo_type'],
-        )
-
-    try:
-        _notify_seed_daemon(
-            repo_id=ctx['repo_id'],
-            revision=ctx['revision'],
-            repo_type=ctx['repo_type'],
-            cache_dir=ctx.get('cache_dir'),
-            local_dir=ctx.get('local_dir'),
-            completed_snapshot=bool(ctx.get('completed_snapshot')),
-        )
-        logger.debug(
-            f"[P2P] Deferred daemon notification sent for "
-            f"{ctx['repo_id']}@{ctx['revision'][:8]}..."
-        )
-    except Exception as e:
-        logger.debug(f"[P2P] Deferred daemon notification failed: {e}")
-    finally:
-        _release_on_demand_session(
-            repo_id=ctx['repo_id'],
-            revision=ctx['revision'],
-            repo_type=ctx['repo_type'],
-            cache_dir=ctx.get('cache_dir'),
-            local_dir=ctx.get('local_dir'),
-            completed=True,
-        )
-        reset_download_stats(
-            repo_id=ctx['repo_id'],
-            revision=ctx['revision'],
-            repo_type=ctx['repo_type'],
-            cache_dir=ctx.get('cache_dir'),
-            local_dir=ctx.get('local_dir'),
-        )
+    _patch_runtime.fire_deferred_notification(
+        key,
+        deferred_lock=_deferred_lock,
+        deferred_contexts=_deferred_contexts,
+        deferred_timers=_deferred_timers,
+        active_download_counts=_active_download_counts,
+        config=_config,
+        get_download_stats_fn=get_download_stats,
+        reset_download_stats_fn=reset_download_stats,
+        print_p2p_summary_fn=_print_p2p_summary,
+        notify_seed_daemon_fn=_notify_seed_daemon,
+        release_on_demand_session_fn=_release_on_demand_session,
+        logger=logger,
+    )
 
 
 def _schedule_deferred_notification(
@@ -807,32 +367,19 @@ def _schedule_deferred_notification(
     This acts as a fallback for when _patched_snapshot_download is
     bypassed due to import-order issues.
     """
-    key = _deferred_key(repo_id, revision, repo_type, cache_dir, local_dir)
-    with _deferred_lock:
-        # Cancel any existing timer for this specific repo+revision.
-        timer = _deferred_timers.get(key)
-        if timer is not None:
-            timer.cancel()
-
-        # Preserve start_time from the first schedule (for elapsed calculation)
-        existing = _deferred_contexts.get(key)
-        _deferred_contexts[key] = {
-            'repo_id': repo_id,
-            'revision': revision,
-            'repo_type': repo_type,
-            'cache_dir': cache_dir,
-            'local_dir': local_dir,
-            'completed_snapshot': bool(
-                completed_snapshot or (existing or {}).get('completed_snapshot')
-            ),
-            'start_time': existing['start_time'] if existing else time.time(),
-        }
-        
-        # Start a new timer
-        new_timer = threading.Timer(2.0, _fire_deferred_notification, args=[key])
-        new_timer.daemon = True
-        new_timer.start()
-        _deferred_timers[key] = new_timer
+    _patch_runtime.schedule_deferred_notification(
+        repo_id,
+        revision,
+        repo_type,
+        cache_dir=cache_dir,
+        local_dir=local_dir,
+        completed_snapshot=completed_snapshot,
+        deferred_lock=_deferred_lock,
+        deferred_contexts=_deferred_contexts,
+        deferred_timers=_deferred_timers,
+        deferred_key_fn=_deferred_key,
+        fire_deferred_notification_fn=_fire_deferred_notification,
+    )
 
 
 def _release_on_demand_session(
@@ -845,31 +392,15 @@ def _release_on_demand_session(
     completed: bool = False,
 ) -> None:
     """Release the client-side on-demand session after handoff completes."""
-    try:
-        from .p2p_batch import P2PBatchManager
-
-        manager = P2PBatchManager._instance
-        if manager is None:
-            return
-
-        released = manager.release_on_demand_session(
-            repo_id=repo_id,
-            revision=revision,
-            repo_type=repo_type,
-            cache_dir=cache_dir,
-            local_dir=local_dir,
-            completed=completed,
-        )
-        if released:
-            logger.debug(
-                f"[P2P] Released on-demand session for "
-                f"{repo_id}@{revision[:8]}..."
-            )
-    except Exception as e:
-        logger.debug(
-            f"[P2P] Failed to release on-demand session for "
-            f"{repo_id}@{revision[:8]}...: {e}"
-        )
+    _patch_runtime.release_on_demand_session(
+        repo_id=repo_id,
+        revision=revision,
+        repo_type=repo_type,
+        cache_dir=cache_dir,
+        local_dir=local_dir,
+        completed=completed,
+        logger=logger,
+    )
 
 
 def _notify_seed_daemon(
@@ -881,20 +412,14 @@ def _notify_seed_daemon(
     local_dir: Optional[str] = None,
     completed_snapshot: bool = False,
 ) -> None:
-    from .ipc import notify_daemon
-
-    notify_kwargs: dict[str, Any] = {
-        "repo_id": repo_id,
-        "revision": revision,
-        "repo_type": repo_type,
-    }
-    if cache_dir is not None:
-        notify_kwargs["cache_dir"] = cache_dir
-    if local_dir is not None:
-        notify_kwargs["local_dir"] = local_dir
-    if completed_snapshot:
-        notify_kwargs["completed_snapshot"] = True
-    notify_daemon("seed", **notify_kwargs)
+    _patch_runtime.notify_seed_daemon(
+        repo_id=repo_id,
+        revision=revision,
+        repo_type=repo_type,
+        cache_dir=cache_dir,
+        local_dir=local_dir,
+        completed_snapshot=completed_snapshot,
+    )
 
 
 def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
@@ -931,24 +456,20 @@ def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
         actual_filename = f"{subfolder}/{filename}"
 
     # Backup previous context (in case of nested/recursive hf_hub_download calls)
-    prev_repo_id = getattr(_context, 'repo_id', None)
-    prev_repo_type = getattr(_context, 'repo_type', None)
-    prev_filename = getattr(_context, 'filename', None)
-    prev_revision = getattr(_context, 'revision', None)
-    prev_tracker = getattr(_context, 'tracker', None)
-    prev_config = getattr(_context, 'config', None)
-    prev_cache_dir = getattr(_context, 'cache_dir', None)
-    prev_local_dir = getattr(_context, 'local_dir', None)
+    prev_context = capture_thread_local_context(_context)
 
     # Store context for http_get to use
-    _context.repo_id = repo_id
-    _context.repo_type = repo_type
-    _context.filename = actual_filename
-    _context.revision = revision
-    _context.tracker = tracker
-    _context.config = _config
-    _context.cache_dir = cache_dir
-    _context.local_dir = local_dir
+    apply_thread_local_context(
+        _context,
+        repo_id=repo_id,
+        repo_type=repo_type,
+        filename=actual_filename,
+        revision=revision,
+        tracker=tracker,
+        config=_config,
+        cache_dir=cache_dir,
+        local_dir=local_dir,
+    )
 
     download_succeeded = False
     try:
@@ -963,14 +484,7 @@ def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
         return result
     finally:
         # Restore previous context instead of clearing it (supports recursion)
-        _context.repo_id = prev_repo_id
-        _context.repo_type = prev_repo_type
-        _context.filename = prev_filename
-        _context.revision = prev_revision
-        _context.tracker = prev_tracker
-        _context.config = prev_config
-        _context.cache_dir = prev_cache_dir
-        _context.local_dir = prev_local_dir
+        restore_thread_local_context(_context, prev_context)
 
         # Decrement active download counter.
         with _deferred_lock:
@@ -995,13 +509,17 @@ def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
                     local_dir=local_dir,
                 )
                 try:
+                    notify_kwargs = {
+                        'repo_id': repo_id,
+                        'revision': revision,
+                        'repo_type': repo_type,
+                        'cache_dir': cache_dir,
+                        'local_dir': local_dir,
+                    }
+                    if completed_snapshot:
+                        notify_kwargs['completed_snapshot'] = True
                     _notify_seed_daemon(
-                        repo_id=repo_id,
-                        revision=revision,
-                        repo_type=repo_type,
-                        cache_dir=cache_dir,
-                        local_dir=local_dir,
-                        completed_snapshot=completed_snapshot,
+                        **notify_kwargs,
                     )
                 except Exception as e:
                     logger.debug(f"[P2P] Immediate daemon notification failed: {e}")
@@ -1018,14 +536,15 @@ def _patched_hf_hub_download(repo_id: str, filename: str, **kwargs):
 def _patched_http_get(url: str, temp_file, **kwargs):
     """Patched version of http_get that uses P2P batch manager when available."""
     # Check if we have P2P context (injected by patched hf_hub_download)
-    repo_id = getattr(_context, 'repo_id', None)
-    repo_type = getattr(_context, 'repo_type', None) or 'model'
-    filename = getattr(_context, 'filename', None)
-    revision = getattr(_context, 'revision', None)
-    tracker = getattr(_context, 'tracker', None)
-    config = getattr(_context, 'config', {})
-    cache_dir = getattr(_context, 'cache_dir', None)
-    local_dir = getattr(_context, 'local_dir', None)
+    current_context = read_thread_local_context(_context)
+    repo_id = current_context.get('repo_id') if current_context else None
+    repo_type = current_context.get('repo_type', 'model') if current_context else 'model'
+    filename = current_context.get('filename') if current_context else None
+    revision = current_context.get('revision') if current_context else None
+    tracker = current_context.get('tracker') if current_context else None
+    config = current_context.get('config', {}) if current_context else {}
+    cache_dir = current_context.get('cache_dir') if current_context else None
+    local_dir = current_context.get('local_dir') if current_context else None
     schedule_deferred = False
     deferred_completed_snapshot = False
     stats_key = None
@@ -1067,37 +586,24 @@ def _patched_http_get(url: str, temp_file, **kwargs):
 
     if repo_id and filename and tracker and revision:
         try:
-            from .p2p_batch import P2PBatchManager
+            from .transfer_coordinator import TransferCoordinator
             logger.info(f"[P2P] Intercepted HTTP request for {repo_id}/{filename} (rev: {revision})")
 
-            manager = P2PBatchManager()
+            coordinator = TransferCoordinator()
+            transfer = coordinator.fulfill_request(
+                repo_id=repo_id,
+                revision=revision,
+                filename=filename,
+                destination=temp_file.name,
+                tracker_client=tracker,
+                repo_type=repo_type,
+                cache_dir=cache_dir,
+                local_dir=local_dir,
+                config=config,
+                tqdm_class=kwargs.get("tqdm_class"),
+            )
 
-            # With WebSeed enabled, download speed >= HTTP (WebSeed is a
-            # guaranteed fallback source inside libtorrent). A fixed timeout
-            # would only cause unnecessary HTTP fallbacks, so we disable it.
-            # Without WebSeed (pure P2P), the timeout acts as a safety net.
-            if config.get('webseed_proxy_port'):
-                effective_timeout = 0  # 0 = no timeout
-            else:
-                effective_timeout = config.get('timeout', 300)
-
-            register_kwargs = {
-                "repo_id": repo_id,
-                "revision": revision,
-                "filename": filename,
-                "temp_file_path": temp_file.name,
-                "tracker_client": tracker,
-                "timeout": effective_timeout,
-                "repo_type": repo_type,
-                "tqdm_class": kwargs.get("tqdm_class"),
-            }
-            if cache_dir is not None:
-                register_kwargs["cache_dir"] = cache_dir
-            if local_dir is not None:
-                register_kwargs["local_dir"] = local_dir
-            success = manager.register_request(**register_kwargs)
-
-            if success:
+            if transfer.success:
                 logger.info(f"[P2P] Successfully delivered {filename} via P2P.")
                 if stats_key is not None:
                     _record_download_stat(stats_key, 'p2p', filename)
@@ -1138,17 +644,7 @@ def _patched_http_get(url: str, temp_file, **kwargs):
 
 def _format_bytes(n: int) -> str:
     """Format byte count to human-readable string."""
-    try:
-        from tqdm import tqdm as _tqdm
-        formatted = _tqdm.format_sizeof(float(n), divisor=1000)
-    except Exception:
-        formatted = f"{n}B"
-
-    if formatted == "0.00":
-        return "0 B"
-    if formatted.endswith("B"):
-        return formatted
-    return f"{formatted}B"
+    return _patch_ui.format_bytes(n)
 
 
 def _print_p2p_summary(
@@ -1162,70 +658,13 @@ def _print_p2p_summary(
 
     Only called when config['verbose'] is True.
     """
-    p2p_files = stats.get('p2p', set())
-    http_files = stats.get('http', set())
-    total_files = len(p2p_files) + len(http_files)
-
-    if total_files == 0:
-        return
-
-    # Collect byte-level stats from the P2P session
-    try:
-        from .p2p_batch import P2PBatchManager
-        manager = P2PBatchManager()
-        session_stats = manager.get_repo_p2p_stats(
-            repo_id, resolved_revision, repo_type
-        )
-    except Exception:
-        session_stats = {}
-
-    sep = '-' * 56
-    lines = [
-        '',
-        sep,
-        f'  P2P Download Summary: {repo_id}',
-        sep,
-        f'  Files:     {len(p2p_files)}/{total_files} via P2P, '
-        f'{len(http_files)}/{total_files} via HTTP fallback',
-        f'  Time:      {elapsed:.1f}s',
-    ]
-
-    peer_bytes = session_stats.get('peer_download', 0)
-    webseed_bytes = session_stats.get('webseed_download', 0)
-    total_bytes = peer_bytes + webseed_bytes
-
-    if total_bytes > 0:
-        lines.append('')
-        lines.append('  Data Sources:')
-        if peer_bytes > 0:
-            ratio = peer_bytes / total_bytes * 100
-            lines.append(
-                f'    From P2P peers:  {_format_bytes(peer_bytes)} ({ratio:.1f}%)'
-            )
-        if webseed_bytes > 0:
-            ratio = webseed_bytes / total_bytes * 100
-            lines.append(
-                f'    From WebSeed:    {_format_bytes(webseed_bytes)} ({ratio:.1f}%)'
-            )
-        if peer_bytes > 0:
-            lines.append('')
-            lines.append(
-                f'  Bandwidth saved: {_format_bytes(peer_bytes)} from server'
-            )
-
-    max_peers = session_stats.get('max_p2p_peers', 0)
-    if max_peers > 0:
-        lines.append(f'  Peak peers: {max_peers}')
-
-    lines.append(sep)
-    lines.append('')
-
-    output = '\n'.join(lines)
-    try:
-        from tqdm import tqdm as _tqdm
-        _tqdm.write(output)
-    except ImportError:
-        print(output)
+    _patch_ui.print_p2p_summary(
+        stats=stats,
+        elapsed=elapsed,
+        repo_id=repo_id,
+        resolved_revision=resolved_revision,
+        repo_type=repo_type,
+    )
 
 
 def _patched_snapshot_download(*args, **kwargs):

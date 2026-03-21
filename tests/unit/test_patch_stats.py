@@ -26,6 +26,7 @@ from llmpt.patch import (
     _patched_hf_hub_download,
     _patched_snapshot_download,
 )
+from llmpt.transfer_types import TransferResult
 
 
 @pytest.fixture(autouse=True)
@@ -147,8 +148,12 @@ class TestPatchedHttpGetP2PSuccess:
         mock_original = MagicMock()
         patch_module._original_http_get = mock_original
 
-        mock_manager = MagicMock()
-        mock_manager.register_request.return_value = True
+        mock_coordinator = MagicMock()
+        mock_coordinator.fulfill_request.return_value = TransferResult(
+            success=True,
+            delivered_path="/tmp/fake",
+            via="p2p",
+        )
 
         patch_module._context.repo_id = "test/repo"
         patch_module._context.filename = "model.bin"
@@ -159,9 +164,7 @@ class TestPatchedHttpGetP2PSuccess:
         temp_file = MagicMock()
         temp_file.name = "/tmp/fake"
 
-        # Must patch where P2PBatchManager is defined, since _patched_http_get
-        # does `from .p2p_batch import P2PBatchManager` (lazy import)
-        with patch('llmpt.p2p_batch.P2PBatchManager', return_value=mock_manager):
+        with patch('llmpt.transfer_coordinator.TransferCoordinator', return_value=mock_coordinator):
             _patched_http_get("http://example.com/model.bin", temp_file=temp_file)
 
         # Original http_get should NOT be called
@@ -182,8 +185,11 @@ class TestPatchedHttpGetP2PFailure:
         mock_original = MagicMock()
         patch_module._original_http_get = mock_original
 
-        mock_manager = MagicMock()
-        mock_manager.register_request.return_value = False
+        mock_coordinator = MagicMock()
+        mock_coordinator.fulfill_request.return_value = TransferResult(
+            success=False,
+            via="fallback",
+        )
 
         patch_module._context.repo_id = "test/repo"
         patch_module._context.filename = "model.bin"
@@ -194,7 +200,7 @@ class TestPatchedHttpGetP2PFailure:
         temp_file = MagicMock()
         temp_file.name = "/tmp/fake"
 
-        with patch('llmpt.patch.P2PBatchManager', return_value=mock_manager, create=True):
+        with patch('llmpt.transfer_coordinator.TransferCoordinator', return_value=mock_coordinator):
             _patched_http_get("http://example.com/model.bin", temp_file=temp_file)
 
         temp_file.seek.assert_not_called()
@@ -222,7 +228,7 @@ class TestPatchedHttpGetP2PFailure:
         temp_file = MagicMock()
         temp_file.name = "/tmp/fake"
 
-        with patch('llmpt.patch.P2PBatchManager', side_effect=RuntimeError("boom"), create=True):
+        with patch('llmpt.transfer_coordinator.TransferCoordinator', side_effect=RuntimeError("boom")):
             _patched_http_get("http://example.com/model.bin", temp_file=temp_file)
 
         mock_original.assert_called_once()

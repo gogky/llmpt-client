@@ -6,6 +6,7 @@ HuggingFace Hub 模型/数据集的 P2P 加速下载客户端。
 
 - **无缝集成**：只需一行代码即可为 HuggingFace 下载启用 P2P 加速。
 - **P2P 加速**：通过 BitTorrent 从其他用户处高速下载模型和数据集
+- **旧 swarm 单文件复用**：当目标 revision 的 swarm 对某个文件没有可用 seeder 时，客户端会基于 torrent v2 的 `file_root + size` 在同一仓库的旧 revision 中寻找内容完全相同的文件，并回退到对应旧 swarm 下载该文件
 - **WebSeed**：无 P2P peer 时自动从 HuggingFace CDN 获取数据，实现冷启动
 - **自动降级**：P2P 失败时自动回退到标准 HTTP 下载
 - **自动做种**：下载完成后自动创建 torrent 并持续做种，回馈社区

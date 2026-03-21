@@ -11,7 +11,6 @@ import shutil
 import threading
 import time
 import logging
-import hashlib
 from collections import deque
 from typing import TYPE_CHECKING, Dict, Optional
 
@@ -19,8 +18,14 @@ if TYPE_CHECKING:
     from .tracker_client import TrackerClient
 
 from .monitor import run_monitor_loop
+from .session_identity import (
+    build_fastresume_filename as _session_identity_build_fastresume_filename,
+    build_torrent_source_ref,
+    normalize_storage_root,
+)
+from .transfer_types import TorrentSourceRef
 
-from .utils import lt, LIBTORRENT_AVAILABLE, strip_torrent_root, get_hf_hub_cache
+from .utils import lt, LIBTORRENT_AVAILABLE, strip_torrent_root
 
 logger = logging.getLogger(__name__)
 
@@ -57,13 +62,6 @@ def _format_live_transfer_postfix(stats: Optional[dict]) -> str:
         return "webseed"
     return ""
 
-
-def _normalize_storage_root(path: Optional[str]) -> Optional[str]:
-    if not path:
-        return None
-    return os.path.realpath(os.path.abspath(os.path.expanduser(path)))
-
-
 def _build_fastresume_filename(
     repo_id: str,
     revision: str,
@@ -73,30 +71,20 @@ def _build_fastresume_filename(
     cache_dir: Optional[str] = None,
     local_dir: Optional[str] = None,
 ) -> str:
-    if local_dir:
-        storage_kind = "local_dir"
-        storage_root = _normalize_storage_root(local_dir)
-    elif cache_dir:
-        storage_kind = "hub_cache"
-        storage_root = _normalize_storage_root(cache_dir)
-    else:
-        storage_kind = "hub_cache"
-        storage_root = get_hf_hub_cache()
-    identity = "|".join(
-        [
-            repo_type or "model",
-            repo_id,
-            revision,
-            session_mode,
-            storage_kind,
-            storage_root,
-        ]
+    """Backward-compatible wrapper around the shared identity helper."""
+    return _session_identity_build_fastresume_filename(
+        repo_id,
+        revision,
+        repo_type=repo_type,
+        session_mode=session_mode,
+        cache_dir=cache_dir,
+        local_dir=local_dir,
     )
-    repo_slug = hashlib.sha1(repo_id.encode("utf-8")).hexdigest()[:8]
-    identity_digest = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:16]
-    return (
-        f"{repo_type}_{repo_slug}_{revision}_{session_mode}_{identity_digest}.fastresume"
-    )
+
+
+def _normalize_storage_root(path: Optional[str]) -> Optional[str]:
+    """Backward-compatible wrapper around the shared identity helper."""
+    return normalize_storage_root(path)
 
 
 class SessionContext:
@@ -129,6 +117,15 @@ class SessionContext:
         self.torrent_data = torrent_data
         self.cache_dir = cache_dir
         self.local_dir = local_dir
+        self.source_ref: TorrentSourceRef = build_torrent_source_ref(
+            repo_type,
+            repo_id,
+            revision,
+            cache_dir=cache_dir,
+            local_dir=local_dir,
+        )
+        self.logical_ref = self.source_ref.logical
+        self.storage_identity = self.source_ref.storage
         
         self.handle = None
         self.is_valid = True

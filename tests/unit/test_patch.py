@@ -64,18 +64,23 @@ def test_p2p_interception_flow():
 
     We apply a real patch (so http_get is replaced), then manually set up
     the ThreadLocal context and call the patched http_get directly to verify
-    that P2PBatchManager.register_request is invoked with the correct args.
+    that the transfer coordinator is invoked with the correct args.
     """
     config = {'tracker_url': 'http://test', 'timeout': 300}
     apply_patch(config)
 
     import llmpt.patch as patch_module
+    from llmpt.transfer_types import TransferResult
 
     mock_tracker_client = MagicMock()
-    mock_batch_manager = MagicMock()
-    mock_batch_manager.register_request.return_value = True
+    mock_coordinator = MagicMock()
+    mock_coordinator.fulfill_request.return_value = TransferResult(
+        success=True,
+        delivered_path="/tmp/fake",
+        via="p2p",
+    )
 
-    with patch('llmpt.p2p_batch.P2PBatchManager', return_value=mock_batch_manager):
+    with patch('llmpt.transfer_coordinator.TransferCoordinator', return_value=mock_coordinator):
 
         # Manually set ThreadLocal context (normally done by patched_hf_hub_download)
         patch_module._context.repo_id = "demo/repo"
@@ -92,14 +97,16 @@ def test_p2p_interception_flow():
             patched_http_get("http://dummy_url", temp_file=temp_mock)
 
             # Check that the intercept happened
-            mock_batch_manager.register_request.assert_called_once_with(
+            mock_coordinator.fulfill_request.assert_called_once_with(
                 repo_id="demo/repo",
                 revision="main",
                 filename="model.bin",
-                temp_file_path="/tmp/fake",
+                destination="/tmp/fake",
                 tracker_client=mock_tracker_client,
-                timeout=300,
                 repo_type="model",
+                cache_dir=None,
+                local_dir=None,
+                config=config,
                 tqdm_class=None,
             )
         finally:

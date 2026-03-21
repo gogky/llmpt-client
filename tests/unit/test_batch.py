@@ -9,6 +9,26 @@ Uses shared fixtures from conftest.py:
 import threading
 import pytest
 from unittest.mock import patch, MagicMock
+from typing import Optional
+
+
+def _session_key(
+    repo_id: str = "demo",
+    revision: str = "main",
+    *,
+    repo_type: str = "model",
+    cache_dir: Optional[str] = None,
+    local_dir: Optional[str] = None,
+):
+    from llmpt.session_identity import build_source_session_key
+
+    return build_source_session_key(
+        repo_type,
+        repo_id,
+        revision,
+        cache_dir=cache_dir,
+        local_dir=local_dir,
+    )
 
 
 def test_batch_manager_init(mock_lt_all_modules):
@@ -49,7 +69,6 @@ def test_register_request_success(mock_lt_all_modules):
     """Test successfully registering a request and creating a session context."""
     from llmpt.p2p_batch import P2PBatchManager
     from llmpt.p2p_batch import SessionContext
-    from llmpt.utils import get_hf_hub_cache
 
     tracker = MagicMock()
     tracker.download_torrent.return_value = b'fake_torrent_bytes'
@@ -70,8 +89,53 @@ def test_register_request_success(mock_lt_all_modules):
 
         assert success is True
         mock_download.assert_called_once_with("model.bin", "/tmp/fake", tqdm_class=None)
-        assert ("model", "demo", "main", "hub_cache", get_hf_hub_cache()) in manager.sessions
+        assert _session_key() in manager.sessions
         mock_pump.assert_called_once()
+
+
+def test_execute_transfer_uses_source_filename_when_it_differs_from_target(mock_lt_all_modules):
+    from llmpt.p2p_batch import P2PBatchManager
+    from llmpt.p2p_batch import SessionContext
+    from llmpt.transfer_types import (
+        LogicalTorrentRef,
+        SourceFileCandidate,
+        StorageIdentity,
+        TargetFileRequest,
+        TorrentSourceRef,
+        TransferPlan,
+    )
+
+    tracker = MagicMock()
+    manager = P2PBatchManager()
+
+    target = TargetFileRequest(
+        logical=LogicalTorrentRef(repo_type="model", repo_id="demo", revision="main"),
+        filename="new/model.bin",
+        destination="/tmp/fake",
+        storage=StorageIdentity(kind="hub_cache", root="/tmp/cache"),
+    )
+    plan = TransferPlan(
+        target=target,
+        source_file=SourceFileCandidate(
+            source=TorrentSourceRef(
+                logical=LogicalTorrentRef(repo_type="model", repo_id="demo", revision="oldrev"),
+                storage=target.storage,
+            ),
+            filename="old/model.bin",
+        ),
+    )
+
+    with patch.object(SessionContext, 'download_file', return_value=True) as mock_download, \
+         patch.object(manager, '_ensure_alert_pump_running') as mock_pump:
+        success = manager.execute_transfer(
+            plan,
+            tracker_client=tracker,
+        )
+
+    assert success is True
+    mock_download.assert_called_once_with("old/model.bin", "/tmp/fake", tqdm_class=None)
+    assert _session_key(revision="oldrev", cache_dir="/tmp/cache") in manager.sessions
+    mock_pump.assert_called_once()
 
 
 def test_session_context_init_torrent(mock_lt_all_modules):
@@ -125,11 +189,10 @@ def test_session_context_init_torrent(mock_lt_all_modules):
 
 def test_release_on_demand_session_completed_purges_state(mock_lt_all_modules):
     from llmpt.p2p_batch import P2PBatchManager
-    from llmpt.utils import get_hf_hub_cache
 
     manager = P2PBatchManager()
     ctx = MagicMock(session_mode='on_demand', worker_thread=None)
-    key = ("model", "demo", "main", "hub_cache", get_hf_hub_cache())
+    key = _session_key()
     manager.sessions[key] = ctx
 
     with patch.object(manager, '_checkpoint_on_demand_session') as mock_checkpoint, \
@@ -152,7 +215,7 @@ def test_register_seeding_task_reuses_existing_logical_session(mock_lt_all_modul
     existing_ctx.handle.is_valid.return_value = True
     existing_ctx.is_valid = True
     manager.sessions = {
-        ("model", "demo", "main", "hub_cache", "/tmp/cache-a"): existing_ctx,
+        _session_key(cache_dir="/tmp/cache-a"): existing_ctx,
     }
 
     with patch.object(manager, '_ensure_alert_pump_running') as mock_pump:
@@ -167,18 +230,17 @@ def test_register_seeding_task_reuses_existing_logical_session(mock_lt_all_modul
 
     assert success is True
     assert set(manager.sessions) == {
-        ("model", "demo", "main", "hub_cache", "/tmp/cache-a"),
+        _session_key(cache_dir="/tmp/cache-a"),
     }
     mock_pump.assert_called_once()
 
 
 def test_release_on_demand_session_incomplete_preserves_state(mock_lt_all_modules):
     from llmpt.p2p_batch import P2PBatchManager
-    from llmpt.utils import get_hf_hub_cache
 
     manager = P2PBatchManager()
     ctx = MagicMock(session_mode='on_demand', worker_thread=None)
-    key = ("model", "demo", "main", "hub_cache", get_hf_hub_cache())
+    key = _session_key()
     manager.sessions[key] = ctx
 
     with patch.object(manager, '_checkpoint_on_demand_session') as mock_checkpoint, \
@@ -197,8 +259,8 @@ def test_remove_all_sessions_preserves_on_demand_partials(mock_lt_all_modules):
     on_demand = MagicMock(session_mode='on_demand', worker_thread=None)
     full_seed = MagicMock(session_mode='full_seed', worker_thread=None)
     manager.sessions = {
-        ("model", "demo", "main", "hub_cache", "/tmp/a"): on_demand,
-        ("model", "demo", "rev2", "hub_cache", "/tmp/b"): full_seed,
+        _session_key(cache_dir="/tmp/a"): on_demand,
+        _session_key(revision="rev2", cache_dir="/tmp/b"): full_seed,
     }
 
     with patch.object(manager, '_checkpoint_on_demand_session') as mock_checkpoint, \
@@ -243,7 +305,7 @@ def test_alert_pump_loop_dispatches_alerts(mock_lt_all_modules):
     from llmpt.p2p_batch import P2PBatchManager
 
     manager = P2PBatchManager()
-    manager.sessions = {('model', 'demo', 'main', 'hub_cache', '/tmp/cache'): MagicMock()}
+    manager.sessions = {_session_key(cache_dir="/tmp/cache"): MagicMock()}
     manager.lt_session.wait_for_alert = MagicMock()
 
     stop_event = threading.Event()

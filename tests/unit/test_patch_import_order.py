@@ -23,6 +23,7 @@ from unittest.mock import MagicMock, patch as mock_patch
 import time
 
 from llmpt.patch import apply_patch, remove_patch
+from llmpt.transfer_types import TransferResult
 
 
 @pytest.fixture(autouse=True)
@@ -651,10 +652,13 @@ class TestStackFrameInspection:
                         mock_file.name = '/tmp/fake'
                         
                         # Mock the actual HTTP fetch or P2P bypass so it doesn't try to download
-                        with mock_patch('llmpt.p2p_batch.P2PBatchManager') as mock_manager_cls:
-                            mock_manager = MagicMock()
-                            mock_manager.register_request.return_value = False
-                            mock_manager_cls.return_value = mock_manager
+                        with mock_patch('llmpt.transfer_coordinator.TransferCoordinator') as mock_coordinator_cls:
+                            mock_coordinator = MagicMock()
+                            mock_coordinator.fulfill_request.return_value = TransferResult(
+                                success=False,
+                                via="fallback",
+                            )
+                            mock_coordinator_cls.return_value = mock_coordinator
                             # Also mock original_http_get to do nothing
                             with mock_patch.object(patch_mod, '_original_http_get', return_value=None):
                                 patch_mod._patched_http_get('http://fake', mock_file)
@@ -696,10 +700,13 @@ class TestStackFrameInspection:
                         mock_file = MagicMock()
                         mock_file.name = '/tmp/fake'
 
-                        with mock_patch('llmpt.p2p_batch.P2PBatchManager') as mock_manager_cls:
-                            mock_manager = MagicMock()
-                            mock_manager.register_request.return_value = False
-                            mock_manager_cls.return_value = mock_manager
+                        with mock_patch('llmpt.transfer_coordinator.TransferCoordinator') as mock_coordinator_cls:
+                            mock_coordinator = MagicMock()
+                            mock_coordinator.fulfill_request.return_value = TransferResult(
+                                success=False,
+                                via="fallback",
+                            )
+                            mock_coordinator_cls.return_value = mock_coordinator
 
                             with mock_patch.object(
                                 patch_mod,
@@ -739,10 +746,13 @@ class TestStackFrameInspection:
                             mock_file = MagicMock()
                             mock_file.name = '/tmp/fake'
 
-                            with mock_patch('llmpt.p2p_batch.P2PBatchManager') as mock_manager_cls:
-                                mock_manager = MagicMock()
-                                mock_manager.register_request.return_value = False
-                                mock_manager_cls.return_value = mock_manager
+                            with mock_patch('llmpt.transfer_coordinator.TransferCoordinator') as mock_coordinator_cls:
+                                mock_coordinator = MagicMock()
+                                mock_coordinator.fulfill_request.return_value = TransferResult(
+                                    success=False,
+                                    via="fallback",
+                                )
+                                mock_coordinator_cls.return_value = mock_coordinator
                                 with mock_patch.object(patch_mod, '_original_http_get', return_value=None):
                                     patch_mod._patched_http_get('http://fake', mock_file)
 
@@ -785,10 +795,13 @@ class TestStackFrameInspection:
                             mock_file = MagicMock()
                             mock_file.name = '/tmp/fake'
 
-                            with mock_patch('llmpt.p2p_batch.P2PBatchManager') as mock_manager_cls:
-                                mock_manager = MagicMock()
-                                mock_manager.register_request.return_value = False
-                                mock_manager_cls.return_value = mock_manager
+                            with mock_patch('llmpt.transfer_coordinator.TransferCoordinator') as mock_coordinator_cls:
+                                mock_coordinator = MagicMock()
+                                mock_coordinator.fulfill_request.return_value = TransferResult(
+                                    success=False,
+                                    via="fallback",
+                                )
+                                mock_coordinator_cls.return_value = mock_coordinator
                                 with mock_patch.object(patch_mod, '_original_http_get', return_value=None):
                                     patch_mod._patched_http_get('http://fake', mock_file)
 
